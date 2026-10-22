@@ -117,15 +117,22 @@ Mac. See `the project documentation` and
 ## Release
 
 ```sh
-# Local, ad-hoc, no notarization:
-ALLOW_ADHOC_RELEASE=1 CODESIGN_IDENTITY=- ./scripts/release.sh
+# Real release: read the notary credentials from ../.env, store the
+# keychain profile, then build, notarize, staple and verify.
+./scripts/release.sh
 
-# Real release (a Developer ID, a notarytool Keychain profile and the
-# GitHub account that hosts the release):
-CODESIGN_IDENTITY="Developer ID Application: …" \
-NOTARY_PROFILE="…" REPO_OWNER="…" ./scripts/release.sh
+# Check the credentials and the profile only; nothing is built:
+./scripts/release.sh --profile-only
+
+# Local ad-hoc DMG, no notarization:
+./scripts/release.sh --adhoc
 ```
 
-The cask template is `scripts/distribution/tsundoku.rb.in`; `REPO_OWNER`
-fills the download URL and homepage, so the generated cask cannot ship with a
-literal placeholder.
+`scripts/release.sh` reads `APPLE_ID`, `APP_SPECIFIC_PASSWORD` (or
+`APPLE_PASSWORD`), `TEAM_ID` and `REPO_OWNER` (or `GITHUB_OWNER`) from the
+workspace `.env`, prints names and never values, and stores the profile as
+`tsundoku-notary` unless `--profile` names another. `scripts/release-build.sh`
+is the raw pipeline behind it. The cask template is
+`scripts/distribution/tsundoku.rb.in`; `REPO_OWNER` fills the download URL and
+homepage, so the generated cask cannot ship with a literal placeholder. The
+pipeline publishes nothing: the disk image path and its sha256 are printed.
