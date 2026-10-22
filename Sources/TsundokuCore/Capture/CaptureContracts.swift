@@ -134,13 +134,16 @@ public struct PageSnapshot: Sendable {
     /// The engine records it as the layout signature; a reflow that moves the
     /// text column invalidates the run.
     public let textFrame: CGRect?
+    /// True when one capture shows two facing book pages.
+    public let spread: Bool
 
     public init(
         identity: ObservedIdentity, image: CGImage, text: String?,
         textSource: ReaderTextSource?, pageNumber: Int?,
         pageCount: Int?, location: PageLocation?, isEndOfBook: Bool,
         cropRect: CGRect, pixelSize: CGSize, mark: PageMark,
-        calibration: PageFrameCalibration? = nil, textFrame: CGRect? = nil
+        calibration: PageFrameCalibration? = nil, textFrame: CGRect? = nil,
+        spread: Bool = false
     ) {
         self.identity = identity
         self.image = image
@@ -155,6 +158,7 @@ public struct PageSnapshot: Sendable {
         self.mark = mark
         self.calibration = calibration
         self.textFrame = textFrame
+        self.spread = spread
     }
 }
 

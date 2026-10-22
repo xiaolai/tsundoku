@@ -9,6 +9,10 @@ struct TsundokuCLI {
             usage()
             exit(2)
         }
+        if command == "--help" || command == "-h" {
+            usage()
+            exit(0)
+        }
         switch command {
         case "inspect":
             inspect()
@@ -32,6 +36,14 @@ struct TsundokuCLI {
             importContainer(Array(arguments.dropFirst()))
         case "applebooks":
             appleBooks(Array(arguments.dropFirst()))
+        case "books-asset":
+            booksAsset(Array(arguments.dropFirst()))
+        case "cover":
+            cover(Array(arguments.dropFirst()))
+        case "original":
+            original(Array(arguments.dropFirst()))
+        case "books-probe":
+            BooksProbe.run(Array(arguments.dropFirst()))
         default:
             usage()
             exit(2)
@@ -146,7 +158,30 @@ struct TsundokuCLI {
     private static func capture(_ arguments: [String]) {
         do {
             let archive = try Archive.standard()
-            let book: Book? = nil
+            let asin = value("--asin", in: arguments)
+            let source = sourceValue(arguments)
+            let kind: ReaderKind =
+                source == .appleBooks ? .appleBooks : .kindle
+            let book: Book?
+            if let asin {
+                // An identifier the archive does not know cannot verify what
+                // the reader is showing; resolving its cover or original
+                // would attach another book's metadata to this capture.
+                guard
+                    let matched = BookLookup.book(
+                        asin: asin, source: source,
+                        in: try archive.books())
+                else {
+                    print(
+                        "error: no \(source.displayName) book with ASIN "
+                            + "\(asin) in the archive; import it first or "
+                            + "capture without --asin")
+                    exit(1)
+                }
+                book = matched
+            } else {
+                book = nil
+            }
             let pages = Int(value("--pages", in: arguments) ?? "5") ?? 5
             let outputPath =
                 value("--out", in: arguments)
@@ -162,7 +197,9 @@ struct TsundokuCLI {
                 ? .a4 : .asDisplayed
             let setup = PageSetupRequest(
                 pageSize: pageSize,
-                font: Int(value("--font-size", in: arguments) ?? ""))
+                font: Int(value("--font-size", in: arguments) ?? ""),
+                booksFontSteps: Int(
+                    value("--text-size", in: arguments) ?? "") ?? 0)
             let flag = CancellationFlag()
             signal(SIGINT, SIG_IGN)
             signal(SIGTERM, SIG_IGN)
@@ -179,8 +216,13 @@ struct TsundokuCLI {
                 terminate.cancel()
             }
             let engine = CaptureEngine(archive: archive)
+            let bundleOptions = CaptureBundleOptions(
+                includeCoverPage: !arguments.contains("--no-cover"),
+                writeSidecars: !arguments.contains("--no-sidecars"),
+                copyOriginal: arguments.contains("--copy-original"),
+                pageSize: pageSize.points)
             let result = try engine.capture(
-                book: book, pageLimit: pages, output: output,
+                book: book, kind: kind, pageLimit: pages, output: output,
                 progress: { progress in
                     print(
                         "page \(progress.page)"
@@ -192,7 +234,8 @@ struct TsundokuCLI {
                 isCancelled: { flag.isSet },
                 cleanPage: arguments.contains("--clean-page")
                     ? .hidePopularHighlights : .asDisplayed,
-                pageSetup: setup)
+                pageSetup: setup,
+                bundle: CaptureBundleRequest(options: bundleOptions))
             print("pdf=\(result.pdf.path)")
             print("pages=\(result.pages)")
             print("title=\(result.title)")
@@ -201,9 +244,41 @@ struct TsundokuCLI {
                 print("cleanPage=\(clean.changed ? "changed" : "unchanged")"
                     + " restored=\(clean.restored)")
             }
+            printBundleSummary(at: output)
         } catch {
             print("error: \(error)")
             exit(1)
+        }
+    }
+
+    /// Report the bundle objects the manifest recorded, without any book text.
+    private static func printBundleSummary(at directory: URL) {
+        guard
+            let data = try? Data(
+                contentsOf: directory.appendingPathComponent("manifest.json")),
+            let manifest = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any]
+        else {
+            print("bundle=none")
+            return
+        }
+        let cover = (manifest["cover"] as? [String: Any])?["source"]
+            as? String ?? "none"
+        print("cover=\(cover)")
+        print("coverPage=\(manifest["coverPage"] as? Bool ?? false)")
+        print("textSidecars=\(manifest["text"] != nil)")
+        if let original = manifest["original"] as? [String: Any] {
+            print(
+                "original="
+                    + ((original["available"] as? Bool ?? false)
+                        ? "available" : "unavailable"))
+        }
+        if let warnings = manifest["warnings"] as? [String],
+            !warnings.isEmpty
+        {
+            for warning in warnings {
+                print("warning: \(warning)")
+            }
         }
     }
 
@@ -440,6 +515,213 @@ struct TsundokuCLI {
         }
     }
 
+    private static func booksAsset(_ arguments: [String]) {
+        do {
+            let asset: BooksAsset
+            if let path = value("--path", in: arguments) {
+                let url = URL(fileURLWithPath: path)
+                asset = BooksAsset.load(
+                    assetID: url.lastPathComponent, path: url,
+                    contentType: contentType(for: url))
+            } else if let asin = value("--asin", in: arguments) {
+                let reader = BooksAssetReader(paths: booksPaths(arguments))
+                guard let found = try reader.asset(for: asin) else {
+                    print("asset=none")
+                    exit(1)
+                }
+                asset = found
+            } else {
+                usage()
+                exit(2)
+            }
+            printAsset(asset)
+        } catch {
+            print("error: \(error)")
+            exit(1)
+        }
+    }
+
+    private static func cover(_ arguments: [String]) {
+        do {
+            let source = sourceValue(arguments)
+            guard
+                let identifier = value("--asin", in: arguments)
+                    ?? value("--identifier", in: arguments),
+                !identifier.isEmpty
+            else {
+                usage()
+                exit(2)
+            }
+            let archive = try Archive.standard()
+            let book = try resolveBook(
+                asin: identifier, source: source, archive: archive)
+            let title = value("--title", in: arguments) ?? book?.title ?? ""
+            let output = URL(fileURLWithPath: value(
+                "--out", in: arguments) ?? checkDirectory("cover"))
+            let services = CaptureBundleServices.standard()
+            var metadata = services.metadataResolver.resolve(
+                book: book, capturedTitle: title, identifier: identifier,
+                source: source)
+            if let explicitTitle = value("--title", in: arguments),
+                !explicitTitle.trimmingCharacters(
+                    in: .whitespacesAndNewlines).isEmpty
+            {
+                metadata.setTitle(explicitTitle, from: .observed)
+            }
+            let result = services.coverService.resolve(
+                for: metadata, into: output)
+            print("cover=\(result.cover?.source.rawValue ?? "none")")
+            if let cover = result.cover {
+                print("file=\(cover.fileURL.path)")
+                print("bytes=\(cover.byteCount)")
+                print("mediaType=\(cover.mediaType)")
+            }
+            print("title=\(metadata.title ?? "")")
+            if let original = metadata.original {
+                print(originalLine(original))
+            } else {
+                print("original=unknown")
+            }
+            for warning in metadata.warnings + result.warnings {
+                print("warning: \(warning)")
+            }
+            if result.cover == nil { exit(1) }
+        } catch {
+            print("error: \(error)")
+            exit(1)
+        }
+    }
+
+    private static func original(_ arguments: [String]) {
+        do {
+            let availability: OriginalAvailability
+            if let path = value("--path", in: arguments) {
+                let url = URL(fileURLWithPath: path)
+                let asset = BooksAsset.load(
+                    assetID: url.lastPathComponent, path: url,
+                    contentType: contentType(for: url))
+                availability = OriginalDetector.books(asset: asset)
+            } else if let asin = value("--asin", in: arguments) {
+                switch sourceValue(arguments) {
+                case .kindle:
+                    availability = OriginalDetector.kindle(
+                        asin: asin, paths: KindlePaths.standard())
+                case .appleBooks:
+                    let asset = try BooksAssetReader(
+                        paths: booksPaths(arguments)
+                    ).asset(for: asin)
+                    availability = OriginalDetector.books(asset: asset)
+                }
+            } else {
+                usage()
+                exit(2)
+            }
+            print(originalLine(availability))
+            if arguments.contains("--copy") {
+                guard availability.isAvailable else { exit(1) }
+                guard let kind = availability.kind else { exit(1) }
+                let output = URL(fileURLWithPath: value(
+                    "--out", in: arguments) ?? checkDirectory("original"))
+                let copied = try OriginalService.copy(
+                    availability, into: output,
+                    destinationName: OriginalService.destinationName(
+                        for: kind, in: output))
+                print("copied=\(copied.url.path)")
+                print("bytes=\(copied.bytes)")
+            }
+        } catch {
+            print("error: \(error)")
+            exit(1)
+        }
+    }
+
+    private static func printAsset(_ asset: BooksAsset) {
+        print("asset=\(asset.assetID)")
+        print("contentType=\(asset.contentType.rawValue)")
+        print("pathKind=\(asset.pathKind.rawValue)")
+        print("path=\(asset.path?.path ?? "")")
+        switch asset.drm {
+        case .clear:
+            print("drm=clear")
+        case .protected(let reason):
+            print("drm=protected")
+            print("drmReason=\(reason)")
+        case .unknown(let reason):
+            print("drm=unknown")
+            print("drmReason=\(reason)")
+        }
+        print("dataless=\(asset.isDataless)")
+        if let package = asset.package {
+            print("title=\(package.title ?? "")")
+            print("author=\(package.creators.joined(separator: ", "))")
+            print("publisher=\(package.publisher ?? "")")
+            print("language=\(package.language ?? "")")
+            print("publishedDate=\(package.publishedDate ?? "")")
+            print("identifier=\(package.identifier ?? "")")
+            print("cover=\(package.coverImageURL?.path ?? "none")")
+        }
+        print(originalLine(OriginalDetector.books(asset: asset)))
+        for warning in asset.warnings {
+            print("warning: \(warning)")
+        }
+    }
+
+    private static func originalLine(
+        _ availability: OriginalAvailability
+    ) -> String {
+        switch availability {
+        case .available(let kind, let url):
+            return "original=available kind=\(kind.rawValue) path=\(url.path)"
+        case .protected(let reason):
+            return "original=protected reason=\(reason)"
+        case .missing:
+            return "original=missing"
+        }
+    }
+
+    private static func contentType(for url: URL) -> BooksAssetContentType {
+        switch url.pathExtension.lowercased() {
+        case "epub": .epub
+        case "pdf": .pdf
+        default: .unknown
+        }
+    }
+
+    private static func sourceValue(_ arguments: [String]) -> BookSource {
+        switch value("--source", in: arguments)?.lowercased() {
+        case "books", "applebooks", "apple-books", "apple":
+            .appleBooks
+        default:
+            .kindle
+        }
+    }
+
+    private static func booksPaths(_ arguments: [String]) -> BooksPaths {
+        if let container = value("--container", in: arguments) {
+            return BooksPaths(container: URL(fileURLWithPath: container))
+        }
+        return .standard()
+    }
+
+    private static func resolveBook(
+        asin: String?, source: BookSource, archive: Archive
+    ) throws -> Book? {
+        guard let asin else { return nil }
+        if let found = BookLookup.book(
+            asin: asin, source: source, in: try archive.books())
+        {
+            return found
+        }
+        return Book(
+            asin: asin, title: "", author: "", bookType: 10,
+            readState: 0, source: source)
+    }
+
+    private static func checkDirectory(_ name: String) -> String {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
+            "TsundokuExports/\(name)-check").path
+    }
+
     private static func value(_ flag: String, in arguments: [String])
         -> String?
     {
@@ -452,11 +734,14 @@ struct TsundokuCLI {
     private static func usage() {
         print(
             """
-            usage: tsundoku-cli <inspect|page|ask|capture|export|history|track|import|applebooks|clean-page> [options]
+            usage: tsundoku-cli <inspect|page|ask|capture|export|history|track|import|applebooks|clean-page|books-asset|cover|original> [options]
               ask --action explain|translate|summarize|ask|define
                   --question "…" --provider claude|codex|http|apple
               capture --pages 5 --out ~/TsundokuExports [--clean-page]
                       [--page-size a4|display] [--font-size 5..9]
+                      [--text-size -2..2]
+                      [--asin ASIN] [--no-cover] [--no-sidecars]
+                      [--copy-original]
               clean-page status|begin|recover
               page-setup status|recover
               export --format json|markdown|csv --provenance mine|popular|system
@@ -464,6 +749,11 @@ struct TsundokuCLI {
               track --asin B0HH6TM91Q --seconds 6
               import --container ~/TsundokuImports/air
               applebooks [--container PATH] [--read-only]
+              books-asset --asin ID | --path PATH [--container PATH]
+              cover --asin ID [--source kindle|books] [--title TITLE]
+                    [--out DIR]
+              original --asin ID [--source kindle|books] [--out DIR] [--copy]
+                       | --path PATH
             """)
     }
 }

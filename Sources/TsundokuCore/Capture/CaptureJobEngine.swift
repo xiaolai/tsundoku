@@ -19,7 +19,9 @@ public struct CaptureJobEngine: Sendable {
         isCancelled: @escaping @Sendable () -> Bool,
         lifecycle: CaptureLifecycle = CaptureLifecycle(),
         publisher: any CapturePublisher = PDFPublisher(),
-        cleanPage: CleanPageRequest? = nil
+        cleanPage: CleanPageRequest? = nil,
+        bundle: CaptureBundleRequest? = nil,
+        outputPageSize: CGSize? = nil
     ) throws -> CaptureResult {
         try lifecycle.checkReady()
         let activity = lifecycle.begin()
@@ -255,6 +257,20 @@ public struct CaptureJobEngine: Sendable {
         } else {
             identifier = nil
         }
+        let capturedPages = store.pageURLs.count
+        let bookSource: BookSource =
+            subject.kind == .kindle ? .kindle : .appleBooks
+        let bundlePlan: ExportBundlePlan?
+        if let bundle {
+            bundlePlan = ExportBundle.prepare(
+                directory: output, book: subject.book,
+                capturedTitle: title, identifier: identifier,
+                source: bookSource, capturedPages: capturedPages,
+                options: bundle.options, services: bundle.services,
+                now: bundle.now())
+        } else {
+            bundlePlan = nil
+        }
         let published: PublishedCapture
         do {
             published = try publisher.publish(
@@ -267,7 +283,9 @@ public struct CaptureJobEngine: Sendable {
                         source: subject.kind.displayName,
                         displayScale: displayScale),
                     termination: termination,
-                    cancellation: ClosureCancellation(isCancelled)))
+                    cancellation: ClosureCancellation(isCancelled),
+                    coverPage: bundlePlan?.coverPage,
+                    pageSize: outputPageSize))
         } catch {
             var failure = Self.manifestBase(
                 session: session, subject: subject)
@@ -286,27 +304,29 @@ public struct CaptureJobEngine: Sendable {
             throw error
         }
         let pdfURL = published.url
-        let pages = published.pageCount
-        guard pages == store.pageURLs.count else {
+        let pdfPages = published.pageCount
+        let expectedPDFPages =
+            capturedPages + (bundlePlan?.coverPage == nil ? 0 : 1)
+        guard pdfPages == expectedPDFPages else {
             throw ReaderCaptureError.captureFailed(
                 subject.kind,
-                reason: "the publisher returned \(pages) pages; "
-                    + "\(store.pageURLs.count) were captured")
+                reason: "the publisher returned \(pdfPages) pages; "
+                    + "\(expectedPDFPages) were expected")
         }
-        let pdfPages = pages
 
         let completeRequested =
             termination == .endOfBook || termination == .pageLimit
         var manifest = Self.manifestBase(session: session, subject: subject)
         if let identifier { manifest["asin"] = identifier }
         manifest["state"] = Self.state(termination)
+        manifest["pageCount"] = capturedPages
         manifest["pdfPages"] = pdfPages
         manifest["pdf"] = pdfURL.lastPathComponent
         manifest["termination"] = Self.termination(termination)
         manifest["startPage"] = firstPageNumber ?? NSNull()
         manifest["complete"] = [
             "requestedRange": completeRequested,
-            "structural": pdfPages == store.pageURLs.count,
+            "structural": pdfPages == expectedPDFPages,
             "wholeBook": termination == .endOfBook && firstPageNumber == 1,
         ]
         if let firstPixelSize {
@@ -337,16 +357,41 @@ public struct CaptureJobEngine: Sendable {
                 "characters": snapshot.text?.count ?? 0,
                 "signature": Self.signature(
                     snapshot: snapshot, pageTexts: pageTexts),
+                "spread": snapshot.spread,
             ]
         }
         if let restored {
             manifest["restore"] = Self.restore(restored)
         }
         addCleanPage(&manifest)
+        var bundleWarnings = bundlePlan?.warnings ?? []
+        if let bundlePlan {
+            do {
+                bundleWarnings.append(
+                    contentsOf: try ExportBundle.finish(
+                        bundlePlan, manifest: &manifest, directory: output,
+                        isCancelled: isCancelled))
+            } catch is CancellationError {
+                try store.writeManifest(
+                    Self.cancelledFinalization(
+                        manifest, warnings: bundleWarnings))
+                throw ReaderCaptureError.cancelled
+            }
+            // The copy checks cancellation while it streams, but a stop
+            // arriving after the last chunk must still not report success.
+            if isCancelled() {
+                try store.writeManifest(
+                    Self.cancelledFinalization(
+                        manifest, warnings: bundleWarnings))
+                throw ReaderCaptureError.cancelled
+            }
+        }
+        manifest["warnings"] = bundleWarnings
         try store.writeManifest(manifest)
 
         let verification = try CaptureVerifier.verify(directory: output)
         var warnings = verification.faults
+        warnings.append(contentsOf: bundleWarnings)
         if restored?.exact == false {
             warnings.append("restore not exact")
         }
@@ -363,11 +408,19 @@ public struct CaptureJobEngine: Sendable {
         manifest["warnings"] = warnings
         try store.writeManifest(manifest)
 
+        // Verification can run after the last check; a stop arriving now
+        // must still not be recorded as a successful capture.
+        if isCancelled() {
+            try store.writeManifest(
+                Self.cancelledFinalization(manifest, warnings: warnings))
+            throw ReaderCaptureError.cancelled
+        }
+
         let captureState =
             verification.structural ? Self.state(termination) : "incomplete"
         try archive.recordCapture(
             asin: identifier, title: title, directory: output.path,
-            pageCount: pages, pdfPath: pdfURL.path, state: captureState,
+            pageCount: pdfPages, pdfPath: pdfURL.path, state: captureState,
             source: subject.kind.captureSource,
             identityConfidence: Self.confidence(session.identity.confidence),
             termination: Self.termination(termination),
@@ -387,7 +440,7 @@ public struct CaptureJobEngine: Sendable {
             cleanSummary = nil
         }
         return CaptureResult(
-            directory: output, pdf: pdfURL, pages: pages, title: title,
+            directory: output, pdf: pdfURL, pages: pdfPages, title: title,
             cleanPage: cleanSummary, pageSetup: session.pageSetupOutcome)
     }
 
@@ -488,6 +541,23 @@ public struct CaptureJobEngine: Sendable {
             manifest["author"] = book.author
         }
         return manifest
+    }
+
+    /// A cancellation observed after the PDF was published: the files that
+    /// exist are kept, but the manifest never claims a complete capture.
+    private static func cancelledFinalization(
+        _ manifest: [String: Any], warnings: [String]
+    ) -> [String: Any] {
+        var cancelled = manifest
+        cancelled["state"] = "cancelled"
+        cancelled["termination"] = "cancelled"
+        cancelled["warnings"] = warnings + ["Finalization was cancelled."]
+        cancelled["complete"] = [
+            "requestedRange": false,
+            "structural": false,
+            "wholeBook": false,
+        ]
+        return cancelled
     }
 
     private static func state(_ termination: Termination) -> String {

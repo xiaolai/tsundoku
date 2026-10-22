@@ -28,14 +28,21 @@ public enum CapturePageSize: String, Sendable, Codable, CaseIterable {
 public struct PageSetupRequest: Sendable, Equatable {
     public let pageSize: CapturePageSize
     public let font: Int?
+    /// Books' text size is relative: +1 is one step larger, -1 one smaller.
+    /// Books does not expose an absolute point size.
+    public let booksFontSteps: Int
 
-    public init(pageSize: CapturePageSize = .asDisplayed, font: Int? = nil) {
+    public init(
+        pageSize: CapturePageSize = .asDisplayed, font: Int? = nil,
+        booksFontSteps: Int = 0
+    ) {
         self.pageSize = pageSize
         self.font = font
+        self.booksFontSteps = booksFontSteps
     }
 
     public var isRequested: Bool {
-        pageSize != .asDisplayed || font != nil
+        pageSize != .asDisplayed || font != nil || booksFontSteps != 0
     }
 }
 
@@ -43,6 +50,7 @@ public enum PageSetupError: Error, CustomStringConvertible, Sendable {
     case screenTooSmall(CGSize)
     case windowNotAccepted(expected: CGSize, actual: CGSize)
     case fontNotSet(expected: Int, actual: Int)
+    case fontStepRefused(Int)
     case notConfigured
     case previousSetupUnrestored
 
@@ -57,6 +65,8 @@ public enum PageSetupError: Error, CustomStringConvertible, Sendable {
                 + "\(Int(expected.width))×\(Int(expected.height))."
         case .fontNotSet(let expected, let actual):
             "The font size did not reach \(expected); it reads \(actual)."
+        case .fontStepRefused(let steps):
+            "Apple Books did not change its text size for \(steps) step(s)."
         case .notConfigured:
             "The page setup needs the reader's live window and font."
         case .previousSetupUnrestored:
@@ -75,11 +85,13 @@ public struct PageSetupOutcome: Sendable, Equatable {
     public let finalWindow: CGRect?
     public let restored: Bool
     public let reason: String?
+    /// Books' relative text-size steps; nil for Kindle or when unchanged.
+    public let fontSteps: Int?
 
     public init(
         pageSize: CapturePageSize, requestedFont: Int?, originalFont: Int?,
         finalFont: Int?, originalWindow: CGRect?, finalWindow: CGRect?,
-        restored: Bool, reason: String?
+        restored: Bool, reason: String?, fontSteps: Int? = nil
     ) {
         self.pageSize = pageSize
         self.requestedFont = requestedFont
@@ -89,6 +101,7 @@ public struct PageSetupOutcome: Sendable, Equatable {
         self.finalWindow = finalWindow
         self.restored = restored
         self.reason = reason
+        self.fontSteps = fontSteps
     }
 
     public var manifest: [String: Any] {
@@ -99,6 +112,7 @@ public struct PageSetupOutcome: Sendable, Equatable {
             "finalFont": finalFont ?? NSNull(),
             "restored": restored,
             "reason": reason ?? NSNull(),
+            "fontSteps": fontSteps ?? 0,
         ]
         if let originalWindow {
             object["originalWindow"] = Self.array(originalWindow)

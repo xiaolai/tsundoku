@@ -9,6 +9,8 @@ public struct PDFPublisher: CapturePublisher {
         }
         let output = artifact.directory.appendingPathComponent(
             "\(Self.safeFilename(artifact.metadata.title)).pdf")
+        let expected =
+            artifact.pageURLs.count + (artifact.coverPage == nil ? 0 : 1)
         let pages = try PDFWriter.write(
             pageURLs: artifact.pageURLs, texts: artifact.texts,
             metadata: PDFMetadata(
@@ -16,13 +18,15 @@ public struct PDFPublisher: CapturePublisher {
                 author: artifact.metadata.author,
                 identifier: artifact.metadata.identifier,
                 source: artifact.metadata.source),
+            cover: artifact.coverPage,
             displayScale: artifact.metadata.displayScale,
+            pageSize: artifact.pageSize,
             isCancelled: { artifact.cancellation.isSet },
             to: output)
         let count = PDFWriter.pageCount(output)
-        guard count == pages else {
+        guard count == pages, count == expected else {
             throw CapturePublisherError.failed(
-                "the PDF has \(count) pages; \(pages) were captured")
+                "the PDF has \(count) pages; \(expected) were expected")
         }
         return PublishedCapture(url: output, pageCount: count)
     }

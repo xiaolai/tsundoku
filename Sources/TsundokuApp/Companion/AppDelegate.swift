@@ -288,11 +288,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Windows
 
-    private func openLibrary() {
-        artifacts.show(section: .library, importLibrary: true)
+    private func openLibrary(useRequestedSection: Bool = false) {
+        // The launch argument applies once, on the launch open. The Library
+        // menu action and reopen events must always show the library.
+        let section =
+            useRequestedSection ? (requestedSection ?? .library) : .library
+        artifacts.show(section: section, importLibrary: true)
         if let model = artifacts.modelIfCreated() {
             model.startLivePolling()
         }
+    }
+
+    private var requestedSection: AppModel.Section? {
+        guard let index = CommandLine.arguments.firstIndex(of: "--section"),
+            CommandLine.arguments.indices.contains(index + 1)
+        else { return nil }
+        let raw = CommandLine.arguments[index + 1]
+        if let section = AppModel.Section(rawValue: raw) {
+            return section
+        }
+        if raw == "annotations" { return .highlights }
+        return nil
     }
 
     private func openSettings() {
@@ -392,7 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             [weak self] in
             guard let self else { return }
             if arguments.contains("--open-library") {
-                self.openLibrary()
+                self.openLibrary(useRequestedSection: true)
             } else if arguments.contains("--open-settings") {
                 self.openSettings()
             }

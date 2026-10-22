@@ -160,7 +160,7 @@ enum BooksOCR {
         return try recognize(image)
     }
 
-    private static func capture(pid: pid_t, axFrame: CGRect) throws
+    static func capture(pid: pid_t, axFrame: CGRect) throws
         -> CGImage
     {
         let semaphore = DispatchSemaphore(value: 0)
@@ -233,7 +233,7 @@ enum BooksOCR {
         return try result.get()
     }
 
-    private static func recognize(_ image: CGImage) throws -> String {
+    static func recognize(_ image: CGImage) throws -> String {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true

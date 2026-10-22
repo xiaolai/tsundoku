@@ -470,7 +470,8 @@ public final class KindleCaptureSession: ReaderCaptureSession {
             }
         }
         do {
-            return try capture(pageRect)
+            let raw = try capture(pageRect)
+            return PageFooter.removingDetectedPageNumber(from: raw) ?? raw
         } catch let error as ScreenCaptureError {
             throw ReaderCaptureError.captureFailed(
                 .kindle, reason: error.description)

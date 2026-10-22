@@ -30,55 +30,81 @@ public enum BooksPageText {
         return frames
     }
 
-    public static func text(from root: AXNode) -> String {
-        // Text can live under one web area while its frame overlaps another
-        // (Books exposes three on a reader page), so the visible viewport is
-        // the union of every web area frame, clipped to the reader window.
+    /// The frames of the visible text nodes, in reading order. Global
+    /// coordinates; the crop itself is measured from the window, because web
+    /// area frames are content-relative and cannot be unioned.
+    public static func textFrames(in root: AXNode) -> [AXNode.Frame] {
         let window = rect(root.frame)
-        let rawFrames = webAreaFrames(in: root)
-        var pageFrames = rawFrames
-        if let window {
-            pageFrames = rawFrames.compactMap {
-                let clipped = $0.intersection(window)
-                return clipped.isNull ? nil : clipped
-            }
-            // Web areas exist but none is on screen: this is not a page at
-            // all. Returning text here would present off-screen content as
-            // the current page; let OCR or the caller decide instead.
-            if !rawFrames.isEmpty && pageFrames.isEmpty {
-                return ""
+        var frames: [AXNode.Frame] = []
+        for webArea in topWebAreas(root) {
+            let bounds = rect(webArea.frame)
+            walk(webArea) { node in
+                guard textRoles.contains(node.role), let frame = node.frame
+                else { return }
+                if let bounds, !verticallyInside(frame, bounds) { return }
+                if let window, !insideWindow(frame, window) { return }
+                frames.append(frame)
             }
         }
+        return frames
+    }
+
+    public static func text(from root: AXNode) -> String {
+        // Books reports the horizontal origin of a web area inconsistently:
+        // during a page transition the web area sat at x = −1989 while its
+        // text children stayed at x = 107…993, and that was still the visible
+        // spread. Its vertical frames agreed. Compare only the vertical range
+        // so offscreen preloaded lines are excluded without dropping the page
+        // because of a horizontal scroll offset.
+        let window = rect(root.frame)
         var parts: [String] = []
-        let hasViewport = !pageFrames.isEmpty
-        func collect(_ node: AXNode) {
+        func collect(_ node: AXNode, bounds: CGRect?) {
             if textRoles.contains(node.role) {
                 let value = node.value?.asText ?? ""
                 if !value.isEmpty {
-                    if hasViewport {
-                        // A text node with no frame, or one outside every web
-                        // area, cannot be proved visible.
-                        guard let frame = rect(node.frame),
-                            pageFrames.contains(where: {
-                                $0.intersects(frame)
-                            })
-                        else { return }
+                    if let bounds, let frame = node.frame,
+                        !verticallyInside(frame, bounds)
+                    {
+                        return
+                    }
+                    if let window, let frame = node.frame,
+                        !insideWindow(frame, window)
+                    {
+                        return
                     }
                     parts.append(value)
                     return
                 }
-                // A container with no value of its own may still have
-                // readable children; do not discard them.
             }
             for child in node.children {
-                collect(child)
+                collect(child, bounds: bounds)
             }
         }
         for webArea in topWebAreas(root) {
-            collect(webArea)
+            collect(webArea, bounds: rect(webArea.frame))
         }
         return parts.joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func verticallyInside(
+        _ frame: AXNode.Frame, _ bounds: CGRect
+    ) -> Bool {
+        let minimum = Double(bounds.minY)
+        let maximum = Double(bounds.maxY)
+        return frame.y + frame.height > minimum && frame.y < maximum
+    }
+
+    /// Text frames live in the window's content space even when the web area's
+    /// own origin is scrolled away. A preloaded next spread sits beyond the
+    /// window's width; a hidden page sits beyond its height.
+    private static func insideWindow(
+        _ frame: AXNode.Frame, _ window: CGRect
+    ) -> Bool {
+        let width = Double(window.width)
+        let height = Double(window.height)
+        return frame.x + frame.width > 0 && frame.x < width
+            && frame.y + frame.height > 0 && frame.y < height
     }
 
     /// Only the outermost web areas: a nested one is already inside the
@@ -142,7 +168,7 @@ public enum BooksPageText {
         return frame.width * frame.height
     }
 
-    private static func walk(_ node: AXNode, visit: (AXNode) -> Void) {
+    static func walk(_ node: AXNode, visit: (AXNode) -> Void) {
         visit(node)
         for child in node.children {
             walk(child, visit: visit)

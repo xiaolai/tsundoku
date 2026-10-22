@@ -99,6 +99,40 @@ public struct BooksSnapshot: Sendable {
     }
 }
 
+/// A snapshot of only the Books library database. Asset metadata, covers and
+/// originals do not need the annotation store; requiring it would disable the
+/// bundle when the annotation database is missing or unreadable.
+public struct BooksLibrarySnapshot: Sendable {
+    public let directory: URL
+    public let bookLibrary: URL
+
+    public static func capture(_ paths: BooksPaths) throws
+        -> BooksLibrarySnapshot
+    {
+        guard let bookLibrary = paths.bookLibrary else {
+            throw BooksReaderError.storeNotFound
+        }
+        let manager = FileManager.default
+        let directory = manager.temporaryDirectory.appendingPathComponent(
+            "tsundoku-books-library-\(UUID().uuidString)")
+        try manager.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        do {
+            let copy = directory.appendingPathComponent("BKLibrary.sqlite")
+            try SQLiteSnapshot.copy(bookLibrary, to: copy)
+            return BooksLibrarySnapshot(
+                directory: directory, bookLibrary: copy)
+        } catch {
+            try? manager.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    public func cleanup() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
 // MARK: - Errors
 
 public enum BooksReaderError: Error, CustomStringConvertible {

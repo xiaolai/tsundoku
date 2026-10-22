@@ -26,12 +26,17 @@ public struct CaptureArtifact: Sendable {
     public let metadata: CaptureMetadata
     public let termination: Termination
     public let cancellation: any CancellationChecking
+    public let coverPage: PDFCoverPage?
+    /// The PDF page size in points. `nil` uses each captured page's size.
+    public let pageSize: CGSize?
 
     public init(
         directory: URL, pageURLs: [URL], texts: [String],
         metadata: CaptureMetadata, termination: Termination,
         cancellation: any CancellationChecking =
-            ClosureCancellation({ false })
+            ClosureCancellation({ false }),
+        coverPage: PDFCoverPage? = nil,
+        pageSize: CGSize? = nil
     ) {
         self.directory = directory
         self.pageURLs = pageURLs
@@ -39,6 +44,8 @@ public struct CaptureArtifact: Sendable {
         self.metadata = metadata
         self.termination = termination
         self.cancellation = cancellation
+        self.coverPage = coverPage
+        self.pageSize = pageSize
     }
 }
 

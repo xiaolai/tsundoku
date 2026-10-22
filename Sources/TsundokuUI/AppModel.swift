@@ -130,6 +130,8 @@ public final class AppModel: ObservableObject {
     @Published public var captureDirectory: URL?
     @Published public var captureCleanPage: CleanPageSummary?
     @Published public var capturePageSetup: PageSetupOutcome?
+    @Published public var selectedBookOriginal: OriginalAvailability?
+    @Published public var originalNote: String?
     @Published public var popularHighlightsState: Bool?
     @Published public var popularHighlightsNote: String?
     @Published public var capturePageLimit: Int?
@@ -627,6 +629,78 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// Check the selected book for a DRM-free original. Read-only: neither the
+    /// Kindle download nor the Books asset is modified.
+    public func refreshOriginalAvailability() {
+        // Clear the previous book's availability before the next async check:
+        // its buttons must never act on a book that is no longer selected.
+        selectedBookOriginal = nil
+        originalNote = nil
+        guard let book = selectedBook else { return }
+        Task.detached { [weak self] in
+            let availability: OriginalAvailability
+            var note: String?
+            switch book.source {
+            case .kindle:
+                availability = OriginalDetector.kindle(
+                    asin: book.asin, paths: KindlePaths.standard())
+            case .appleBooks:
+                do {
+                    if let asset = try BooksAssetReader().asset(
+                        for: book.asin)
+                    {
+                        availability = OriginalDetector.books(asset: asset)
+                        note = asset.warnings.first
+                    } else {
+                        availability = .missing
+                    }
+                } catch {
+                    availability = .missing
+                    note = "The Apple Books asset could not be read: \(error)"
+                }
+            }
+            await MainActor.run {
+                guard let self, self.selectedBookID == book.asin else {
+                    return
+                }
+                self.selectedBookOriginal = availability
+                self.originalNote = note
+            }
+        }
+    }
+
+    public func revealOriginal() {
+        guard let url = selectedBookOriginal?.url else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    public func copyOriginal() {
+        guard let availability = selectedBookOriginal,
+            availability.isAvailable,
+            let kind = availability.kind
+        else { return }
+        let destination = exportFolder
+        let destinationName = originalFilename(
+            for: selectedBook?.asin ?? "book", kind: kind)
+        Task.detached { [weak self] in
+            let message: String
+            var seconds: Double = 6
+            do {
+                let copied = try OriginalService.copy(
+                    availability, into: destination,
+                    destinationName: destinationName)
+                message = "Copied the original to "
+                    + "\(copied.url.lastPathComponent)."
+            } catch {
+                message = "Could not copy the original: \(error)"
+                seconds = 10
+            }
+            await MainActor.run {
+                self?.post(message, seconds: seconds)
+            }
+        }
+    }
+
     public func requestAccessibility() {
         if let permissions {
             permissions.requestAccessibility()
@@ -800,27 +874,19 @@ public final class AppModel: ObservableObject {
                 "Tsundoku is reading Kindle's settings. Try again in a moment."
             return
         }
-        if selectedBook?.source == .appleBooks {
-            capturePhase = .failed
-            captureMessage =
-                "Apple Books PDF capture is not implemented yet. "
-                + "The capture lane reads the Kindle page."
-            return
-        }
-        if sourceFilter == .appleBooks {
-            capturePhase = .failed
-            captureMessage =
-                "Apple Books PDF capture is not implemented yet. "
-                + "Select a Kindle book to capture."
-            return
-        }
+        let filterSource = sourceFilter.source
         let book =
             selectedBook
             ?? books.first {
-                $0.isEbook && $0.source == .kindle && $0.lastView != nil
+                $0.isEbook
+                    && (filterSource == nil || $0.source == filterSource)
+                    && $0.lastView != nil
             }
-            ?? books.first { $0.isEbook && $0.source == .kindle }
-        let title = book?.title ?? livePage?.title ?? "Kindle book"
+            ?? books.first {
+                $0.isEbook
+                    && (filterSource == nil || $0.source == filterSource)
+            }
+        let title = book?.title ?? livePage?.title ?? "Book"
         let folder = exportFolder.appendingPathComponent(
             "\(slug(title))-\(timestamp())")
         capturePhase = .running
@@ -838,12 +904,19 @@ public final class AppModel: ObservableObject {
                 : .asDisplayed
         let setup = PageSetupRequest(
             pageSize: settings.capturePageSize, font: settings.captureFontSize)
+        let booksSetup = PageSetupRequest(
+            pageSize: settings.capturePageSize,
+            booksFontSteps: settings.booksFontSteps)
+        let bundleOptions = settings.captureBundleOptions
         Task {
             do {
                 let result = try await Task.detached {
                     let engine = CaptureEngine(archive: archive)
+                    let kind: ReaderKind =
+                        book?.source == .appleBooks ? .appleBooks : .kindle
                     return try engine.capture(
                         book: book,
+                        kind: kind,
                         pageLimit: pages,
                         output: folder,
                         progress: { progress in
@@ -853,8 +926,10 @@ public final class AppModel: ObservableObject {
                             }
                         },
                         isCancelled: { flag.isSet },
-                        cleanPage: cleanPolicy,
-                        pageSetup: setup)
+                        cleanPage: kind == .kindle ? cleanPolicy : .asDisplayed,
+                        pageSetup: kind == .kindle ? setup : booksSetup,
+                        bundle: CaptureBundleRequest(
+                            options: bundleOptions))
                 }.value
                 self.capturePhase = .finished
                 self.captureProgress = 1
@@ -900,6 +975,27 @@ public final class AppModel: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url {
             exportFolder = url
         }
+    }
+
+    /// A per-book original name. The hash of the full identifier keeps two
+    /// identifiers that share a sanitized prefix from colliding.
+    private func originalFilename(
+        for identifier: String, kind: OriginalKind
+    ) -> String {
+        let raw = identifier.isEmpty ? "book" : identifier
+        let allowed = CharacterSet.alphanumerics.union(
+            CharacterSet(charactersIn: "-_"))
+        let sanitized = raw.unicodeScalars.map {
+            allowed.contains($0) ? Character($0) : "-"
+        }
+        let prefix = String(sanitized.prefix(48))
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in raw.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x1000_0000_01b3
+        }
+        return "original-\(prefix)-\(String(hash, radix: 16))."
+            + kind.fileExtension
     }
 
     private func slug(_ value: String) -> String {

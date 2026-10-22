@@ -45,9 +45,15 @@ public struct ExportsView: View {
 
                 if model.selectedBookIsAppleBooks {
                     Label(
-                        "Apple Books capture is not implemented yet. "
-                            + "Select a Kindle book to capture.",
-                        systemImage: "exclamationmark.triangle")
+                        "Apple Books uses its own font family — set it in "
+                            + "Books. Text size can be set here in relative "
+                            + "steps and is restored after the capture."
+                            + (model.settings.capturePageSize == .a4
+                                ? " A4 captures one page per PDF page; the "
+                                    + "reader is resized to A4 and restored."
+                                : " Without A4, one two-page spread fills "
+                                    + "each PDF page."),
+                        systemImage: "info.circle")
                         .foregroundStyle(.secondary)
                 }
 
@@ -66,31 +72,81 @@ public struct ExportsView: View {
                         Text(size.title).tag(size)
                     }
                 }
-                .disabled(model.capturePhase == .running)
+                .disabled(
+                    model.capturePhase == .running
+                        || model.selectedBookIsAppleBooks)
 
-                Picker(
-                    "Font size",
-                    selection: $model.settings.captureFontSize
-                ) {
-                    Text("Keep current").tag(Int?.none)
-                    ForEach([5, 6, 7, 8, 9], id: \.self) { size in
-                        Text("\(size)").tag(Int?.some(size))
+                if model.selectedBookIsAppleBooks
+                    || model.sourceFilter == .appleBooks
+                {
+                    Picker(
+                        "Text size",
+                        selection: $model.settings.booksFontSteps
+                    ) {
+                        Text("Much smaller").tag(-2)
+                        Text("Smaller").tag(-1)
+                        Text("Keep current").tag(0)
+                        Text("Larger").tag(1)
+                        Text("Much larger").tag(2)
                     }
+                    .disabled(model.capturePhase == .running)
+                } else {
+                    Picker(
+                        "Font size",
+                        selection: $model.settings.captureFontSize
+                    ) {
+                        Text("Keep current").tag(Int?.none)
+                        ForEach([5, 6, 7, 8, 9], id: \.self) { size in
+                            Text("\(size)").tag(Int?.some(size))
+                        }
+                    }
+                    .disabled(model.capturePhase == .running)
                 }
-                .disabled(model.capturePhase == .running)
 
                 Text(
-                    "A4 resizes the reader window to 595×842 pt and restores "
-                        + "it. A font change reflows the book and is restored "
-                        + "after the capture.")
+                    "A4 resizes the reader to a 595×842 pt page and restores "
+                        + "it; a font change reflows the book and is restored "
+                        + "afterwards. Kindle font size and Apple Books "
+                        + "text size are applied for the capture and "
+                        + "restored. Apple Books uses its own font family, "
+                        + "set in Books. Apple Books at A4 captures one page "
+                        + "per PDF page.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Toggle(
+                    "Include cover page",
+                    isOn: $model.settings.includeCoverPage
+                )
+                .disabled(model.capturePhase == .running)
+                Text(
+                    "A vector cover page with the title, author, identifier, "
+                        + "source, export date and captured page count is "
+                        + "written before the captured pages.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Toggle(
+                    "Write text and metadata sidecars",
+                    isOn: $model.settings.writeSidecars
+                )
+                .disabled(model.capturePhase == .running)
+                Text(
+                    "Adds cover.jpg, metadata.json, original.json, text.md and a "
+                        + ".txt file beside each page. A sidecar failure is "
+                        + "a warning, never a failed capture.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                originalWarning
 
                 Toggle(
                     "Hide Popular Highlights during capture",
                     isOn: $model.settings.cleanPageDuringCapture
                 )
-                .disabled(model.capturePhase == .running)
+                .disabled(
+                    model.capturePhase == .running
+                        || model.selectedBookIsAppleBooks)
                 Text(
                     "Kindle's display setting is turned off for the capture "
                         + "and restored afterwards. Your own highlights stay "
@@ -147,7 +203,6 @@ public struct ExportsView: View {
                             Label("Start Capture", systemImage: "play.fill")
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(model.selectedBookIsAppleBooks)
                     }
                 }
 
@@ -155,8 +210,17 @@ public struct ExportsView: View {
             }
 
             Section("Before You Start") {
-                Text("Open the book in Kindle, hide the reading toolbar, and keep the window fully on screen.")
-                Text("The AX text of each page becomes an invisible, searchable layer in the PDF.")
+                Text(
+                    "Open the book in Kindle or Apple Books and keep the "
+                        + "reader window fully on screen. For Kindle, hide "
+                        + "the reading toolbar. For Apple Books, set the "
+                        + "font family in Books; the text size picker is "
+                        + "relative.")
+                Text(
+                    "The page text becomes an invisible, searchable layer in "
+                        + "the PDF. Apple Books pages are captured as "
+                        + (model.settings.capturePageSize == .a4
+                            ? "single A4 pages." : "two-page spreads."))
                 if model.permissionsNeeded {
                     Label(
                         "Accessibility or Screen Recording is not granted.",
@@ -210,6 +274,44 @@ public struct ExportsView: View {
         .onAppear {
             model.refreshActivity()
             model.refreshPopularHighlights()
+            model.refreshOriginalAvailability()
+        }
+        .onChange(of: model.selectedBookID) { _, _ in
+            model.refreshOriginalAvailability()
+        }
+    }
+
+    @ViewBuilder
+    private var originalWarning: some View {
+        if let availability = model.selectedBookOriginal {
+            switch availability {
+            case .available:
+                Label(
+                    availability.warning ?? "",
+                    systemImage: "book.closed")
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Button("Reveal Original") {
+                        model.revealOriginal()
+                    }
+                    .controlSize(.small)
+                    Button("Copy Original") {
+                        model.copyOriginal()
+                    }
+                    .controlSize(.small)
+                }
+            case .protected(let reason):
+                Label(
+                    "The original is protected: \(reason)",
+                    systemImage: "lock")
+                    .foregroundStyle(.secondary)
+            case .missing:
+                if let note = model.originalNote {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 

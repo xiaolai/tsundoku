@@ -50,23 +50,54 @@ public final class CaptureEngine: Sendable {
 
     public func capture(
         book: Book?,
+        kind: ReaderKind = .kindle,
         pageLimit: Int?,
         output: URL,
         progress: @Sendable (CaptureProgress) -> Void,
         isCancelled: @escaping @Sendable () -> Bool,
         cleanPage: CleanPagePolicy = .asDisplayed,
-        pageSetup: PageSetupRequest = PageSetupRequest()
+        pageSetup: PageSetupRequest = PageSetupRequest(),
+        bundle: CaptureBundleRequest? = nil
     ) throws -> CaptureResult {
-        let adapter = KindleCaptureAdapter()
-        let subject = CaptureSubject(book: book, kind: .kindle)
-        let session = try adapter.makeSession(
-            for: subject,
-            cancellation: ClosureCancellation(isCancelled),
-            pageSetup: pageSetup)
+        let subject = CaptureSubject(book: book, kind: kind)
+        let session: any ReaderCaptureSession
+        switch kind {
+        case .kindle:
+            if pageSetup.booksFontSteps != 0 {
+                throw ReaderCaptureError.unsupported(
+                    .kindle,
+                    reason: "Books text-size steps are Apple Books-only")
+            }
+            session = try KindleCaptureAdapter().makeSession(
+                for: subject,
+                cancellation: ClosureCancellation(isCancelled),
+                pageSetup: pageSetup)
+        case .appleBooks:
+            session = try BooksCaptureAdapter().makeSession(
+                for: subject,
+                cancellation: ClosureCancellation(isCancelled),
+                pageSetup: pageSetup)
+        }
+        let outputPageSize: CGSize? =
+            kind == .appleBooks ? pageSetup.pageSize.points : nil
+        let cleanRequest: CleanPageRequest?
+        switch kind {
+        case .kindle:
+            cleanRequest = CleanPageRequest(
+                policy: cleanPage, panel: KindlePopularHighlights())
+        case .appleBooks:
+            if cleanPage.hidesPopularHighlights {
+                throw ReaderCaptureError.unsupported(
+                    .appleBooks,
+                    reason: "Popular Highlights cleanup is Kindle-only")
+            }
+            cleanRequest = nil
+        }
         return try CaptureJobEngine(archive: archive).run(
             session: session, subject: subject, pageLimit: pageLimit,
             output: output, progress: progress, isCancelled: isCancelled,
-            cleanPage: CleanPageRequest(
-                policy: cleanPage, panel: KindlePopularHighlights()))
+            cleanPage: cleanRequest,
+            bundle: bundle,
+            outputPageSize: outputPageSize)
     }
 }

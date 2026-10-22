@@ -123,13 +123,16 @@ public enum CaptureVerifier {
                 faults: faults, seamCandidates: seams(texts))
         }
         let pdfURL = directory.appendingPathComponent(pdfName)
+        let coverPage = manifest["coverPage"] as? Bool ?? false
+        let expectedPDFPages = pages.count + (coverPage ? 1 : 0)
         guard
             FileManager.default.fileExists(atPath: pdfURL.path),
             let document = CGPDFDocument(pdfURL as CFURL),
-            document.numberOfPages == pages.count
+            document.numberOfPages == expectedPDFPages
         else {
             faults.append(
-                "the published PDF is missing or has the wrong page count")
+                "the published PDF is missing or has the wrong page count "
+                    + "(expected \(expectedPDFPages))")
             return CaptureVerification(
                 structural: false, requestedRange: false, wholeBook: false,
                 faults: faults, seamCandidates: seams(texts))

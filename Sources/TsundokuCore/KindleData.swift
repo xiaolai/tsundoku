@@ -30,6 +30,11 @@ public struct KindlePaths: Sendable {
     public var ebooks: URL {
         container.appendingPathComponent("eBooks")
     }
+    /// Kindle's display metadata cache: titles and cover identities.
+    public var metadataCache: URL {
+        container.appendingPathComponent(
+            "Caches/BookMetadataCache/metadata.json")
+    }
 
     public var accountAnnotationDB: URL? {
         let manager = FileManager.default

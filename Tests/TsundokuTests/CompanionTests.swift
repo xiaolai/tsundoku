@@ -517,10 +517,13 @@ struct ProviderCancellationTests {
     @Test("cancelling the task terminates the child process")
     func cancellation() async throws {
         let started = Date()
+        // The child sleeps far longer than the assertion bound, so a pass
+        // proves cancellation killed it rather than waiting it out. The
+        // bound leaves room for test-suite scheduling under load.
         let task = Task {
             try await AICLI.run(
                 executable: URL(fileURLWithPath: "/bin/sh"),
-                arguments: ["-c", "sleep 5"], prompt: "x", timeout: 30)
+                arguments: ["-c", "sleep 30"], prompt: "x", timeout: 60)
         }
         try await Task.sleep(for: .milliseconds(250))
         task.cancel()
@@ -533,7 +536,7 @@ struct ProviderCancellationTests {
                 return
             }
         }
-        #expect(Date().timeIntervalSince(started) < 3)
+        #expect(Date().timeIntervalSince(started) < 5)
     }
 }
 

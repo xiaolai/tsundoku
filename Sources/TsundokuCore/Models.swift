@@ -295,6 +295,12 @@ public struct AISettings: Codable, Sendable, Equatable {
     public var capturePageSize: CapturePageSize
     /// The Aa font size for the capture; nil keeps the reader's setting.
     public var captureFontSize: Int?
+    /// Apple Books' relative text-size steps for the capture; 0 keeps it.
+    public var booksFontSteps: Int
+    /// Draw a vector cover page before the captured pages. Default on.
+    public var includeCoverPage: Bool
+    /// Write `metadata.json`, `text.md` and the per-page text files. Default on.
+    public var writeSidecars: Bool
 
     public init(
         provider: AIProviderKind = .claudeCLI,
@@ -304,7 +310,10 @@ public struct AISettings: Codable, Sendable, Equatable {
         sessionLogging: Bool = false,
         cleanPageDuringCapture: Bool = true,
         capturePageSize: CapturePageSize = .asDisplayed,
-        captureFontSize: Int? = nil
+        captureFontSize: Int? = nil,
+        booksFontSteps: Int = 0,
+        includeCoverPage: Bool = true,
+        writeSidecars: Bool = true
     ) {
         self.provider = provider
         self.model = model
@@ -314,12 +323,16 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.cleanPageDuringCapture = cleanPageDuringCapture
         self.capturePageSize = capturePageSize
         self.captureFontSize = captureFontSize
+        self.booksFontSteps = booksFontSteps
+        self.includeCoverPage = includeCoverPage
+        self.writeSidecars = writeSidecars
     }
 
     private enum CodingKeys: String, CodingKey {
         case provider, model, endpoint, language, sessionLogging
         case cleanPageDuringCapture
-        case capturePageSize, captureFontSize
+        case capturePageSize, captureFontSize, booksFontSteps
+        case includeCoverPage, writeSidecars
     }
 
     /// Decodes every missing field to its default, so a settings blob written
@@ -355,6 +368,27 @@ public struct AISettings: Codable, Sendable, Equatable {
         captureFontSize =
             try container.decodeIfPresent(
                 Int.self, forKey: .captureFontSize)
+        booksFontSteps =
+            try container.decodeIfPresent(
+                Int.self, forKey: .booksFontSteps)
+            ?? defaults.booksFontSteps
+        includeCoverPage =
+            try container.decodeIfPresent(
+                Bool.self, forKey: .includeCoverPage)
+            ?? defaults.includeCoverPage
+        writeSidecars =
+            try container.decodeIfPresent(
+                Bool.self, forKey: .writeSidecars)
+            ?? defaults.writeSidecars
+    }
+
+    /// The bundle options for a capture started from these settings.
+    public var captureBundleOptions: CaptureBundleOptions {
+        CaptureBundleOptions(
+            includeCoverPage: includeCoverPage,
+            writeSidecars: writeSidecars,
+            copyOriginal: false,
+            pageSize: capturePageSize.points)
     }
 
     public static let defaults = AISettings()
