@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="$(tr -d '[:space:]' < VERSION)"
+: "${REPO_OWNER:=xiaolai}"
 : "${CODESIGN_IDENTITY:?Set CODESIGN_IDENTITY to a Developer ID Application identity}"
 if [ "${ALLOW_ADHOC_RELEASE:-0}" != "1" ] && [ -n "${REPO_OWNER:-}" ]; then
     case "$REPO_OWNER" in
@@ -53,10 +54,10 @@ if [ "${ALLOW_ADHOC_RELEASE:-0}" != "1" ]; then
 fi
 
 SHA="$(shasum -a 256 "$DMG" | awk '{print $1}')"
-if [ "${ALLOW_ADHOC_RELEASE:-0}" = "1" ] || [ -z "${REPO_OWNER:-}" ]; then
-    # Without a release page there is nothing to point a cask at; an unfilled
+if [ "${ALLOW_ADHOC_RELEASE:-0}" = "1" ]; then
+    # An ad-hoc build has no release page to point a cask at; an unfilled
     # placeholder must never be written.
-    echo "No REPO_OWNER (or an ad-hoc build): no Homebrew cask generated."
+    echo "Ad-hoc build: no Homebrew cask generated."
     echo "DMG: $DMG"
     echo "SHA256: $SHA"
     exit 0

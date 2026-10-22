@@ -4,7 +4,7 @@ cask "tsundoku" do
 
   url "https://github.com/@OWNER@/tsundoku/releases/download/v#{version}/Tsundoku-#{version}.dmg"
   name "Tsundoku"
-  desc "Local Kindle and Apple Books annotations, history, PDF export and an AI reading companion"
+  desc "Local Kindle and Apple Books annotations, history, export and AI"
   homepage "https://github.com/@OWNER@/tsundoku"
 
   livecheck do
@@ -12,6 +12,7 @@ cask "tsundoku" do
     strategy :github_latest
   end
 
+  depends_on arch: :arm64
   depends_on macos: :sequoia
   app "Tsundoku.app"
   uninstall quit: "com.lixiaolai.tsundoku"

@@ -17,7 +17,7 @@
 #   the password    APP_SPECIFIC_PASSWORD, then APPLE_PASSWORD
 #   the team        TEAM_ID or APPLE_TEAM_ID if .env carries one, else the
 #                   team of this Mac's Developer ID Application certificate
-#   the owner       REPO_OWNER or GITHUB_OWNER, for the Homebrew cask URL
+#   the owner       REPO_OWNER or GITHUB_OWNER, else xiaolai (this app's tap)
 #   the identity    CODESIGN_IDENTITY if set, else the first Developer ID
 #                   Application certificate on this Mac
 # It stores nothing unless all three notary values are known, and it asks
@@ -97,13 +97,13 @@ if [ -z "$identity" ]; then
 fi
 [ -n "$identity" ] || fail "no Developer ID Application identity on this Mac; set CODESIGN_IDENTITY"
 
-owner=$(pick REPO_OWNER GITHUB_OWNER) || owner=""
+owner=$(pick REPO_OWNER GITHUB_OWNER) || owner=xiaolai
 
 say "profile:  $profile"
 say "apple id: ${apple_id%%@*}@… (hidden)"
 say "team:     $team"
 say "identity: $identity"
-say "owner:    ${owner:-(none — the DMG is built without a cask)}"
+say "owner:    $owner"
 
 if xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
     say "release: $profile already works on this Mac; storing it again with the values in $env_file"

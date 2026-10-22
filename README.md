@@ -129,10 +129,20 @@ Mac. See `the project documentation` and
 ```
 
 `scripts/release.sh` reads `APPLE_ID`, `APP_SPECIFIC_PASSWORD` (or
-`APPLE_PASSWORD`), `TEAM_ID` and `REPO_OWNER` (or `GITHUB_OWNER`) from the
-workspace `.env`, prints names and never values, and stores the profile as
-`tsundoku-notary` unless `--profile` names another. `scripts/release-build.sh`
-is the raw pipeline behind it. The cask template is
-`scripts/distribution/tsundoku.rb.in`; `REPO_OWNER` fills the download URL and
-homepage, so the generated cask cannot ship with a literal placeholder. The
-pipeline publishes nothing: the disk image path and its sha256 are printed.
+`APPLE_PASSWORD`) and `TEAM_ID` from the workspace `.env`, prints names and
+never values, and stores the profile as `tsundoku-notary` unless `--profile`
+names another. The owner is `REPO_OWNER`/`GITHUB_OWNER` from `.env`, else
+`xiaolai`. `scripts/release-build.sh` is the raw pipeline behind it and writes
+`build/release/tsundoku.rb` from `scripts/distribution/tsundoku.rb.in`.
+
+A release is three steps:
+
+1. `./scripts/release.sh` — build, sign, notarize, staple, write the cask.
+2. `gh release create v$(cat VERSION) build/release/Tsundoku-$(cat VERSION).dmg`
+   with a title and notes.
+3. `./scripts/publish-cask.sh` — verify the asset URL and sha256, then commit
+   and push `Casks/tsundoku.rb` to `xiaolai/homebrew-tap`; install with
+   `brew install --cask xiaolai/tap/tsundoku`.
+
+The pipeline publishes nothing itself: the disk image path and its sha256 are
+printed.
