@@ -49,6 +49,19 @@ final class ReaderWatcher {
                 guard let app = Self.application(from: note) else { return }
                 self?.handleActivate(app)
             })
+        // Library, onboarding and status-menu windows can become key without
+        // an application activation. Re-evaluate on either side of that.
+        for name in [
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.didResignKeyNotification,
+        ] {
+            observers.append(
+                NotificationCenter.default.addObserver(
+                    forName: name, object: nil, queue: .main
+                ) { [weak self] _ in
+                    self?.refreshEligibilityAndEmit()
+                })
+        }
         refreshFrontmostEligibility()
         selectInitial()
     }
@@ -56,6 +69,9 @@ final class ReaderWatcher {
     func stop() {
         let center = NSWorkspace.shared.notificationCenter
         for observer in observers { center.removeObserver(observer) }
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
+        }
         observers.removeAll()
         stopTracker()
     }
@@ -166,15 +182,32 @@ final class ReaderWatcher {
 
     private func refreshFrontmostEligibility() {
         let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        if let forcedKind {
-            frontmostEligible =
-                bundle == Bundle.main.bundleIdentifier
-                || bundle == forcedKind.bundleID
+        if bundle == Bundle.main.bundleIdentifier {
+            // Tsundoku is eligible while the companion is the reading
+            // surface, but not while its library, onboarding or menu window
+            // is key. That is what hides the trigger when the library opens.
+            frontmostEligible = !Self.otherKeyWindowExists()
             return
         }
-        frontmostEligible =
-            bundle == Bundle.main.bundleIdentifier
-            || bundle.flatMap(ReaderKind.from(bundleID:)) != nil
+        if let forcedKind {
+            frontmostEligible = bundle == forcedKind.bundleID
+            return
+        }
+        frontmostEligible = bundle.flatMap(ReaderKind.from(bundleID:)) != nil
+    }
+
+    private func refreshEligibilityAndEmit() {
+        refreshFrontmostEligibility()
+        emitLast()
+    }
+
+    /// Any key window that is not the companion itself means the reader is no
+    /// longer the surface the user is looking at.
+    private static func otherKeyWindowExists() -> Bool {
+        NSApp.windows.contains {
+            $0.isVisible && $0.isKeyWindow
+                && !($0 is CompanionPanelWindow)
+        }
     }
 
     // MARK: - Workspace events
@@ -209,7 +242,9 @@ final class ReaderWatcher {
             return
         }
         if bundleID == Bundle.main.bundleIdentifier {
-            frontmostEligible = true
+            // Activating for the ask field keeps the panel; activating a
+            // library or onboarding window must not keep the companion over it.
+            frontmostEligible = !Self.otherKeyWindowExists()
             emitLast()
             return
         }
