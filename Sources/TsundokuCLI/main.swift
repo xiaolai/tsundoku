@@ -199,7 +199,11 @@ struct TsundokuCLI {
                 pageSize: pageSize,
                 font: Int(value("--font-size", in: arguments) ?? ""),
                 booksFontSteps: Int(
-                    value("--text-size", in: arguments) ?? "") ?? 0)
+                    value("--text-size", in: arguments) ?? "") ?? 0,
+                cropTop: Int(
+                    value("--crop-top", in: arguments) ?? "") ?? 0,
+                cropBottom: value("--crop-bottom", in: arguments)
+                    .flatMap(Int.init))
             let flag = CancellationFlag()
             signal(SIGINT, SIG_IGN)
             signal(SIGTERM, SIG_IGN)
@@ -740,6 +744,7 @@ struct TsundokuCLI {
               capture --pages 5 --out ~/TsundokuExports [--clean-page]
                       [--page-size a4|display] [--font-size 5..9]
                       [--text-size -2..2]
+                      [--crop-top PT] [--crop-bottom PT]
                       [--asin ASIN] [--no-cover] [--no-sidecars]
                       [--copy-original]
               clean-page status|begin|recover

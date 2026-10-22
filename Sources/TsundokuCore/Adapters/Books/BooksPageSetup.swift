@@ -98,9 +98,7 @@ public final class BooksPageSetup {
         }
         originalWindow = window
         if let raw = try? capture(crop) {
-            let image =
-                PageFooter.removingBooksPageNumber(
-                    from: raw, crop: crop) ?? raw
+            let image = cropped(raw, crop: crop)
             originalMark = PageMark(
                 imageHash: ImageFingerprint.averageHash(image),
                 text: before.text)
@@ -318,8 +316,14 @@ public final class BooksPageSetup {
         guard let crop = page.cropRect,
             let raw = try? capture(crop)
         else { return false }
-        let image =
-            PageFooter.removingBooksPageNumber(from: raw, crop: crop) ?? raw
-        return ImageFingerprint.averageHash(image) == mark.imageHash
+        return ImageFingerprint.averageHash(cropped(raw, crop: crop))
+            == mark.imageHash
+    }
+
+    private func cropped(_ raw: CGImage, crop: CGRect) -> CGImage {
+        PageFooter.removingInsets(
+            from: raw, crop: crop,
+            topPoints: CGFloat(max(0, request.cropTop)),
+            bottomPoints: CGFloat(max(0, request.cropBottom ?? 54))) ?? raw
     }
 }

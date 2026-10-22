@@ -38,6 +38,8 @@ public final class BooksCaptureSession: ReaderCaptureSession {
     private let initialCrop: CGRect
     private let singlePage: Bool
     private let pageSetupGuard: BooksPageSetup?
+    private let cropTop: Int
+    private let cropBottom: Int
     private let opening: PageLocation
     private var openingMark: PageMark?
     private var records: [TurnRecord] = []
@@ -74,7 +76,9 @@ public final class BooksCaptureSession: ReaderCaptureSession {
         settleMinimum: TimeInterval = 0.45,
         settleTimeout: TimeInterval = 4.0,
         restoreTimeout: TimeInterval = 60,
-        pageSetupGuard: BooksPageSetup? = nil
+        pageSetupGuard: BooksPageSetup? = nil,
+        cropTop: Int = 0,
+        cropBottom: Int? = nil
     ) throws {
         guard isTrusted() else {
             throw ReaderCaptureError.notTrusted(.appleBooks)
@@ -153,6 +157,8 @@ public final class BooksCaptureSession: ReaderCaptureSession {
         self.singlePage =
             pageSetupGuard?.request.pageSize == .a4
         self.pageSetupGuard = pageSetupGuard
+        self.cropTop = max(0, cropTop)
+        self.cropBottom = max(0, cropBottom ?? 54)
         self.opening = PageLocation(
             pageNumber: first.pageNumber, pageCount: first.pageCount)
         let title = first.title.trimmingCharacters(
@@ -181,8 +187,7 @@ public final class BooksCaptureSession: ReaderCaptureSession {
             throw ReaderCaptureError.noWindow(.appleBooks)
         }
         let raw = try capturePage(crop)
-        let image =
-            PageFooter.removingBooksPageNumber(from: raw, crop: crop) ?? raw
+        let image = cropped(raw, crop: crop)
         try verifyUnchanged(since: live)
         let (text, textSource) = textFor(live: live, image: image)
         let page = snapshot(
@@ -240,9 +245,7 @@ public final class BooksCaptureSession: ReaderCaptureSession {
                 let image: CGImage
                 do {
                     let raw = try capturePage(crop)
-                    image =
-                        PageFooter.removingBooksPageNumber(
-                            from: raw, crop: crop) ?? raw
+                    image = cropped(raw, crop: crop)
                 } catch {
                     lastCaptureError = error
                     sleep(0.05)
@@ -270,9 +273,7 @@ public final class BooksCaptureSession: ReaderCaptureSession {
                 let settledImage: CGImage
                 do {
                     let raw = try capturePage(settledCrop)
-                    settledImage =
-                        PageFooter.removingBooksPageNumber(
-                            from: raw, crop: settledCrop) ?? raw
+                    settledImage = cropped(raw, crop: settledCrop)
                 } catch {
                     lastCaptureError = error
                     sleep(0.05)
@@ -329,9 +330,7 @@ public final class BooksCaptureSession: ReaderCaptureSession {
                         "; last capture error: \($0)"
                     } ?? ""))
         }
-        let endImage =
-            PageFooter.removingBooksPageNumber(
-                from: endRaw, crop: endCrop) ?? endRaw
+        let endImage = cropped(endRaw, crop: endCrop)
         guard ImageFingerprint.averageHash(endImage) == mark.imageHash
         else {
             let unresolved = TurnRecord(
@@ -427,11 +426,9 @@ public final class BooksCaptureSession: ReaderCaptureSession {
             let crop = final.cropRect,
             let raw = try? capturePage(crop)
         {
-            // The image is the page of record; crop the same footer the
-            // opening mark used, then compare hashes.
-            let image =
-                PageFooter.removingBooksPageNumber(
-                    from: raw, crop: crop) ?? raw
+            // The image is the page of record; apply the same configured
+            // crop the opening mark used, then compare hashes.
+            let image = cropped(raw, crop: crop)
             exact =
                 ImageFingerprint.averageHash(image)
                     == openingMark.imageHash
@@ -646,6 +643,13 @@ public final class BooksCaptureSession: ReaderCaptureSession {
         text.lowercased().split {
             !$0.isLetter && !$0.isNumber
         }.map(String.init)
+    }
+
+    private func cropped(_ raw: CGImage, crop: CGRect) -> CGImage {
+        PageFooter.removingInsets(
+            from: raw, crop: crop,
+            topPoints: CGFloat(cropTop),
+            bottomPoints: CGFloat(cropBottom)) ?? raw
     }
 
     private func snapshot(

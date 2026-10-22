@@ -72,13 +72,27 @@ public struct ExportsView: View {
                         Text(size.title).tag(size)
                     }
                 }
-                .disabled(
-                    model.capturePhase == .running
-                        || model.selectedBookIsAppleBooks)
+                .disabled(model.capturePhase == .running)
+
+                Stepper(
+                    "Crop top: \(model.settings.captureCropTop) pt",
+                    value: $model.settings.captureCropTop, in: 0...200)
+                    .disabled(model.capturePhase == .running)
 
                 if model.selectedBookIsAppleBooks
                     || model.sourceFilter == .appleBooks
                 {
+                    Stepper(
+                        "Crop bottom: \(model.settings.booksCropBottom) pt",
+                        value: $model.settings.booksCropBottom, in: 0...200)
+                        .disabled(model.capturePhase == .running)
+                    Text(
+                        "Points trimmed from each captured page. Bottom 0 "
+                            + "keeps the printed page numbers; the default "
+                            + "54 removes them.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     Picker(
                         "Text size",
                         selection: $model.settings.booksFontSteps
@@ -91,6 +105,16 @@ public struct ExportsView: View {
                     }
                     .disabled(model.capturePhase == .running)
                 } else {
+                    Stepper(
+                        "Crop bottom: \(model.settings.kindleCropBottom) pt",
+                        value: $model.settings.kindleCropBottom, in: 0...200)
+                        .disabled(model.capturePhase == .running)
+                    Text(
+                        "Points trimmed from each captured page. Bottom 0 "
+                            + "detects a page number automatically.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     Picker(
                         "Font size",
                         selection: $model.settings.captureFontSize
@@ -110,7 +134,8 @@ public struct ExportsView: View {
                         + "text size are applied for the capture and "
                         + "restored. Apple Books uses its own font family, "
                         + "set in Books. Apple Books at A4 captures one page "
-                        + "per PDF page.")
+                        + "per PDF page. Crop values trim the delivered page "
+                        + "image.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 

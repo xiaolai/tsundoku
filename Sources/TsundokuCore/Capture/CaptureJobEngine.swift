@@ -21,7 +21,10 @@ public struct CaptureJobEngine: Sendable {
         publisher: any CapturePublisher = PDFPublisher(),
         cleanPage: CleanPageRequest? = nil,
         bundle: CaptureBundleRequest? = nil,
-        outputPageSize: CGSize? = nil
+        outputPageSize: CGSize? = nil,
+        cropTop: Int = 0,
+        cropBottom: Int = 0,
+        cropAutomatic: Bool = false
     ) throws -> CaptureResult {
         try lifecycle.checkReady()
         let activity = lifecycle.begin()
@@ -318,6 +321,11 @@ public struct CaptureJobEngine: Sendable {
             termination == .endOfBook || termination == .pageLimit
         var manifest = Self.manifestBase(session: session, subject: subject)
         if let identifier { manifest["asin"] = identifier }
+        manifest["crop"] = [
+            "top": cropTop,
+            "bottom": cropBottom,
+            "automatic": cropAutomatic,
+        ]
         manifest["state"] = Self.state(termination)
         manifest["pageCount"] = capturedPages
         manifest["pdfPages"] = pdfPages

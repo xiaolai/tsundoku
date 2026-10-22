@@ -18,10 +18,55 @@ public enum PageFooter {
     public static func removingBooksPageNumber(
         from image: CGImage, crop: CGRect
     ) -> CGImage? {
-        guard crop.height > 0 else { return nil }
+        removingInsets(
+            from: image, crop: crop, topPoints: 0,
+            bottomPoints: booksPageNumberInset)
+    }
+
+    /// Trim configured top and bottom points from a captured page image.
+    /// `crop` is the page rect in points; the image may be Retina-sized.
+    public static func removingInsets(
+        from image: CGImage, crop: CGRect,
+        topPoints: CGFloat, bottomPoints: CGFloat
+    ) -> CGImage? {
+        guard crop.height > 0, topPoints >= 0, bottomPoints >= 0 else {
+            return nil
+        }
         let scale = CGFloat(image.height) / crop.height
-        let pixels = Int((booksPageNumberInset * scale).rounded())
-        return croppingBottom(image, pixels: pixels)
+        let top = Int((topPoints * scale).rounded())
+        let bottom = Int((bottomPoints * scale).rounded())
+        guard top + bottom > 0 else { return nil }
+        let height = image.height - top - bottom
+        guard height > 100 else { return nil }
+        return image.cropping(
+            to: CGRect(
+                x: 0, y: top, width: image.width, height: height))
+    }
+
+    /// Kindle: an explicit bottom value replaces automatic detection; zero
+    /// keeps detection on. The top value always trims the running header or
+    /// margin.
+    public static func removingKindleInsets(
+        from image: CGImage, crop: CGRect,
+        topPoints: CGFloat, bottomPoints: CGFloat
+    ) -> CGImage? {
+        if bottomPoints > 0 {
+            return removingInsets(
+                from: image, crop: crop, topPoints: topPoints,
+                bottomPoints: bottomPoints)
+        }
+        let scale = crop.height > 0
+            ? CGFloat(image.height) / crop.height : 1
+        let top = Int((topPoints * scale).rounded())
+        guard top >= 0, image.height - top > 100 else { return nil }
+        let trimmed = top > 0
+            ? image.cropping(
+                to: CGRect(
+                    x: 0, y: top, width: image.width,
+                    height: image.height - top))
+            : image
+        guard let trimmed else { return nil }
+        return removingDetectedPageNumber(from: trimmed) ?? trimmed
     }
 
     /// Detect a page-number line in the bottom strip of a Kindle page. The

@@ -297,6 +297,12 @@ public struct AISettings: Codable, Sendable, Equatable {
     public var captureFontSize: Int?
     /// Apple Books' relative text-size steps for the capture; 0 keeps it.
     public var booksFontSteps: Int
+    /// Extra crop from the top of every captured page, in points.
+    public var captureCropTop: Int
+    /// Bottom crop for Apple Books, in points; 0 keeps printed page numbers.
+    public var booksCropBottom: Int
+    /// Bottom crop for Kindle; 0 detects a page number automatically.
+    public var kindleCropBottom: Int
     /// Draw a vector cover page before the captured pages. Default on.
     public var includeCoverPage: Bool
     /// Write `metadata.json`, `text.md` and the per-page text files. Default on.
@@ -312,6 +318,9 @@ public struct AISettings: Codable, Sendable, Equatable {
         capturePageSize: CapturePageSize = .asDisplayed,
         captureFontSize: Int? = nil,
         booksFontSteps: Int = 0,
+        captureCropTop: Int = 0,
+        booksCropBottom: Int = 54,
+        kindleCropBottom: Int = 0,
         includeCoverPage: Bool = true,
         writeSidecars: Bool = true
     ) {
@@ -324,6 +333,9 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.capturePageSize = capturePageSize
         self.captureFontSize = captureFontSize
         self.booksFontSteps = booksFontSteps
+        self.captureCropTop = captureCropTop
+        self.booksCropBottom = booksCropBottom
+        self.kindleCropBottom = kindleCropBottom
         self.includeCoverPage = includeCoverPage
         self.writeSidecars = writeSidecars
     }
@@ -332,6 +344,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         case provider, model, endpoint, language, sessionLogging
         case cleanPageDuringCapture
         case capturePageSize, captureFontSize, booksFontSteps
+        case captureCropTop, booksCropBottom, kindleCropBottom
         case includeCoverPage, writeSidecars
     }
 
@@ -372,6 +385,18 @@ public struct AISettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(
                 Int.self, forKey: .booksFontSteps)
             ?? defaults.booksFontSteps
+        captureCropTop =
+            try container.decodeIfPresent(
+                Int.self, forKey: .captureCropTop)
+            ?? defaults.captureCropTop
+        booksCropBottom =
+            try container.decodeIfPresent(
+                Int.self, forKey: .booksCropBottom)
+            ?? defaults.booksCropBottom
+        kindleCropBottom =
+            try container.decodeIfPresent(
+                Int.self, forKey: .kindleCropBottom)
+            ?? defaults.kindleCropBottom
         includeCoverPage =
             try container.decodeIfPresent(
                 Bool.self, forKey: .includeCoverPage)

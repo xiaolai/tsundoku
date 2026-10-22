@@ -31,14 +31,22 @@ public struct PageSetupRequest: Sendable, Equatable {
     /// Books' text size is relative: +1 is one step larger, -1 one smaller.
     /// Books does not expose an absolute point size.
     public let booksFontSteps: Int
+    /// Extra crop from the top of the captured page, in points.
+    public let cropTop: Int
+    /// Bottom crop in points. `nil` uses the reader default: Books 54 (the
+    /// printed page number), Kindle 0 (automatic page-number detection).
+    public let cropBottom: Int?
 
     public init(
         pageSize: CapturePageSize = .asDisplayed, font: Int? = nil,
-        booksFontSteps: Int = 0
+        booksFontSteps: Int = 0, cropTop: Int = 0,
+        cropBottom: Int? = nil
     ) {
         self.pageSize = pageSize
         self.font = font
         self.booksFontSteps = booksFontSteps
+        self.cropTop = cropTop
+        self.cropBottom = cropBottom
     }
 
     public var isRequested: Bool {

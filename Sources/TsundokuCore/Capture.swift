@@ -80,6 +80,12 @@ public final class CaptureEngine: Sendable {
         }
         let outputPageSize: CGSize? =
             kind == .appleBooks ? pageSetup.pageSize.points : nil
+        let effectiveCropBottom =
+            kind == .appleBooks
+            ? (pageSetup.cropBottom ?? 54)
+            : (pageSetup.cropBottom ?? 0)
+        let automaticCrop =
+            kind == .kindle && effectiveCropBottom == 0
         let cleanRequest: CleanPageRequest?
         switch kind {
         case .kindle:
@@ -98,6 +104,9 @@ public final class CaptureEngine: Sendable {
             output: output, progress: progress, isCancelled: isCancelled,
             cleanPage: cleanRequest,
             bundle: bundle,
-            outputPageSize: outputPageSize)
+            outputPageSize: outputPageSize,
+            cropTop: pageSetup.cropTop,
+            cropBottom: effectiveCropBottom,
+            cropAutomatic: automaticCrop)
     }
 }

@@ -33,6 +33,8 @@ public final class KindleCaptureSession: ReaderCaptureSession {
     private let pageRect: CGRect
     private let calibration: PageFrameCalibration
     private let opening: PageLocation
+    private let cropTop: Int
+    private let cropBottom: Int?
     private let openingPageCount: Int?
     private let openingTextWidth: Double?
     private var openingMark: PageMark?
@@ -57,7 +59,9 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         settleMinimum: TimeInterval = 0.30,
         settleTimeout: TimeInterval = 3.0,
         restoreTimeout: TimeInterval = 60,
-        pageSetupGuard: KindlePageSetup? = nil
+        pageSetupGuard: KindlePageSetup? = nil,
+        cropTop: Int = 0,
+        cropBottom: Int? = nil
     ) throws {
         guard isTrusted() else {
             throw ReaderCaptureError.notTrusted(.kindle)
@@ -143,6 +147,8 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         self.calibration = calibration
         self.opening = PageLocation(
             pageNumber: first.pageNumber, pageCount: first.pageCount)
+        self.cropTop = max(0, cropTop)
+        self.cropBottom = cropBottom.map { max(0, $0) }
         self.openingPageCount = first.pageCount
         self.openingTextWidth = textRect.map { Double($0.width) }
         self.pageSetupGuard = pageSetupGuard
@@ -471,7 +477,10 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         }
         do {
             let raw = try capture(pageRect)
-            return PageFooter.removingDetectedPageNumber(from: raw) ?? raw
+            return PageFooter.removingKindleInsets(
+                from: raw, crop: pageRect,
+                topPoints: CGFloat(cropTop),
+                bottomPoints: CGFloat(cropBottom ?? 0)) ?? raw
         } catch let error as ScreenCaptureError {
             throw ReaderCaptureError.captureFailed(
                 .kindle, reason: error.description)

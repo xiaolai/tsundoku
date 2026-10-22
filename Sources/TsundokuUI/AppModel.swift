@@ -903,10 +903,15 @@ public final class AppModel: ObservableObject {
             settings.cleanPageDuringCapture ? .hidePopularHighlights
                 : .asDisplayed
         let setup = PageSetupRequest(
-            pageSize: settings.capturePageSize, font: settings.captureFontSize)
+            pageSize: settings.capturePageSize,
+            font: settings.captureFontSize,
+            cropTop: settings.captureCropTop,
+            cropBottom: settings.kindleCropBottom)
         let booksSetup = PageSetupRequest(
             pageSize: settings.capturePageSize,
-            booksFontSteps: settings.booksFontSteps)
+            booksFontSteps: settings.booksFontSteps,
+            cropTop: settings.captureCropTop,
+            cropBottom: settings.booksCropBottom)
         let bundleOptions = settings.captureBundleOptions
         Task {
             do {

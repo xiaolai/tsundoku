@@ -119,7 +119,8 @@ private let booksFocus = BooksFocusReport(
 private func makeBooksSession(
     _ reader: FakeBooksReader,
     _ clock: BooksClock,
-    isTrusted: @escaping () -> Bool = { true }
+    isTrusted: @escaping () -> Bool = { true },
+    cropTop: Int = 0, cropBottom: Int? = nil
 ) throws -> BooksCaptureSession {
     try BooksCaptureSession(
         subject: CaptureSubject(book: nil, kind: .appleBooks),
@@ -144,7 +145,9 @@ private func makeBooksSession(
         isUnobstructed: { _ in true },
         hasLease: { reader.lease },
         settleMinimum: 0,
-        settleTimeout: 2)
+        settleTimeout: 2,
+        cropTop: cropTop,
+        cropBottom: cropBottom)
 }
 
 @Suite("Books capture session")
@@ -212,6 +215,16 @@ struct BooksCaptureTests {
         #expect(page.calibration?.insets.top == 52)
         #expect(session.mode.layout == .reflowable)
         #expect(session.identity.title == "A Book")
+    }
+
+    @Test("configured top and bottom crops trim the page image")
+    func configuredCrop() throws {
+        let clock = BooksClock()
+        let reader = try FakeBooksReader(clock: clock)
+        let session = try makeBooksSession(
+            reader, clock, cropTop: 20, cropBottom: 54)
+        let page = try session.snapshot()
+        #expect(page.pixelSize == CGSize(width: 1024, height: 642))
     }
 
     @Test("a page turn advances to the next spread")
@@ -675,6 +688,18 @@ struct PageFooterTests {
             PageFooter.removingBooksPageNumber(from: image, crop: crop))
         #expect(cropped.height == 662)
         #expect(cropped.width == 1024)
+    }
+
+    @Test("configured insets trim both edges")
+    func configuredInsets() throws {
+        let image = try booksImage(gray: 0.2)
+        let crop = CGRect(x: 0, y: 0, width: 1024, height: 716)
+        let trimmed = try #require(
+            PageFooter.removingInsets(
+                from: image, crop: crop, topPoints: 20,
+                bottomPoints: 54))
+        #expect(trimmed.height == 642)
+        #expect(trimmed.width == 1024)
     }
 
     @Test("a detected Kindle number crops above it")

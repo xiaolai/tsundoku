@@ -1728,6 +1728,9 @@ struct EngineBundleTests {
         #expect(settings.includeCoverPage)
         #expect(settings.writeSidecars)
         #expect(settings.booksFontSteps == 0)
+        #expect(settings.captureCropTop == 0)
+        #expect(settings.booksCropBottom == 54)
+        #expect(settings.kindleCropBottom == 0)
         #expect(settings.captureBundleOptions.includeCoverPage)
         let a4 = AISettings(capturePageSize: .a4)
         #expect(
