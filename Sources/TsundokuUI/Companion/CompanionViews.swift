@@ -89,7 +89,6 @@ public struct CompanionPanelView: View {
     let compact: Bool
     let onActivate: () -> Void
     let onClose: () -> Void
-    @Environment(\.colorScheme) private var colorScheme
 
     public init(
         model: AIPanelModel, compact: Bool,
@@ -102,60 +101,23 @@ public struct CompanionPanelView: View {
         self.onClose = onClose
     }
 
-    private var isDark: Bool { colorScheme == .dark }
-    private var panelFill: LinearGradient {
-        isDark
-            ? LinearGradient(
-                colors: [.black.opacity(0.52), .black.opacity(0.68)],
-                startPoint: .top, endPoint: .bottom)
-            : LinearGradient(
-                colors: [.white.opacity(0.58), .white.opacity(0.76)],
-                startPoint: .top, endPoint: .bottom)
-    }
-    private var panelTint: Color {
-        isDark ? .black.opacity(0.55) : .white.opacity(0.12)
-    }
-    private var panelBorder: Color {
-        isDark ? .white.opacity(0.13) : .black.opacity(0.08)
-    }
-
     public var body: some View {
+        let shape = RoundedRectangle(
+            cornerRadius: CompanionMetrics.cornerRadius,
+            style: .continuous)
         AIPanelView(
             model: model, compact: compact, onActivate: onActivate,
             onClose: onClose
         )
-        .foregroundStyle(isDark ? .white : .black)
-        .background(
-            panelFill,
-            in: RoundedRectangle(
-                cornerRadius: CompanionMetrics.cornerRadius,
-                style: .continuous))
-        .modifier(GlassPanel(tint: panelTint))
+        // The companion is a window, not a translucent HUD. An opaque system
+        // window background keeps long answers readable over a page view, and
+        // the window itself supplies the native shadow.
+        .background(Color(nsColor: .windowBackgroundColor), in: shape)
         .overlay(
-            RoundedRectangle(
-                cornerRadius: CompanionMetrics.cornerRadius,
-                style: .continuous)
-                .strokeBorder(panelBorder, lineWidth: 0.8))
-        .clipShape(
-            RoundedRectangle(
-                cornerRadius: CompanionMetrics.cornerRadius,
-                style: .continuous))
-    }
-}
-
-private struct GlassPanel: ViewModifier {
-    let tint: Color
-
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.glassEffect(
-                .regular.tint(tint),
-                in: RoundedRectangle(
-                    cornerRadius: CompanionMetrics.cornerRadius,
-                    style: .continuous))
-        } else {
-            content.background(.regularMaterial)
-        }
+            shape.strokeBorder(
+                Color(nsColor: .separatorColor).opacity(0.6),
+                lineWidth: 0.5))
+        .clipShape(shape)
     }
 }
 
