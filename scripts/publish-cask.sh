@@ -57,7 +57,9 @@ git -C "$tap" pull --ff-only --quiet
 existing=no
 [ -f "$tap/Casks/tsundoku.rb" ] && existing=yes
 cp "$cask" "$tap/Casks/tsundoku.rb"
-if git -C "$tap" diff --quiet -- Casks/tsundoku.rb; then
+# `git diff` sees only tracked files; a first-time cask is untracked, so ask
+# status, not diff.
+if [ -z "$(git -C "$tap" status --porcelain -- Casks/tsundoku.rb)" ]; then
     say "the tap already carries tsundoku $version"
     exit 0
 fi
