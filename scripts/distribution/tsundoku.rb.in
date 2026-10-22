@@ -1,0 +1,18 @@
+cask "tsundoku" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "https://github.com/@OWNER@/tsundoku/releases/download/v#{version}/Tsundoku-#{version}.dmg"
+  name "Tsundoku"
+  desc "Local Kindle and Apple Books annotations, history, PDF export and an AI reading companion"
+  homepage "https://github.com/@OWNER@/tsundoku"
+
+  livecheck do
+    url :homepage
+    strategy :github_latest
+  end
+
+  depends_on macos: :sequoia
+  app "Tsundoku.app"
+  uninstall quit: "com.lixiaolai.tsundoku"
+end

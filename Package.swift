@@ -2,32 +2,35 @@
 import PackageDescription
 
 let package = Package(
-    name: "Kindling",
+    name: "Tsundoku",
     platforms: [.macOS(.v15)],
     products: [
-        .executable(name: "Kindling", targets: ["KindlingApp"]),
-        .executable(name: "kindling-cli", targets: ["KindlingCLI"]),
+        .executable(name: "Tsundoku", targets: ["TsundokuApp"]),
+        .executable(name: "tsundoku-cli", targets: ["TsundokuCLI"]),
     ],
     dependencies: [
         .package(path: "../../kindle-toolkit/packages/ax-driver")
     ],
     targets: [
         .target(
-            name: "KindlingCore",
+            name: "TsundokuCore",
             dependencies: [.product(name: "KindleAX", package: "ax-driver")]
         ),
-        .target(name: "KindlingUI", dependencies: ["KindlingCore"]),
+        .target(name: "TsundokuUI", dependencies: ["TsundokuCore"]),
         .executableTarget(
-            name: "KindlingApp",
-            dependencies: ["KindlingCore", "KindlingUI"]
+            name: "TsundokuApp",
+            dependencies: ["TsundokuCore", "TsundokuUI"]
         ),
         .executableTarget(
-            name: "KindlingCLI",
-            dependencies: ["KindlingCore"]
+            name: "TsundokuCLI",
+            dependencies: ["TsundokuCore"]
         ),
         .testTarget(
-            name: "KindlingTests",
-            dependencies: ["KindlingCore"]
+            name: "TsundokuTests",
+            dependencies: [
+                "TsundokuCore",
+                .product(name: "KindleAX", package: "ax-driver"),
+            ]
         ),
     ],
     swiftLanguageModes: [.v6]

@@ -5,18 +5,68 @@ cd "$(dirname "$0")/.."
 VERSION="$(tr -d '[:space:]' < VERSION)"
 SDK_VERSION="$(xcrun --show-sdk-version)"
 MIN_VERSION="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
+APP="${TSUNDOKU_APP_PATH:-$PWD/build/Tsundoku.app}"
+
+# TSUNDOKU_APP_PATH becomes a recursive delete target below. Refuse anything
+# that is not an .app bundle inside this repository or /tmp, and never follow
+# a path with a parent traversal.
+case "$APP" in
+    *.app) ;;
+    *)
+        echo "build-app: refusing a path that is not an .app bundle: $APP" >&2
+        exit 1
+        ;;
+esac
+case "/$APP/" in
+    *"/../"*)
+        echo "build-app: refusing a path with a parent traversal: $APP" >&2
+        exit 1
+        ;;
+esac
+case "$APP" in
+    /*) ;;
+    *) APP="$PWD/$APP" ;;
+esac
+# Lexical containment first, so creating the parent cannot escape the roots.
+case "$APP" in
+    "$PWD"/*|/tmp/*) ;;
+    *)
+        echo "build-app: refusing an app path outside the repository or /tmp: $APP" >&2
+        exit 1
+        ;;
+esac
+# Resolve the destination's parent (creating it if needed) so a symlinked
+# ancestor cannot carry the delete outside the permitted roots.
+APP_PARENT="$(dirname "$APP")"
+mkdir -p "$APP_PARENT"
+APP_PARENT="$(cd "$APP_PARENT" && pwd -P)"
+APP="$APP_PARENT/$(basename "$APP")"
+# macOS resolves /tmp to /private/tmp; compare the canonical roots.
+REPO_ROOT="$(cd "$PWD" && pwd -P)"
+TMP_ROOT="$(cd /tmp && pwd -P)"
+case "$APP" in
+    "$REPO_ROOT"/*|"$TMP_ROOT"/*) ;;
+    *)
+        echo "build-app: refusing an app path outside the repository or /tmp: $APP" >&2
+        exit 1
+        ;;
+esac
+
 # SwiftPM links with the deployment target as both minos and sdk, which makes
 # macOS treat the app as a legacy build. Record the real SDK so the system
 # applies the current appearance while the minimum stays at macOS 15.
-swift build -c release --product Kindling \
+swift build -c release --product Tsundoku \
     -Xlinker -platform_version -Xlinker macos \
     -Xlinker "$MIN_VERSION" -Xlinker "$SDK_VERSION"
 BIN="$(swift build -c release --show-bin-path)"
-APP="${KINDLING_APP_PATH:-$PWD/build/Kindling.app}"
 
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN/Kindling" "$APP/Contents/MacOS/Kindling"
+# Assemble into a staging bundle, then replace the destination atomically.
+# A failed build leaves the previous app intact.
+STAGE="${APP}.stage.$$"
+trap 'rm -rf "$STAGE"' EXIT
+rm -rf "$STAGE"
+mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
+cp "$BIN/Tsundoku" "$STAGE/Contents/MacOS/Tsundoku"
 
 # Icon artifacts are generated from Resources/IconSources by
 # scripts/build-icons.sh and committed. An ordinary build must not need Xcode's
@@ -32,32 +82,69 @@ if [ "$(head -c 8 Resources/Assets.car)" != "BOMStore" ]; then
     echo "Resources/Assets.car is not an asset catalogue — rerun ./scripts/build-icons.sh" >&2
     exit 1
 fi
-cp Resources/AppIcon.icns Resources/Assets.car "$APP/Contents/Resources/"
+cp Resources/AppIcon.icns Resources/Assets.car "$STAGE/Contents/Resources/"
 
-cat > "$APP/Contents/Info.plist" <<PLIST
+cat > "$STAGE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleName</key><string>Kindling</string>
-<key>CFBundleDisplayName</key><string>Kindling</string>
-<key>CFBundleIdentifier</key><string>com.example.kindling</string>
-<key>CFBundleExecutable</key><string>Kindling</string>
+<key>CFBundleName</key><string>Tsundoku</string>
+<key>CFBundleDisplayName</key><string>Tsundoku</string>
+<key>CFBundleIdentifier</key><string>com.lixiaolai.tsundoku</string>
+<key>CFBundleExecutable</key><string>Tsundoku</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>${VERSION}</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleIconName</key><string>AppIcon</string>
-<key>LSMinimumSystemVersion</key><string>15.0</string>
+<key>LSMinimumSystemVersion</key><string>${MIN_VERSION}</string>
+<key>LSUIElement</key><true/>
 <key>LSApplicationCategoryType</key><string>public.app-category.reference</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
 
+# SwiftPM can record the deployment target as the SDK (15.0 / 15.0), which makes
+# macOS apply the compatibility appearance. The linker flag above prevents it;
+# this assertion makes a regression fail the build instead of a screenshot review.
+BUILD_INFO="$(vtool -show-build "$STAGE/Contents/MacOS/Tsundoku")"
+BIN_MINOS="$(awk '/minos/{print $2; exit}' <<<"$BUILD_INFO")"
+BIN_SDK="$(awk '/sdk/{print $2; exit}' <<<"$BUILD_INFO")"
+if [ "$BIN_MINOS" != "$MIN_VERSION" ] || [ "$BIN_SDK" != "$SDK_VERSION" ]; then
+    echo "build-app: Tsundoku records minos=$BIN_MINOS sdk=$BIN_SDK;" \
+        "expected minos=$MIN_VERSION sdk=$SDK_VERSION" >&2
+    echo "build-app: refusing a legacy-appearance build" >&2
+    exit 1
+fi
+if /usr/libexec/PlistBuddy -c 'Print :UIDesignRequiresCompatibility' \
+    "$STAGE/Contents/Info.plist" >/dev/null 2>&1
+then
+    echo "build-app: UIDesignRequiresCompatibility is set; refusing" >&2
+    exit 1
+fi
+
 SIGN_ID="${CODESIGN_IDENTITY:--}"
 if [ "$SIGN_ID" = "-" ]; then
-    codesign --force --sign - "$APP"
+    codesign --force --sign - "$STAGE"
 else
-    codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP"
+    codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$STAGE"
 fi
+codesign --verify --strict --deep "$STAGE"
+
+# The destination is replaced only after the staged bundle is signed and
+# verified. The old bundle is moved aside and restored if the install fails.
+BACKUP="${APP}.old.$$"
+if [ -e "$APP" ]; then
+    mv "$APP" "$BACKUP"
+fi
+if ! mv "$STAGE" "$APP"; then
+    if [ -e "$BACKUP" ]; then
+        mv "$BACKUP" "$APP"
+    fi
+    echo "build-app: could not install $APP; previous bundle restored" >&2
+    exit 1
+fi
+rm -rf "$BACKUP"
+trap - EXIT
 codesign --verify --strict --deep "$APP"
 echo "Built $APP"

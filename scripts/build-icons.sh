@@ -19,7 +19,7 @@
 #
 # Composition, measured from the delivered package:
 #
-#   macOS 15  IconSources/macos15/kindling-light-{1024,small}.svg
+#   macOS 15  IconSources/macos15/tsundoku-light-{1024,small}.svg
 #             The tile is already inset at 824/1024 with its own drop shadow,
 #             which is what a legacy .icns must carry. `small` (thicker stroke,
 #             no glint) is used at 16 and 32 only. Dark cannot be carried:
@@ -44,7 +44,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$REPO/Resources/IconSources"
 OUT_DIR="${ICON_OUTPUT_DIR:-$REPO/Resources}"
 PREVIEW_DIR="${ICON_PREVIEW_DIR:-}"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/kindling-icons.XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/tsundoku-icons.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 die() { echo "build-icons: $*" >&2; exit 1; }
@@ -80,8 +80,8 @@ echo "build-icons: tools ok ($("$ICTOOL" --version | tr -d '\n ' | sed 's/.*shor
 # icns-write stays readable. iconutil is not used: icns-write checks every
 # payload's pixel width against the slot it is placed in.
 
-SMALL="$SRC/macos15/kindling-light-small.svg"
-FULL="$SRC/macos15/kindling-light-1024.svg"
+SMALL="$SRC/macos15/tsundoku-light-small.svg"
+FULL="$SRC/macos15/tsundoku-light-1024.svg"
 [ -f "$SMALL" ] || die "missing $SMALL"
 [ -f "$FULL" ] || die "missing $FULL"
 

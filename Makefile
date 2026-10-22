@@ -13,7 +13,7 @@ test:
 	swift test
 
 run: app
-	open build/Kindling.app
+	open build/Tsundoku.app
 
 clean:
 	rm -rf .build build
