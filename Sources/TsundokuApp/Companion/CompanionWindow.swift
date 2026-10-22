@@ -70,7 +70,10 @@ final class CompanionWindow {
             backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.hasShadow = false
+        // Native reader windows cast the standard window shadow; the
+        // companion uses the same system shadow, following the opaque rounded
+        // content and the transparent corners.
+        window.hasShadow = true
         window.level = .floating
         window.collectionBehavior = [
             .canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle,
@@ -116,12 +119,14 @@ final class CompanionWindow {
         container.hitShape = shape
         hosting.rootView = content
         clearBackgrounds()
+        window.invalidateShadow()
     }
 
     func setFrame(_ frame: CGRect, animated: Bool, reduceMotion: Bool) {
         let shouldAnimate = animated && !reduceMotion
         guard shouldAnimate else {
             window.setFrame(frame, display: true)
+            window.invalidateShadow()
             return
         }
         NSAnimationContext.runAnimationGroup { context in
@@ -129,12 +134,15 @@ final class CompanionWindow {
             context.timingFunction = CAMediaTimingFunction(
                 name: .easeOut)
             window.animator().setFrame(frame, display: true)
+        } completionHandler: { [weak self] in
+            self?.window.invalidateShadow()
         }
     }
 
     func show() {
         clearBackgrounds()
         window.orderFrontRegardless()
+        window.invalidateShadow()
     }
 
     /// SwiftUI and AppKit can each paint an opaque backing behind a borderless
