@@ -110,14 +110,14 @@ the standard one.
 
 ## Evidence and e2e
 
-All GUI and end-to-end runs happen on `the test Mac`, never on the development
-Mac. See `the project documentation` and
-`../dev-docs/measurements/2026-10-21-wi0/`.
+All GUI and end-to-end runs happen on a separate test Mac, never on the
+development Mac. The test-host runbook and the recorded measurements live in
+the project's documentation repository.
 
 ## Release
 
 ```sh
-# Real release: read the notary credentials from ../.env, store the
+# Real release: read the notary credentials from the workspace .env, store the
 # keychain profile, then build, notarize, staple and verify.
 ./scripts/release.sh
 
