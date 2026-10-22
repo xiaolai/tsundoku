@@ -291,6 +291,10 @@ public struct AISettings: Codable, Sendable, Equatable {
     /// Turn Kindle's Popular Highlights display off for a capture and restore
     /// the setting afterwards. Default on.
     public var cleanPageDuringCapture: Bool
+    /// The PDF page size. `a4` resizes the reader's window for the capture.
+    public var capturePageSize: CapturePageSize
+    /// The Aa font size for the capture; nil keeps the reader's setting.
+    public var captureFontSize: Int?
 
     public init(
         provider: AIProviderKind = .claudeCLI,
@@ -298,7 +302,9 @@ public struct AISettings: Codable, Sendable, Equatable {
         endpoint: String = "http://127.0.0.1:11434/v1",
         language: String = "Simplified Chinese",
         sessionLogging: Bool = false,
-        cleanPageDuringCapture: Bool = true
+        cleanPageDuringCapture: Bool = true,
+        capturePageSize: CapturePageSize = .asDisplayed,
+        captureFontSize: Int? = nil
     ) {
         self.provider = provider
         self.model = model
@@ -306,11 +312,14 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.language = language
         self.sessionLogging = sessionLogging
         self.cleanPageDuringCapture = cleanPageDuringCapture
+        self.capturePageSize = capturePageSize
+        self.captureFontSize = captureFontSize
     }
 
     private enum CodingKeys: String, CodingKey {
         case provider, model, endpoint, language, sessionLogging
         case cleanPageDuringCapture
+        case capturePageSize, captureFontSize
     }
 
     /// Decodes every missing field to its default, so a settings blob written
@@ -339,6 +348,13 @@ public struct AISettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(
                 Bool.self, forKey: .cleanPageDuringCapture)
             ?? defaults.cleanPageDuringCapture
+        capturePageSize =
+            try container.decodeIfPresent(
+                CapturePageSize.self, forKey: .capturePageSize)
+            ?? defaults.capturePageSize
+        captureFontSize =
+            try container.decodeIfPresent(
+                Int.self, forKey: .captureFontSize)
     }
 
     public static let defaults = AISettings()

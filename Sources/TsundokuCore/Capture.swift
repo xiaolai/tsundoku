@@ -23,16 +23,19 @@ public struct CaptureResult: Sendable {
     public let pages: Int
     public let title: String
     public let cleanPage: CleanPageSummary?
+    public let pageSetup: PageSetupOutcome?
 
     public init(
         directory: URL, pdf: URL, pages: Int, title: String,
-        cleanPage: CleanPageSummary? = nil
+        cleanPage: CleanPageSummary? = nil,
+        pageSetup: PageSetupOutcome? = nil
     ) {
         self.directory = directory
         self.pdf = pdf
         self.pages = pages
         self.title = title
         self.cleanPage = cleanPage
+        self.pageSetup = pageSetup
     }
 }
 
@@ -51,13 +54,15 @@ public final class CaptureEngine: Sendable {
         output: URL,
         progress: @Sendable (CaptureProgress) -> Void,
         isCancelled: @escaping @Sendable () -> Bool,
-        cleanPage: CleanPagePolicy = .asDisplayed
+        cleanPage: CleanPagePolicy = .asDisplayed,
+        pageSetup: PageSetupRequest = PageSetupRequest()
     ) throws -> CaptureResult {
         let adapter = KindleCaptureAdapter()
         let subject = CaptureSubject(book: book, kind: .kindle)
         let session = try adapter.makeSession(
             for: subject,
-            cancellation: ClosureCancellation(isCancelled))
+            cancellation: ClosureCancellation(isCancelled),
+            pageSetup: pageSetup)
         return try CaptureJobEngine(archive: archive).run(
             session: session, subject: subject, pageLimit: pageLimit,
             output: output, progress: progress, isCancelled: isCancelled,

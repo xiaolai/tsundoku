@@ -58,6 +58,34 @@ public struct ExportsView: View {
                 }
                 .disabled(model.capturePhase == .running)
 
+                Picker(
+                    "Page size",
+                    selection: $model.settings.capturePageSize
+                ) {
+                    ForEach(CapturePageSize.allCases, id: \.self) { size in
+                        Text(size.title).tag(size)
+                    }
+                }
+                .disabled(model.capturePhase == .running)
+
+                Picker(
+                    "Font size",
+                    selection: $model.settings.captureFontSize
+                ) {
+                    Text("Keep current").tag(Int?.none)
+                    ForEach([5, 6, 7, 8, 9], id: \.self) { size in
+                        Text("\(size)").tag(Int?.some(size))
+                    }
+                }
+                .disabled(model.capturePhase == .running)
+
+                Text(
+                    "A4 resizes the reader window to 595×842 pt and restores "
+                        + "it. A font change reflows the book and is restored "
+                        + "after the capture.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Toggle(
                     "Hide Popular Highlights during capture",
                     isOn: $model.settings.cleanPageDuringCapture
@@ -195,6 +223,15 @@ public struct ExportsView: View {
         return "No book is open in Kindle."
     }
 
+    private func setupLine(_ setup: PageSetupOutcome) -> String {
+        var parts = ["Page: \(setup.pageSize.title)"]
+        if let font = setup.requestedFont {
+            parts.append("font \(font)")
+        }
+        parts.append(setup.restored ? "restored" : "NOT restored")
+        return parts.joined(separator: " · ")
+    }
+
     private var personalMarkCount: Int? {
         guard model.selectedBook?.source == .kindle else { return nil }
         return model.selectedBookAnnotations.filter {
@@ -231,6 +268,14 @@ public struct ExportsView: View {
                 }
                 if let note = model.captureCleanPage?.note {
                     Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let setup = model.capturePageSetup,
+                    setup.pageSize != .asDisplayed
+                        || setup.requestedFont != nil
+                {
+                    Text(setupLine(setup))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

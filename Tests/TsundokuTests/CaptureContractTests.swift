@@ -65,6 +65,7 @@ private final class FakeSession: ReaderCaptureSession {
     var advanceCalls = 0
     var snapshotCalls = 0
     var onRestore: (() -> Void)?
+    var pageSetupOutcome: PageSetupOutcome?
     var restoreReport: RestoreReport
 
     init(
@@ -727,6 +728,27 @@ struct CleanPageCaptureTests {
                 session, archive: archive, directory: directory,
                 book: selected)
         }
+    }
+
+    @Test("the page setup outcome reaches the manifest")
+    func pageSetupManifest() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = try testSnapshot()
+        let session = FakeSession(
+            identity: page.identity, snapshots: [page],
+            transitions: [.endOfBook(record(terminal: true))])
+        session.pageSetupOutcome = PageSetupOutcome(
+            pageSize: .a4, requestedFont: 5, originalFont: 7, finalFont: 7,
+            originalWindow: CGRect(x: 0, y: 0, width: 765, height: 871),
+            finalWindow: CGRect(x: 0, y: 0, width: 765, height: 871),
+            restored: true, reason: nil)
+        let result = try run(session, archive: archive, directory: directory)
+        let setup = try #require(
+            try manifest(at: result)["pageSetup"] as? [String: Any])
+        #expect(setup["pageSize"] as? String == "a4")
+        #expect(setup["restored"] as? Bool == true)
+        #expect(result.pageSetup?.requestedFont == 5)
     }
 
     @Test("an unknown identity is not a wrong-book failure")

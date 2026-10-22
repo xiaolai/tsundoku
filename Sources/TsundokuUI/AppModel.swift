@@ -129,6 +129,7 @@ public final class AppModel: ObservableObject {
     @Published public var capturePDF: URL?
     @Published public var captureDirectory: URL?
     @Published public var captureCleanPage: CleanPageSummary?
+    @Published public var capturePageSetup: PageSetupOutcome?
     @Published public var popularHighlightsState: Bool?
     @Published public var popularHighlightsNote: String?
     @Published public var capturePageLimit: Int?
@@ -209,30 +210,46 @@ public final class AppModel: ObservableObject {
         {
             settings.language = CommandLine.arguments[index + 1]
         }
-        recoverCleanPageIfNeeded()
+        recoverSettingsIfNeeded()
     }
 
     /// A crash between turning Popular Highlights off and restoring it leaves
     /// a journal behind. Restore it when Kindle is available; never block the
     /// launch on an Accessibility round trip.
-    private func recoverCleanPageIfNeeded() {
+    private func recoverSettingsIfNeeded() {
         guard capturePhase != .running,
             !cleanRecoveryRunning, !popularHighlightsProbeRunning,
-            CleanPageJournal().load() != nil, KindleLive.isRunning()
+            KindleLive.isRunning()
         else { return }
+        let setupPending = PageSetupJournal().load() != nil
+        let cleanPending = CleanPageJournal().load() != nil
+        guard setupPending || cleanPending else { return }
         cleanRecoveryRunning = true
         Task.detached { [weak self] in
-            let outcome = CleanPageGuard.recoverIfNeeded(
-                panel: KindlePopularHighlights())
+            var notices: [String] = []
+            if setupPending, let outcome = KindlePageSetup.recoverIfNeeded() {
+                notices.append(
+                    outcome.restored
+                        ? "Reader window and font restored after an "
+                            + "interrupted capture."
+                        : "Reader window or font could not be restored: "
+                            + (outcome.reason ?? "unknown reason"))
+            }
+            if cleanPending,
+                let outcome = CleanPageGuard.recoverIfNeeded(
+                    panel: KindlePopularHighlights())
+            {
+                notices.append(
+                    outcome.restored
+                        ? "Popular Highlights was restored after an "
+                            + "interrupted capture."
+                        : "Popular Highlights could not be restored: "
+                            + (outcome.reason ?? "unknown reason"))
+            }
             await MainActor.run {
                 self?.cleanRecoveryRunning = false
-                guard let outcome else { return }
-                self?.notice =
-                    outcome.restored
-                    ? "Popular Highlights was restored after an interrupted "
-                        + "capture."
-                    : "Popular Highlights could not be restored: "
-                        + (outcome.reason ?? "unknown reason")
+                guard let self, !notices.isEmpty else { return }
+                self.notice = notices.joined(separator: " ")
             }
         }
     }
@@ -593,7 +610,7 @@ public final class AppModel: ObservableObject {
 
     public func refreshActivity() {
         guard let archive else { return }
-        recoverCleanPageIfNeeded()
+        recoverSettingsIfNeeded()
         Task {
             let sessions = try? await Task.detached(operation: {
                 try archive.sessions()
@@ -812,12 +829,15 @@ public final class AppModel: ObservableObject {
         captureMessage = "Starting…"
         capturePDF = nil
         captureCleanPage = nil
+        capturePageSetup = nil
         captureDirectory = folder
         let flag = CancellationFlag()
         activeCaptureFlag = flag
         let cleanPolicy: CleanPagePolicy =
             settings.cleanPageDuringCapture ? .hidePopularHighlights
                 : .asDisplayed
+        let setup = PageSetupRequest(
+            pageSize: settings.capturePageSize, font: settings.captureFontSize)
         Task {
             do {
                 let result = try await Task.detached {
@@ -833,7 +853,8 @@ public final class AppModel: ObservableObject {
                             }
                         },
                         isCancelled: { flag.isSet },
-                        cleanPage: cleanPolicy)
+                        cleanPage: cleanPolicy,
+                        pageSetup: setup)
                 }.value
                 self.capturePhase = .finished
                 self.captureProgress = 1
@@ -841,6 +862,7 @@ public final class AppModel: ObservableObject {
                     "\(result.pages) pages · \(result.title)"
                 self.capturePDF = result.pdf
                 self.captureCleanPage = result.cleanPage
+                self.capturePageSetup = result.pageSetup
                 self.captureDirectory = result.directory
                 self.activeCaptureFlag = nil
                 self.reloadFromArchive()

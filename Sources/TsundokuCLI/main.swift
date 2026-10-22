@@ -20,6 +20,8 @@ struct TsundokuCLI {
             capture(Array(arguments.dropFirst()))
         case "clean-page":
             cleanPage(Array(arguments.dropFirst()))
+        case "page-setup":
+            pageSetup(Array(arguments.dropFirst()))
         case "export":
             export(Array(arguments.dropFirst()))
         case "history":
@@ -155,6 +157,12 @@ struct TsundokuCLI {
                     "capture-\(Int(Date().timeIntervalSince1970))")
             // Ctrl-C must cancel cooperatively, or the engine never restores
             // the reading position or the Popular Highlights setting.
+            let pageSize: CapturePageSize =
+                value("--page-size", in: arguments)?.lowercased() == "a4"
+                ? .a4 : .asDisplayed
+            let setup = PageSetupRequest(
+                pageSize: pageSize,
+                font: Int(value("--font-size", in: arguments) ?? ""))
             let flag = CancellationFlag()
             signal(SIGINT, SIG_IGN)
             signal(SIGTERM, SIG_IGN)
@@ -183,7 +191,8 @@ struct TsundokuCLI {
                 },
                 isCancelled: { flag.isSet },
                 cleanPage: arguments.contains("--clean-page")
-                    ? .hidePopularHighlights : .asDisplayed)
+                    ? .hidePopularHighlights : .asDisplayed,
+                pageSetup: setup)
             print("pdf=\(result.pdf.path)")
             print("pages=\(result.pages)")
             print("title=\(result.title)")
@@ -233,6 +242,35 @@ struct TsundokuCLI {
         } catch {
             print("error: \(error)")
             exit(1)
+        }
+    }
+
+    /// Inspect or restore a page setup left behind by an interrupted
+    /// capture. `status` prints the saved window and font, never any secret.
+    private static func pageSetup(_ arguments: [String]) {
+        switch arguments.first ?? "status" {
+        case "status":
+            guard let saved = PageSetupJournal().load() else {
+                print("journal=none")
+                return
+            }
+            print("journal=present")
+            if let font = saved.font { print("font=\(font)") }
+            if let window = saved.window {
+                print(
+                    "window=\(Int(window.minX)),\(Int(window.minY)) "
+                        + "\(Int(window.width))x\(Int(window.height))")
+            }
+        case "recover":
+            guard let outcome = KindlePageSetup.recoverIfNeeded() else {
+                print("journal=none")
+                return
+            }
+            print("restored=\(outcome.restored)")
+            print("reason=\(outcome.reason ?? "none")")
+        default:
+            print("usage: tsundoku-cli page-setup status|recover")
+            exit(2)
         }
     }
 
@@ -418,7 +456,9 @@ struct TsundokuCLI {
               ask --action explain|translate|summarize|ask|define
                   --question "…" --provider claude|codex|http|apple
               capture --pages 5 --out ~/TsundokuExports [--clean-page]
+                      [--page-size a4|display] [--font-size 5..9]
               clean-page status|begin|recover
+              page-setup status|recover
               export --format json|markdown|csv --provenance mine|popular|system
                      --source kindle|applebooks
               track --asin B0HH6TM91Q --seconds 6

@@ -36,6 +36,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
     private let openingPageCount: Int?
     private let openingTextWidth: Double?
     private var openingMark: PageMark?
+    private let pageSetupGuard: KindlePageSetup?
     private var records: [TurnRecord] = []
     private var storedRestore: RestoreReport?
 
@@ -55,7 +56,8 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         activate: @escaping () -> Void = KindleLive.activate,
         settleMinimum: TimeInterval = 0.30,
         settleTimeout: TimeInterval = 3.0,
-        restoreTimeout: TimeInterval = 60
+        restoreTimeout: TimeInterval = 60,
+        pageSetupGuard: KindlePageSetup? = nil
     ) throws {
         guard isTrusted() else {
             throw ReaderCaptureError.notTrusted(.kindle)
@@ -105,6 +107,20 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 reason: "the page frame is too small: "
                     + "\(Int(rect.width))×\(Int(rect.height))")
         }
+        if let page = pageSetupGuard?.pageSize.points {
+            let tolerance = 1.5
+            guard
+                abs(rect.width - page.width) <= tolerance,
+                abs(rect.height - page.height) <= tolerance
+            else {
+                throw ReaderCaptureError.captureFailed(
+                    .kindle,
+                    reason: "the layout produced "
+                        + "\(Int(rect.width))×\(Int(rect.height)) points "
+                        + "instead of \(Int(page.width))×"
+                        + "\(Int(page.height)); the window was refused")
+            }
+        }
 
         self.cancellation = cancellation
         self.readPage = readPage
@@ -129,6 +145,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
             pageNumber: first.pageNumber, pageCount: first.pageCount)
         self.openingPageCount = first.pageCount
         self.openingTextWidth = textRect.map { Double($0.width) }
+        self.pageSetupGuard = pageSetupGuard
         // A chrome-hidden reader exposes no title. Do not fabricate one:
         // an empty title with unknown confidence is what the engine treats
         // as "cannot verify", not as evidence of a wrong book.
@@ -277,6 +294,10 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                     ?? ""))
     }
 
+    public var pageSetupOutcome: PageSetupOutcome? {
+        pageSetupGuard?.outcome
+    }
+
     public func restore() -> RestoreReport {
         if let storedRestore { return storedRestore }
         let attempted = records.filter(\.attempted).count
@@ -337,7 +358,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
             PageLocation(pageNumber: $0.pageNumber, pageCount: $0.pageCount)
         }
         var verificationFailed = false
-        let exact: Bool
+        var exact: Bool
         if unresolved > 0 || backwardFailed || layoutChanged
             || final?.isReading != true
         {
@@ -361,25 +382,47 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         } else {
             exact = observed == 0
         }
+        var layoutProblem: String?
+        if let pageSetupGuard {
+            let outcome = pageSetupGuard.restore()
+            if !outcome.restored {
+                exact = false
+                layoutProblem =
+                    "the page setup was not restored: "
+                    + (outcome.reason ?? "unknown reason")
+            } else if exact, let openingMark,
+                pageSetupGuard.outcome?.requestedFont == nil
+            {
+                // The window does not reflow the text; verify the opening.
+                // A font change does, and the setup owns restoring the
+                // pre-capture position instead.
+                if (try? readCurrent())?.text != openingMark.text {
+                    exact = false
+                    layoutProblem =
+                        "the page moved when the page setup was restored"
+                }
+            }
+        }
         let report = RestoreReport(
             opening: opening, final: finalLocation, attempted: attempted,
             posted: posted, observed: observed, terminal: terminal,
             unresolved: unresolved, exact: exact,
             reason: exact ? nil
-                : layoutChanged
-                    ? "the layout changed during capture; restore stopped"
-                    : verificationFailed
-                        ? "the opening page could not be photographed"
-                        : backwardFailed
-                            ? "a backward turn failed"
-                            : timedOut
-                                ? "restore timed out after "
-                                    + "\(Int(restoreTimeout)) seconds"
-                                : unresolved > 0
-                                    ? "a posted turn was not observed"
-                                    : final?.isReading != true
-                                        ? "the reader is not in a reading state"
-                                        : "the opening page could not be verified")
+                : layoutProblem
+                    ?? (layoutChanged
+                        ? "the layout changed during capture; restore stopped"
+                        : verificationFailed
+                            ? "the opening page could not be photographed"
+                            : backwardFailed
+                                ? "a backward turn failed"
+                                : timedOut
+                                    ? "restore timed out after "
+                                        + "\(Int(restoreTimeout)) seconds"
+                                    : unresolved > 0
+                                        ? "a posted turn was not observed"
+                                        : final?.isReading != true
+                                            ? "the reader is not in a reading state"
+                                            : "the opening page could not be verified"))
         storedRestore = report
         return report
     }

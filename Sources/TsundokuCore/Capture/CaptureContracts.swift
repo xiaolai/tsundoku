@@ -280,4 +280,9 @@ public protocol ReaderCaptureSession: AnyObject {
     func snapshot() throws -> PageSnapshot
     func advance(after mark: PageMark) throws -> PageTransition
     func restore() -> RestoreReport
+    var pageSetupOutcome: PageSetupOutcome? { get }
+}
+
+public extension ReaderCaptureSession {
+    var pageSetupOutcome: PageSetupOutcome? { nil }
 }

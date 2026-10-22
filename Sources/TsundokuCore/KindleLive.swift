@@ -159,6 +159,60 @@ public enum KindleLive {
         }
     }
 
+    /// The scene window's frame in the global top-left AX space.
+    public static func windowFrame() throws -> CGRect {
+        guard AXIsProcessTrusted() else { throw KindleLiveError.notTrusted }
+        guard
+            let app = NSRunningApplication.runningApplications(
+                withBundleIdentifier: bundleID
+            ).first
+        else { throw KindleLiveError.notRunning }
+        let recorder = AXRecorder(source: LiveAXSource())
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        guard let window = try recorder.findWindow(from: axApp),
+            let frame = try recorder.source.frame(window)
+        else { throw KindleLiveError.noWindow }
+        return CGRect(
+            x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+    }
+
+    /// Move and resize the scene window, then report the frame Kindle
+    /// actually accepted. Used only for the pre-capture page setup.
+    public static func setWindowFrame(_ frame: CGRect) throws -> CGRect {
+        guard AXIsProcessTrusted() else { throw KindleLiveError.notTrusted }
+        guard
+            let app = NSRunningApplication.runningApplications(
+                withBundleIdentifier: bundleID
+            ).first
+        else { throw KindleLiveError.notRunning }
+        let recorder = AXRecorder(source: LiveAXSource())
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        guard let window = try recorder.findWindow(from: axApp) else {
+            throw KindleLiveError.noWindow
+        }
+        var origin = CGPoint(x: frame.minX, y: frame.minY)
+        var size = CGSize(width: frame.width, height: frame.height)
+        guard let position = AXValueCreate(.cgPoint, &origin),
+            let dimensions = AXValueCreate(.cgSize, &size)
+        else {
+            throw KindleLiveError.readFailed("could not build a frame value")
+        }
+        let moved = AXUIElementSetAttributeValue(
+            window, kAXPositionAttribute as CFString, position)
+        let resized = AXUIElementSetAttributeValue(
+            window, kAXSizeAttribute as CFString, dimensions)
+        guard moved == .success, resized == .success else {
+            throw KindleLiveError.readFailed("Kindle refused the window frame")
+        }
+        Thread.sleep(forTimeInterval: 0.35)
+        guard let actual = try recorder.source.frame(window) else {
+            throw KindleLiveError.noWindow
+        }
+        return CGRect(
+            x: actual.x, y: actual.y,
+            width: actual.width, height: actual.height)
+    }
+
     public static func postKey(_ key: CGKeyCode) throws {
         guard
             let app = NSRunningApplication.runningApplications(

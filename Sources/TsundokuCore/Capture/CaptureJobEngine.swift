@@ -388,7 +388,7 @@ public struct CaptureJobEngine: Sendable {
         }
         return CaptureResult(
             directory: output, pdf: pdfURL, pages: pages, title: title,
-            cleanPage: cleanSummary)
+            cleanPage: cleanSummary, pageSetup: session.pageSetupOutcome)
     }
 
     private static func signature(
@@ -481,6 +481,9 @@ public struct CaptureJobEngine: Sendable {
             "title": captureTitle(session: session, subject: subject),
             "warnings": [],
         ]
+        if let pageSetup = session.pageSetupOutcome {
+            manifest["pageSetup"] = pageSetup.manifest
+        }
         if let book = subject.book {
             manifest["author"] = book.author
         }

@@ -15,6 +15,9 @@ public enum CleanPageError: Error, CustomStringConvertible, Sendable {
     case stateUnreadable
     case toggleFailed(expected: Bool, actual: Bool?)
     case closeFailed
+    case fontControlMissing
+    case fontSizeOutOfRange(Int)
+    case fontSizeNotReached(target: Int, actual: Int)
 
     public var description: String {
         switch self {
@@ -39,6 +42,12 @@ public enum CleanPageError: Error, CustomStringConvertible, Sendable {
                 + "it reads \(actual.map { $0 ? "on" : "off" } ?? "unknown")."
         case .closeFailed:
             "The Reading Settings panel could not be closed."
+        case .fontControlMissing:
+            "The font size control was not found."
+        case .fontSizeOutOfRange(let value):
+            "The font size must be between 0 and 17, not \(value)."
+        case .fontSizeNotReached(let target, let actual):
+            "The font size did not reach \(target); it reads \(actual)."
         }
     }
 }
@@ -57,13 +66,13 @@ public struct KindlePopularHighlights: PopularHighlightsPanel {
     public init() {}
 
     public func state() throws -> Bool {
-        try withPanel { box in
+        try withPanel(tab: .more) { box in
             try readControl(box)
         }
     }
 
     public func set(_ on: Bool) throws {
-        try withPanel { box in
+        try withPanel(tab: .more) { box in
             let current = try readControl(box)
             guard current != on else { return }
             let expected = current ? "1" : "0"
@@ -104,8 +113,61 @@ public struct KindlePopularHighlights: PopularHighlightsPanel {
             Data(("[clean-page] " + message() + "\n").utf8))
     }
 
+    /// The Aa sheet's font size control. It is the slider's own value, the
+    /// same 0–17 scale the Font tab shows.
+    public func fontSize() throws -> Int {
+        try withPanel(tab: .font) { box in
+            try readFontSize(box)
+        }
+    }
+
+    /// Set the Aa font size and return the value it had before the change.
+    /// The set loop reads the slider back, so no separate verify session is
+    /// needed. Kindle does not re-render the page until it is turned; the
+    /// caller owns that reflow and the restore.
+    @discardableResult
+    public func setFontSize(_ value: Int) throws -> Int {
+        guard (0...17).contains(value) else {
+            throw CleanPageError.fontSizeOutOfRange(value)
+        }
+        return try withPanel(tab: .font) { box in
+            trace("setFontSize(\(value)) in the panel")
+            // The tab bar reports its controls before the sheet finishes
+            // animating; a press sent during the animation can dismiss the
+            // content the loop is about to read.
+            Thread.sleep(forTimeInterval: 0.5)
+            var original: Int?
+            for _ in 0..<40 {
+                guard let current = waitForFontSize(box, timeout: 1.0) else {
+                    trace("the font slider disappeared")
+                    throw CleanPageError.fontControlMissing
+                }
+                if original == nil { original = current }
+                trace("font slider reads \(current)")
+                if current == value { return original ?? current }
+                let identifier =
+                    current < value
+                    ? "increase-towards-17-Font Size"
+                    : "decrease-towards-0-Font Size"
+                let outcome = try box.runner.perform(
+                    identifier: identifier, action: AXAction.press,
+                    expecting: "", from: box.window)
+                trace("press \(identifier): \(outcome)")
+                Thread.sleep(forTimeInterval: 0.20)
+            }
+            throw CleanPageError.fontSizeNotReached(
+                target: value,
+                actual: waitForFontSize(box, timeout: 1.0) ?? -1)
+        }
+    }
+
+    private enum PanelTab {
+        case more
+        case font
+    }
+
     private func withPanel<T>(
-        _ body: (Box) throws -> T
+        tab: PanelTab, _ body: (Box) throws -> T
     ) throws -> T {
         guard AXIsProcessTrusted() else { throw CleanPageError.notTrusted }
         guard KindleLive.isRunning() else { throw CleanPageError.notRunning }
@@ -143,7 +205,7 @@ public struct KindlePopularHighlights: PopularHighlightsPanel {
                 Thread.sleep(forTimeInterval: 0.45)
             }
         }
-        try openPanel(box)
+        try openPanel(box, tab: tab)
         let result = try body(box)
         // On the success path a close failure is part of the result, not
         // cleanup to be swallowed.
@@ -164,17 +226,49 @@ public struct KindlePopularHighlights: PopularHighlightsPanel {
                     identifier: "Reading Settings", from: box.window))
                 ?? []
             if toolbar.isEmpty { return }
-            revealChrome(box)
+            // A centre click toggles the chrome but can land on a text link;
+            // the page's bottom margin is blank.
+            let points = revealPoints(box)
+            let point = points.count > 1 ? points[1] : (points.first ?? .zero)
+            revealChrome(box, at: point)
             Thread.sleep(forTimeInterval: 0.45)
         }
     }
 
-    private func openPanel(_ box: Box) throws {
+    /// Candidate taps for revealing the toolbar, safest first: the page's
+    /// top margin, its bottom margin, then the centre. A centre tap can land
+    /// on a hyperlink, which opens a browser instead of the toolbar.
+    private func revealPoints(_ box: Box) -> [CGPoint] {
+        guard let frame = try? box.recorder.source.frame(box.window) else {
+            return []
+        }
+        let window = CGRect(
+            x: frame.x, y: frame.y,
+            width: frame.width, height: frame.height)
+        var points: [CGPoint] = []
+        if let live = try? KindleLive.currentPage(),
+            let text = live.pageTextFrame
+        {
+            let topY = max(window.minY + 8, text.y - 8)
+            if topY < text.y {
+                points.append(CGPoint(x: window.midX, y: topY))
+            }
+            let bottomY = min(text.y + text.height + 8, window.maxY - 8)
+            if bottomY > text.y + text.height {
+                points.append(CGPoint(x: window.midX, y: bottomY))
+            }
+        }
+        points.append(CGPoint(x: window.midX, y: window.midY))
+        return points
+    }
+
+    private func openPanel(_ box: Box, tab: PanelTab) throws {
         if isPanelOpen(box) {
             trace("panel already open")
-            try selectMoreTab(box)
+            try selectTab(tab, box)
             return
         }
+        let points = revealPoints(box)
         var opened = false
         if case .performed = (try? press("Reading Settings", in: box))
             ?? .notFound
@@ -183,36 +277,105 @@ public struct KindlePopularHighlights: PopularHighlightsPanel {
             trace("pressed Reading Settings")
         } else {
             // With the chrome hidden, the toolbar button does not exist yet.
-            // A centre click brings the toolbar up; then ask again.
-            trace("Reading Settings was not pressable; revealing the toolbar")
-            revealChrome(box)
-            if case .performed = (try? press("Reading Settings", in: box))
-                ?? .notFound
-            {
-                opened = true
-                trace("pressed Reading Settings after revealing chrome")
+            // Reveal it at each candidate point until the button appears.
+            for point in points {
+                trace(
+                    "revealing chrome at \(Int(point.x)),\(Int(point.y))")
+                revealChrome(box, at: point)
+                if case .performed = (try? press("Reading Settings", in: box))
+                    ?? .notFound
+                {
+                    opened = true
+                    break
+                }
+                // A link tap can take focus; ask LaunchServices again.
+                if !KindleLive.isFrontmost() { KindleLive.activate() }
             }
         }
-        guard opened, wait(2.5, { isPanelOpen(box) }) else {
-            trace("the panel did not open")
-            // A press issued while the sheet was still closing is ignored;
-            // ask once more before giving up. Reveal the toolbar only when it
-            // is actually hidden — a centre click toggles it.
-            let toolbar =
-                (try? box.recorder.elements(
-                    identifier: "Reading Settings", from: box.window)) ?? []
-            if toolbar.isEmpty { revealChrome(box) }
-            guard
-                case .performed = (try? press("Reading Settings", in: box))
-                    ?? .notFound,
-                wait(2.5, { isPanelOpen(box) })
-            else { throw CleanPageError.panelUnavailable }
-            trace("the panel opened on the retry")
-            try selectMoreTab(box)
+        if opened, wait(2.5, { isPanelOpen(box) }) {
+            trace("the panel opened")
+            try selectTab(tab, box)
             return
         }
-        trace("the panel opened")
-        try selectMoreTab(box)
+        trace("the panel did not open")
+        // A press issued while a sheet was still closing is ignored; try the
+        // candidate points once more before giving up.
+        for point in points {
+            if !KindleLive.isFrontmost() { KindleLive.activate() }
+            revealChrome(box, at: point)
+            if case .performed = (try? press("Reading Settings", in: box))
+                ?? .notFound,
+                wait(2.5, { isPanelOpen(box) })
+            {
+                trace("the panel opened on the retry")
+                try selectTab(tab, box)
+                return
+            }
+        }
+        throw CleanPageError.panelUnavailable
+    }
+
+    private func selectTab(_ tab: PanelTab, _ box: Box) throws {
+        // The sheet reports its tab bar before the entrance animation ends;
+        // a press sent during it is ignored and can dismiss the sheet.
+        Thread.sleep(forTimeInterval: 0.6)
+        switch tab {
+        case .more: try selectMoreTab(box)
+        case .font: try selectFontTab(box)
+        }
+    }
+
+    private func selectFontTab(_ box: Box) throws {
+        if (try? readFontSize(box)) != nil {
+            trace("the Font tab is already selected")
+            return
+        }
+        for attempt in 0..<2 {
+            let outcome = (try? press("Font", in: box)) ?? .notFound
+            trace("pressed Font (attempt \(attempt + 1)): \(outcome)")
+            if wait(2.0, { (try? readFontSize(box)) != nil }) {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.4)
+        }
+        throw CleanPageError.controlMissing
+    }
+
+    /// The panel rebuilds its tree while a size change animates; a read can
+    /// miss the slider for a moment.
+    private func waitForFontSize(
+        _ box: Box, timeout: TimeInterval
+    ) -> Int? {
+        let deadline = Date().addingTimeInterval(max(timeout, 2.0))
+        repeat {
+            if let value = try? readFontSize(box) { return value }
+            Thread.sleep(forTimeInterval: 0.10)
+        } while Date() < deadline
+        return nil
+    }
+
+    private func readFontSize(_ box: Box) throws -> Int {
+        guard
+            let control = try box.recorder.elements(
+                identifier: "AaSeekbar-Font Size", from: box.window).first
+        else {
+            throw CleanPageError.fontControlMissing
+        }
+        let scalar = try box.recorder.source.value(control)
+        // The slider's value is an AX number, not text; `asText` returns nil
+        // for every non-string and silently hid the setting.
+        let value: Int?
+        if let number = scalar?.asNumber {
+            value = Int(number.rounded())
+        } else if let text = scalar?.asText {
+            value = Int(text)
+        } else {
+            value = nil
+        }
+        guard let value else {
+            throw CleanPageError.stateUnreadable
+        }
+        return value
     }
 
     private func selectMoreTab(_ box: Box) throws {
@@ -351,14 +514,8 @@ public struct KindlePopularHighlights: PopularHighlightsPanel {
         }
     }
 
-    private func revealChrome(_ box: Box) {
+    private func revealChrome(_ box: Box, at center: CGPoint) {
         guard KindleLive.isFrontmost() else { return }
-        guard let frame = try? box.recorder.source.frame(box.window) else {
-            return
-        }
-        let center = CGPoint(
-            x: frame.x + frame.width / 2,
-            y: frame.y + frame.height / 2)
         let original = CGEvent(source: nil)?.location
         func post(_ type: CGEventType, _ point: CGPoint) {
             CGEvent(

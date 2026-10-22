@@ -186,7 +186,7 @@ public enum PageFrame {
     public static func isFullScreen(
         _ window: CGRect, displays: [CGRect]? = nil
     ) -> Bool {
-        (displays ?? activeDisplayBounds()).contains {
+        (displays ?? displayBounds()).contains {
             abs($0.minX - window.minX) <= 1
                 && abs($0.minY - window.minY) <= 1
                 && abs($0.width - window.width) <= 1
@@ -195,7 +195,7 @@ public enum PageFrame {
     }
 
     /// Bounds in the top-left-origin global space AX reports frames in.
-    private static func activeDisplayBounds() -> [CGRect] {
+    public static func displayBounds() -> [CGRect] {
         var count: UInt32 = 0
         guard CGGetActiveDisplayList(0, nil, &count) == .success else {
             return []
