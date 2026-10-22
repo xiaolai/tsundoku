@@ -1,6 +1,6 @@
 import Foundation
 
-public final class CancellationFlag: @unchecked Sendable {
+public final class CancellationFlag: CancellationChecking, @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
 

@@ -70,7 +70,8 @@ public struct RootView: View {
         switch (short, build) {
         case let (short?, build?): return "\(short) (\(build))"
         case let (short?, nil): return short
-        default: return "1.0.0"
+        // Unbundled runs have no Info.plist; VERSION owns the release number.
+        default: return "dev"
         }
     }
 

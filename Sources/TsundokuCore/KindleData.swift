@@ -69,28 +69,35 @@ public struct KindleSnapshot: Sendable {
             "tsundoku-\(UUID().uuidString)")
         try manager.createDirectory(
             at: directory, withIntermediateDirectories: true)
-        let bookData = directory.appendingPathComponent("BookData.sqlite")
-        let annotationStorage = directory.appendingPathComponent(
-            "AnnotationStorage")
-        let whispersync = directory.appendingPathComponent(
-            "WSyncDefault.sqlite")
-        try SQLiteSnapshot.copy(paths.bookData, to: bookData)
-        try SQLiteSnapshot.copy(paths.annotationStorage, to: annotationStorage)
-        try SQLiteSnapshot.copy(paths.whispersync, to: whispersync)
-        var ksdk: URL?
-        if let source = paths.accountAnnotationDB {
-            let destination = directory.appendingPathComponent(
-                "ksdk_annotation_v1.db")
-            try SQLiteSnapshot.copy(source, to: destination)
-            ksdk = destination
+        do {
+            let bookData = directory.appendingPathComponent("BookData.sqlite")
+            let annotationStorage = directory.appendingPathComponent(
+                "AnnotationStorage")
+            let whispersync = directory.appendingPathComponent(
+                "WSyncDefault.sqlite")
+            try SQLiteSnapshot.copy(paths.bookData, to: bookData)
+            try SQLiteSnapshot.copy(
+                paths.annotationStorage, to: annotationStorage)
+            try SQLiteSnapshot.copy(paths.whispersync, to: whispersync)
+            var ksdk: URL?
+            if let source = paths.accountAnnotationDB {
+                let destination = directory.appendingPathComponent(
+                    "ksdk_annotation_v1.db")
+                try SQLiteSnapshot.copy(source, to: destination)
+                ksdk = destination
+            }
+            return KindleSnapshot(
+                directory: directory,
+                bookData: bookData,
+                annotationStorage: annotationStorage,
+                ksdk: ksdk,
+                whispersync: whispersync,
+                ebooks: paths.ebooks)
+        } catch {
+            // A partial copy is not a snapshot; do not leak the directory.
+            try? manager.removeItem(at: directory)
+            throw error
         }
-        return KindleSnapshot(
-            directory: directory,
-            bookData: bookData,
-            annotationStorage: annotationStorage,
-            ksdk: ksdk,
-            whispersync: whispersync,
-            ebooks: paths.ebooks)
     }
 
     public func cleanup() {
@@ -101,6 +108,16 @@ public struct KindleSnapshot: Sendable {
 public enum KindleReader {
     public static func readAll(_ paths: KindlePaths) throws
         -> (books: [Book], annotations: [Annotation])
+    {
+        let all = try readAllWithStates(paths)
+        return (all.books, all.annotations)
+    }
+
+    /// The same read, with the Whispersync states that were reconciled into
+    /// `books`; `inspect` reports their count.
+    public static func readAllWithStates(_ paths: KindlePaths) throws
+        -> (books: [Book], annotations: [Annotation],
+            states: [String: Int])
     {
         let snapshot = try KindleSnapshot.capture(paths)
         defer { snapshot.cleanup() }
@@ -113,7 +130,7 @@ public enum KindleReader {
         }
         var annotations = try readAnnotationStorage(snapshot, books: books)
         annotations.append(contentsOf: try readKSDK(snapshot, books: books))
-        return (books, annotations)
+        return (books, annotations, readStates)
     }
 
     // MARK: - Books

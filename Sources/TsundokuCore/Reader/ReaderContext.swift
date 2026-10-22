@@ -15,6 +15,15 @@ public enum ReaderKind: String, Codable, CaseIterable, Sendable {
         }
     }
 
+    /// The value stored in the capture manifest and the archive's
+    /// `captures.source` column.
+    public var captureSource: String {
+        switch self {
+        case .kindle: "kindle"
+        case .appleBooks: "applebooks"
+        }
+    }
+
     public var bundleID: String {
         switch self {
         case .kindle: "com.amazon.Lassen"
@@ -32,11 +41,13 @@ public enum ReaderKind: String, Codable, CaseIterable, Sendable {
 public enum ReaderTextSource: String, Codable, Equatable, Sendable {
     case accessibility
     case ocr
+    case none
 
     public var displayName: String {
         switch self {
         case .accessibility: "Accessibility"
         case .ocr: "OCR"
+        case .none: "No text"
         }
     }
 
@@ -46,6 +57,7 @@ public enum ReaderTextSource: String, Codable, Equatable, Sendable {
         switch self {
         case .accessibility: nil
         case .ocr: "Read with OCR — check the text before relying on it."
+        case .none: nil
         }
     }
 }

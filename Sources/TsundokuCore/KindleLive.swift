@@ -13,6 +13,7 @@ public struct LivePage: Sendable, Equatable {
     public let endOfBook: Bool
     public let pageNumber: Int?
     public let pageCount: Int?
+    public let chromeInsets: CaptureInsets?
     public let observedAt: Date
 
     public var isReading: Bool { state == "readingChromeHidden" }
@@ -27,6 +28,7 @@ public struct LivePage: Sendable, Equatable {
         endOfBook: Bool,
         pageNumber: Int?,
         pageCount: Int?,
+        chromeInsets: CaptureInsets? = nil,
         observedAt: Date = Date()
     ) {
         self.state = state
@@ -38,6 +40,7 @@ public struct LivePage: Sendable, Equatable {
         self.endOfBook = endOfBook
         self.pageNumber = pageNumber
         self.pageCount = pageCount
+        self.chromeInsets = chromeInsets
         self.observedAt = observedAt
     }
 }
@@ -77,14 +80,36 @@ public enum KindleLive {
         AXIsProcessTrusted()
     }
 
+    public static func isFrontmost() -> Bool {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .first?.isActive == true
+    }
+
+    /// Bring Kindle to the front.
+    ///
+    /// `NSRunningApplication.activate` alone is refused when the caller is a
+    /// CLI child of SSH — the calling process is not active, so it has no
+    /// activation rights, and Kindle stays behind another app while a display
+    /// capture photographs whatever is on top. `openApplication` asks
+    /// LaunchServices, which does raise the app.
     public static func activate() {
         guard
             let app = NSRunningApplication.runningApplications(
                 withBundleIdentifier: bundleID
             ).first
         else { return }
+        if app.isActive { return }
+        if let url = app.bundleURL {
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            let semaphore = DispatchSemaphore(value: 0)
+            NSWorkspace.shared.openApplication(
+                at: url, configuration: configuration
+            ) { _, _ in semaphore.signal() }
+            _ = semaphore.wait(timeout: .now() + 3)
+        }
         app.activate(options: [.activateAllWindows])
-        Thread.sleep(forTimeInterval: 0.25)
+        Thread.sleep(forTimeInterval: 0.30)
     }
 
     public static func currentPage() throws -> LivePage {
@@ -103,6 +128,19 @@ public enum KindleLive {
             let tree = try recorder.capture(window)
             let frame = try? recorder.source.frame(window)
             let number = pageNumber(tree)
+            var chrome: CaptureInsets?
+            if let frame {
+                let windowRect = CGRect(
+                    x: frame.x, y: frame.y,
+                    width: frame.width, height: frame.height)
+                let content = tree.pageTextRect.map {
+                    CGRect(
+                        x: $0.x, y: $0.y,
+                        width: $0.width, height: $0.height)
+                }
+                chrome = try? PageFrame.chromeIntrusion(
+                    tree: tree, window: windowRect, content: content)
+            }
             return LivePage(
                 state: tree.readerState.rawValue,
                 text: tree.pageText ?? "",
@@ -112,7 +150,8 @@ public enum KindleLive {
                 pageTextFrame: tree.pageTextRect,
                 endOfBook: tree.isEndOfBook,
                 pageNumber: number?.current,
-                pageCount: number?.total)
+                pageCount: number?.total,
+                chromeInsets: chrome)
         } catch let error as KindleLiveError {
             throw error
         } catch {
@@ -144,9 +183,15 @@ public enum KindleLive {
     private static func pageNumber(_ tree: AXNode) -> (
         current: Int, total: Int?
     )? {
+        // The full overlay was recorded exposing the location through
+        // AXDescription (label) with no value.
         guard
-            let text = tree.first(identifier: ReaderIdentifier.pageLocationText)?
-                .value?.asText
+            let node = tree.first(
+                identifier: ReaderIdentifier.pageLocationText)
+        else { return nil }
+        guard
+            let text = node.value?.asText ?? node.label,
+            !text.isEmpty
         else { return nil }
         let numbers = text.split(whereSeparator: { !$0.isNumber })
             .compactMap { Int($0) }

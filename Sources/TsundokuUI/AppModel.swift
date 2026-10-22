@@ -128,6 +128,10 @@ public final class AppModel: ObservableObject {
     @Published public var captureMessage = ""
     @Published public var capturePDF: URL?
     @Published public var captureDirectory: URL?
+    @Published public var captureCleanPage: CleanPageSummary?
+    @Published public var popularHighlightsState: Bool?
+    @Published public var popularHighlightsNote: String?
+    @Published public var capturePageLimit: Int?
     @Published public var exportFolder: URL = FileManager.default.urls(
         for: .documentDirectory, in: .userDomainMask
     )[0].appendingPathComponent("Tsundoku")
@@ -143,6 +147,8 @@ public final class AppModel: ObservableObject {
     private var pollGeneration = 0
     private var reloadGeneration = 0
     private var permissionCancellables: Set<AnyCancellable> = []
+    private var cleanRecoveryRunning = false
+    private var popularHighlightsProbeRunning = false
 
     /// Set by the app shell. The companion owns the reading panel, so the
     /// library window asks it to open rather than creating a second panel.
@@ -202,6 +208,32 @@ public final class AppModel: ObservableObject {
             CommandLine.arguments.indices.contains(index + 1)
         {
             settings.language = CommandLine.arguments[index + 1]
+        }
+        recoverCleanPageIfNeeded()
+    }
+
+    /// A crash between turning Popular Highlights off and restoring it leaves
+    /// a journal behind. Restore it when Kindle is available; never block the
+    /// launch on an Accessibility round trip.
+    private func recoverCleanPageIfNeeded() {
+        guard capturePhase != .running,
+            !cleanRecoveryRunning, !popularHighlightsProbeRunning,
+            CleanPageJournal().load() != nil, KindleLive.isRunning()
+        else { return }
+        cleanRecoveryRunning = true
+        Task.detached { [weak self] in
+            let outcome = CleanPageGuard.recoverIfNeeded(
+                panel: KindlePopularHighlights())
+            await MainActor.run {
+                self?.cleanRecoveryRunning = false
+                guard let outcome else { return }
+                self?.notice =
+                    outcome.restored
+                    ? "Popular Highlights was restored after an interrupted "
+                        + "capture."
+                    : "Popular Highlights could not be restored: "
+                        + (outcome.reason ?? "unknown reason")
+            }
         }
     }
 
@@ -531,8 +563,37 @@ public final class AppModel: ObservableObject {
             .store(in: &permissionCancellables)
     }
 
+    /// Read Kindle's Popular Highlights state for the Exports pane. It opens
+    /// and closes the Aa panel, so it is never run during a capture.
+    public func refreshPopularHighlights() {
+        guard capturePhase != .running, !cleanRecoveryRunning,
+            !popularHighlightsProbeRunning, KindleLive.isRunning(),
+            AXIsProcessTrusted()
+        else {
+            popularHighlightsState = nil
+            return
+        }
+        popularHighlightsProbeRunning = true
+        Task.detached { [weak self] in
+            let result = Result { try KindlePopularHighlights().state() }
+            await MainActor.run {
+                self?.popularHighlightsProbeRunning = false
+                switch result {
+                case .success(let on):
+                    self?.popularHighlightsState = on
+                    self?.popularHighlightsNote = nil
+                case .failure(let error):
+                    self?.popularHighlightsState = nil
+                    self?.popularHighlightsNote =
+                        "Popular Highlights: could not be read (\(error))."
+                }
+            }
+        }
+    }
+
     public func refreshActivity() {
         guard let archive else { return }
+        recoverCleanPageIfNeeded()
         Task {
             let sessions = try? await Task.detached(operation: {
                 try archive.sessions()
@@ -714,6 +775,14 @@ public final class AppModel: ObservableObject {
     public func startCapture(pages: Int?) {
         guard let archive else { return }
         guard capturePhase != .running else { return }
+        // The probe and the crash recovery both open Kindle's settings panel;
+        // a capture must not start on top of either.
+        guard !popularHighlightsProbeRunning, !cleanRecoveryRunning else {
+            capturePhase = .failed
+            captureMessage =
+                "Tsundoku is reading Kindle's settings. Try again in a moment."
+            return
+        }
         if selectedBook?.source == .appleBooks {
             capturePhase = .failed
             captureMessage =
@@ -739,11 +808,16 @@ public final class AppModel: ObservableObject {
             "\(slug(title))-\(timestamp())")
         capturePhase = .running
         captureProgress = 0
+        capturePageLimit = pages
         captureMessage = "Starting…"
         capturePDF = nil
+        captureCleanPage = nil
         captureDirectory = folder
         let flag = CancellationFlag()
         activeCaptureFlag = flag
+        let cleanPolicy: CleanPagePolicy =
+            settings.cleanPageDuringCapture ? .hidePopularHighlights
+                : .asDisplayed
         Task {
             do {
                 let result = try await Task.detached {
@@ -758,13 +832,15 @@ public final class AppModel: ObservableObject {
                                 self.captureMessage = progress.message
                             }
                         },
-                        isCancelled: { flag.isSet })
+                        isCancelled: { flag.isSet },
+                        cleanPage: cleanPolicy)
                 }.value
                 self.capturePhase = .finished
                 self.captureProgress = 1
                 self.captureMessage =
                     "\(result.pages) pages · \(result.title)"
                 self.capturePDF = result.pdf
+                self.captureCleanPage = result.cleanPage
                 self.captureDirectory = result.directory
                 self.activeCaptureFlag = nil
                 self.reloadFromArchive()

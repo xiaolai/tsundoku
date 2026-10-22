@@ -220,10 +220,16 @@ public struct CaptureRecord: Identifiable, Hashable, Sendable {
     public let pdfPath: String?
     public let createdAt: Date
     public let state: String
+    public let source: String
+    public let identityConfidence: String?
+    public let termination: String?
+    public let warnings: [String]
 
     public init(
         id: Int64, asin: String, title: String, directory: String,
-        pageCount: Int, pdfPath: String?, createdAt: Date, state: String
+        pageCount: Int, pdfPath: String?, createdAt: Date, state: String,
+        source: String = "kindle", identityConfidence: String? = nil,
+        termination: String? = nil, warnings: [String] = []
     ) {
         self.id = id
         self.asin = asin
@@ -233,6 +239,10 @@ public struct CaptureRecord: Identifiable, Hashable, Sendable {
         self.pdfPath = pdfPath
         self.createdAt = createdAt
         self.state = state
+        self.source = source
+        self.identityConfidence = identityConfidence
+        self.termination = termination
+        self.warnings = warnings
     }
 }
 
@@ -278,19 +288,57 @@ public struct AISettings: Codable, Sendable, Equatable {
     public var endpoint: String
     public var language: String
     public var sessionLogging: Bool
+    /// Turn Kindle's Popular Highlights display off for a capture and restore
+    /// the setting afterwards. Default on.
+    public var cleanPageDuringCapture: Bool
 
     public init(
         provider: AIProviderKind = .claudeCLI,
         model: String = "",
         endpoint: String = "http://127.0.0.1:11434/v1",
         language: String = "Simplified Chinese",
-        sessionLogging: Bool = false
+        sessionLogging: Bool = false,
+        cleanPageDuringCapture: Bool = true
     ) {
         self.provider = provider
         self.model = model
         self.endpoint = endpoint
         self.language = language
         self.sessionLogging = sessionLogging
+        self.cleanPageDuringCapture = cleanPageDuringCapture
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case provider, model, endpoint, language, sessionLogging
+        case cleanPageDuringCapture
+    }
+
+    /// Decodes every missing field to its default, so a settings blob written
+    /// before a field existed does not reset the whole pane.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AISettings()
+        provider =
+            try container.decodeIfPresent(
+                AIProviderKind.self, forKey: .provider)
+            ?? defaults.provider
+        model =
+            try container.decodeIfPresent(String.self, forKey: .model)
+            ?? defaults.model
+        endpoint =
+            try container.decodeIfPresent(String.self, forKey: .endpoint)
+            ?? defaults.endpoint
+        language =
+            try container.decodeIfPresent(String.self, forKey: .language)
+            ?? defaults.language
+        sessionLogging =
+            try container.decodeIfPresent(
+                Bool.self, forKey: .sessionLogging)
+            ?? defaults.sessionLogging
+        cleanPageDuringCapture =
+            try container.decodeIfPresent(
+                Bool.self, forKey: .cleanPageDuringCapture)
+            ?? defaults.cleanPageDuringCapture
     }
 
     public static let defaults = AISettings()

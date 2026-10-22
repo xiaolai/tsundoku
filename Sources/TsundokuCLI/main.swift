@@ -18,6 +18,8 @@ struct TsundokuCLI {
             await ask(Array(arguments.dropFirst()))
         case "capture":
             capture(Array(arguments.dropFirst()))
+        case "clean-page":
+            cleanPage(Array(arguments.dropFirst()))
         case "export":
             export(Array(arguments.dropFirst()))
         case "history":
@@ -41,14 +43,12 @@ struct TsundokuCLI {
                 print("Kindle data not found at \(paths.container.path)")
                 exit(1)
             }
-            let snapshot = try KindleSnapshot.capture(paths)
-            let books = try KindleReader.readBooks(snapshot)
-            let states = try KindleReader.readReadStates(snapshot)
-            let storage = try KindleReader.readAnnotationStorage(
-                snapshot, books: books)
-            let ksdk = try KindleReader.readKSDK(snapshot, books: books)
-            snapshot.cleanup()
-            let annotations = storage + ksdk
+            // Read through the reconciled path: importing the raw BookData
+            // states here overwrote correct Whispersync read statuses.
+            let data = try KindleReader.readAllWithStates(paths)
+            let books = data.books
+            let states = data.states
+            let annotations = data.annotations
             let user = annotations.filter { $0.provenance == .user }
             let archive = try Archive.standard()
             let imported = try archive.importAll(
@@ -153,6 +153,23 @@ struct TsundokuCLI {
             let output = URL(fileURLWithPath: outputPath)
                 .appendingPathComponent(
                     "capture-\(Int(Date().timeIntervalSince1970))")
+            // Ctrl-C must cancel cooperatively, or the engine never restores
+            // the reading position or the Popular Highlights setting.
+            let flag = CancellationFlag()
+            signal(SIGINT, SIG_IGN)
+            signal(SIGTERM, SIG_IGN)
+            let interrupt = DispatchSource.makeSignalSource(
+                signal: SIGINT, queue: .global())
+            interrupt.setEventHandler { flag.set() }
+            interrupt.resume()
+            let terminate = DispatchSource.makeSignalSource(
+                signal: SIGTERM, queue: .global())
+            terminate.setEventHandler { flag.set() }
+            terminate.resume()
+            defer {
+                interrupt.cancel()
+                terminate.cancel()
+            }
             let engine = CaptureEngine(archive: archive)
             let result = try engine.capture(
                 book: book, pageLimit: pages, output: output,
@@ -164,11 +181,55 @@ struct TsundokuCLI {
                             } ?? "")
                             + " · \(progress.message)")
                 },
-                isCancelled: { false })
+                isCancelled: { flag.isSet },
+                cleanPage: arguments.contains("--clean-page")
+                    ? .hidePopularHighlights : .asDisplayed)
             print("pdf=\(result.pdf.path)")
             print("pages=\(result.pages)")
             print("title=\(result.title)")
             print("directory=\(result.directory.path)")
+            if let clean = result.cleanPage {
+                print("cleanPage=\(clean.changed ? "changed" : "unchanged")"
+                    + " restored=\(clean.restored)")
+            }
+        } catch {
+            print("error: \(error)")
+            exit(1)
+        }
+    }
+
+    /// Manual control and crash-recovery harness for the Popular Highlights
+    /// guard. `begin` leaves the journal behind, exactly as a crash between
+    /// the toggle and its restore would; `recover` puts the setting back.
+    private static func cleanPage(_ arguments: [String]) {
+        let panel = KindlePopularHighlights()
+        do {
+            switch arguments.first ?? "status" {
+            case "status":
+                let on = try panel.state()
+                let journal = CleanPageJournal().load()
+                print("popularHighlights=\(on ? "on" : "off")")
+                print(
+                    "journal="
+                        + (journal.map { $0 ? "original-on" : "original-off" }
+                            ?? "none"))
+            case "begin":
+                let outcome = try CleanPageGuard(panel: panel).begin()
+                print("changed=\(outcome.changed)")
+                print("journal=\(CleanPageJournal().load() == nil ? "none" : "written")")
+            case "recover":
+                guard
+                    let outcome = CleanPageGuard.recoverIfNeeded(panel: panel)
+                else {
+                    print("journal=none")
+                    return
+                }
+                print("restored=\(outcome.restored)")
+                print("reason=\(outcome.reason ?? "none")")
+            default:
+                print("usage: tsundoku-cli clean-page status|begin|recover")
+                exit(2)
+            }
         } catch {
             print("error: \(error)")
             exit(1)
@@ -353,10 +414,11 @@ struct TsundokuCLI {
     private static func usage() {
         print(
             """
-            usage: tsundoku-cli <inspect|page|ask|capture|export|history|track|import|applebooks> [options]
+            usage: tsundoku-cli <inspect|page|ask|capture|export|history|track|import|applebooks|clean-page> [options]
               ask --action explain|translate|summarize|ask|define
                   --question "…" --provider claude|codex|http|apple
-              capture --pages 5 --out ~/TsundokuExports
+              capture --pages 5 --out ~/TsundokuExports [--clean-page]
+              clean-page status|begin|recover
               export --format json|markdown|csv --provenance mine|popular|system
                      --source kindle|applebooks
               track --asin B0HH6TM91Q --seconds 6

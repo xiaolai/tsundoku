@@ -58,6 +58,43 @@ public struct ExportsView: View {
                 }
                 .disabled(model.capturePhase == .running)
 
+                Toggle(
+                    "Hide Popular Highlights during capture",
+                    isOn: $model.settings.cleanPageDuringCapture
+                )
+                .disabled(model.capturePhase == .running)
+                Text(
+                    "Kindle's display setting is turned off for the capture "
+                        + "and restored afterwards. Your own highlights stay "
+                        + "in the page images.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if let count = personalMarkCount {
+                    Text(
+                        "Your annotations in this book: \(count) — "
+                            + "they stay in the page images.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if model.settings.cleanPageDuringCapture {
+                    if let on = model.popularHighlightsState {
+                        Text(
+                            on
+                                ? "Popular Highlights: on — they will be "
+                                    + "turned off for the capture and "
+                                    + "restored afterwards."
+                                : "Popular Highlights: already off.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if let note = model.popularHighlightsNote {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 LabeledContent("Output") {
                     HStack(spacing: 8) {
                         Text(model.exportFolder.path)
@@ -142,7 +179,10 @@ public struct ExportsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .onAppear { model.refreshActivity() }
+        .onAppear {
+            model.refreshActivity()
+            model.refreshPopularHighlights()
+        }
     }
 
     private var bookLine: String {
@@ -155,12 +195,19 @@ public struct ExportsView: View {
         return "No book is open in Kindle."
     }
 
+    private var personalMarkCount: Int? {
+        guard model.selectedBook?.source == .kindle else { return nil }
+        return model.selectedBookAnnotations.filter {
+            $0.provenance == .user
+        }.count
+    }
+
     @ViewBuilder
     private var statusArea: some View {
         switch model.capturePhase {
         case .running:
             VStack(alignment: .leading, spacing: 6) {
-                if pageLimit == .all {
+                if model.capturePageLimit == nil {
                     ProgressView().progressViewStyle(.linear)
                 } else {
                     ProgressView(value: model.captureProgress)
@@ -171,14 +218,22 @@ public struct ExportsView: View {
                     .foregroundStyle(.secondary)
             }
         case .finished:
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Label(
-                    model.captureMessage, systemImage: "checkmark.circle")
-                Spacer()
-                Button("Open PDF") { model.openPDF() }
-                    .controlSize(.small)
-                Button("Reveal") { model.revealCapture() }
-                    .controlSize(.small)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Label(
+                        model.captureMessage,
+                        systemImage: "checkmark.circle")
+                    Spacer()
+                    Button("Open PDF") { model.openPDF() }
+                        .controlSize(.small)
+                    Button("Reveal") { model.revealCapture() }
+                        .controlSize(.small)
+                }
+                if let note = model.captureCleanPage?.note {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         case .failed:
             Label(

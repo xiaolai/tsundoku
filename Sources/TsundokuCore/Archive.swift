@@ -176,6 +176,16 @@ public final class Archive: @unchecked Sendable {
         try ensureColumn(
             database, table: "annotations", column: "book_source",
             definition: "book_source TEXT NOT NULL DEFAULT 'Kindle'")
+        for (column, definition) in [
+            ("source", "source TEXT NOT NULL DEFAULT 'kindle'"),
+            ("identity_confidence", "identity_confidence TEXT"),
+            ("termination", "termination TEXT"),
+            ("warnings", "warnings TEXT"),
+        ] {
+            try ensureColumn(
+                database, table: "captures", column: column,
+                definition: definition)
+        }
     }
 
     private static func ensureColumn(
@@ -575,21 +585,30 @@ public final class Archive: @unchecked Sendable {
     @discardableResult
     public func recordCapture(
         asin: String?, title: String, directory: String, pageCount: Int,
-        pdfPath: String?, state: String
+        pdfPath: String?, state: String, source: String = "kindle",
+        identityConfidence: String? = nil, termination: String? = nil,
+        warnings: [String] = []
     ) throws -> Int64 {
-        try queue.sync {
+        let warningData = try JSONSerialization.data(
+            withJSONObject: warnings, options: [])
+        let warningText = String(decoding: warningData, as: UTF8.self)
+        return try queue.sync {
             try database.execute(
                 """
                 INSERT INTO captures
                 (asin, title, directory, page_count, pdf_path, created_at,
-                 state)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                 state, source, identity_confidence, termination, warnings)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     asin.map { .text($0) } ?? .null, .text(title),
                     .text(directory), .integer(Int64(pageCount)),
                     pdfPath.map { .text($0) } ?? .null,
                     .real(Date().timeIntervalSince1970), .text(state),
+                    .text(source),
+                    identityConfidence.map { .text($0) } ?? .null,
+                    termination.map { .text($0) } ?? .null,
+                    .text(warningText),
                 ])
             return database.lastInsertRowID
         }
@@ -600,11 +619,22 @@ public final class Archive: @unchecked Sendable {
             let rows = try database.query(
                 """
                 SELECT id, COALESCE(asin, '') AS asin, title, directory,
-                       page_count, pdf_path, created_at, state
+                       page_count, pdf_path, created_at, state,
+                       COALESCE(source, 'kindle') AS source,
+                       identity_confidence, termination, warnings
                 FROM captures ORDER BY created_at DESC
                 """)
             return rows.compactMap { row in
                 guard let identifier = row.int("id") else { return nil }
+                let warnings: [String]
+                if let data = row.string("warnings")?.data(using: .utf8),
+                    let decoded = try? JSONSerialization.jsonObject(
+                        with: data) as? [String]
+                {
+                    warnings = decoded
+                } else {
+                    warnings = []
+                }
                 return CaptureRecord(
                     id: identifier,
                     asin: row.string("asin") ?? "",
@@ -614,7 +644,11 @@ public final class Archive: @unchecked Sendable {
                     pdfPath: row.string("pdf_path"),
                     createdAt: Date(
                         timeIntervalSince1970: row.double("created_at") ?? 0),
-                    state: row.string("state") ?? "")
+                    state: row.string("state") ?? "",
+                    source: row.string("source") ?? "kindle",
+                    identityConfidence: row.string("identity_confidence"),
+                    termination: row.string("termination"),
+                    warnings: warnings)
             }
         }
     }
@@ -704,12 +738,21 @@ public final class Archive: @unchecked Sendable {
                 "|---|---|---|---|---|---|",
             ]
             for annotation in rows {
+                // displayText prefers the highlighted text, so a note attached
+                // to a highlight would otherwise vanish from the export.
+                let note = annotation.note?.trimmingCharacters(
+                    in: .whitespacesAndNewlines) ?? ""
+                var cell = annotation.displayText
+                if !note.isEmpty {
+                    cell = cell.isEmpty ? "Note: \(note)"
+                        : "\(cell) — Note: \(note)"
+                }
                 lines.append(
                     "| \(escapeMarkdown(annotation.bookTitle)) "
                         + "| \(annotation.bookSource.displayName) "
                         + "| \(annotation.kind.displayName) "
                         + "| \(annotation.provenance.displayName) "
-                        + "| \(escapeMarkdown(annotation.displayText)) "
+                        + "| \(escapeMarkdown(cell)) "
                         + "| \(escapeMarkdown(annotation.start ?? "")) |")
             }
             text = lines.joined(separator: "\n") + "\n"
