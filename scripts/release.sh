@@ -4,13 +4,15 @@ cd "$(dirname "$0")/.."
 
 VERSION="$(tr -d '[:space:]' < VERSION)"
 : "${CODESIGN_IDENTITY:?Set CODESIGN_IDENTITY to a Developer ID Application identity}"
-: "${REPO_OWNER:?Set REPO_OWNER to the GitHub account that hosts the release}"
-case "$REPO_OWNER" in
-    *[!A-Za-z0-9-]*)
-        echo "REPO_OWNER must contain only letters, digits and hyphens: $REPO_OWNER" >&2
-        exit 1
-        ;;
-esac
+if [ "${ALLOW_ADHOC_RELEASE:-0}" != "1" ]; then
+    : "${REPO_OWNER:?Set REPO_OWNER to the GitHub account that hosts the release}"
+    case "$REPO_OWNER" in
+        *[!A-Za-z0-9-]*)
+            echo "REPO_OWNER must contain only letters, digits and hyphens: $REPO_OWNER" >&2
+            exit 1
+            ;;
+    esac
+fi
 if [ "$CODESIGN_IDENTITY" = "-" ] && [ "${ALLOW_ADHOC_RELEASE:-0}" != "1" ]; then
     echo "Refusing an ad-hoc release. Set ALLOW_ADHOC_RELEASE=1 for a local test build." >&2
     exit 1
@@ -52,6 +54,14 @@ if [ "${ALLOW_ADHOC_RELEASE:-0}" != "1" ]; then
 fi
 
 SHA="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+if [ "${ALLOW_ADHOC_RELEASE:-0}" = "1" ]; then
+    # A local test build has no release page to point a cask at; an unfilled
+    # placeholder must never be written.
+    echo "Ad-hoc local build: no Homebrew cask generated."
+    echo "DMG: $DMG"
+    echo "SHA256: $SHA"
+    exit 0
+fi
 sed -e "s|@VERSION@|$VERSION|g" -e "s|@SHA256@|$SHA|g" \
     -e "s|@OWNER@|$REPO_OWNER|g" \
     scripts/distribution/tsundoku.rb.in > "$OUT/tsundoku.rb"
