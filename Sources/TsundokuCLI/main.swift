@@ -200,10 +200,8 @@ struct TsundokuCLI {
                 font: Int(value("--font-size", in: arguments) ?? ""),
                 booksFontSteps: Int(
                     value("--text-size", in: arguments) ?? "") ?? 0,
-                cropTop: Int(
-                    value("--crop-top", in: arguments) ?? "") ?? 0,
-                cropBottom: value("--crop-bottom", in: arguments)
-                    .flatMap(Int.init))
+                cropTop: cropValue("--crop-top", arguments) ?? 0,
+                cropBottom: cropValue("--crop-bottom", arguments))
             let flag = CancellationFlag()
             signal(SIGINT, SIG_IGN)
             signal(SIGTERM, SIG_IGN)
@@ -724,6 +722,23 @@ struct TsundokuCLI {
     private static func checkDirectory(_ name: String) -> String {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
             "TsundokuExports/\(name)-check").path
+    }
+
+    private static func cropValue(
+        _ flag: String, _ arguments: [String]
+    ) -> Int? {
+        let indices = arguments.indices.filter { arguments[$0] == flag }
+        guard !indices.isEmpty else { return nil }
+        guard indices.count == 1, indices[0] + 1 < arguments.count,
+            let value = Int(arguments[indices[0] + 1]),
+            (0...PageCrop.maximumPoints).contains(value)
+        else {
+            print(
+                "error: \(flag) needs one integer from 0 to "
+                    + "\(PageCrop.maximumPoints)")
+            exit(1)
+        }
+        return value
     }
 
     private static func value(_ flag: String, in arguments: [String])

@@ -26,6 +26,11 @@ public struct CaptureJobEngine: Sendable {
         cropBottom: Int = 0,
         cropAutomatic: Bool = false
     ) throws -> CaptureResult {
+        let cropManifest: [String: Any] = [
+            "top": cropTop,
+            "bottom": cropBottom,
+            "automatic": cropAutomatic,
+        ]
         try lifecycle.checkReady()
         let activity = lifecycle.begin()
         defer { lifecycle.end(activity) }
@@ -102,8 +107,7 @@ public struct CaptureJobEngine: Sendable {
             // setting cannot be read from a non-reading surface.
             let report = session.restore()
             restoreCleanPage()
-            var failure = Self.manifestBase(
-                session: session, subject: subject)
+            var failure = Self.manifestBase(session: session, subject: subject, crop: cropManifest)
             addCleanPage(&failure)
             failure["state"] = "incomplete"
             failure["termination"] = "failed:initial snapshot"
@@ -151,8 +155,7 @@ public struct CaptureJobEngine: Sendable {
                     image: current.image, text: text,
                     source: current.textSource?.rawValue ?? "none")
                 pageTexts.append(text)
-                var running = Self.manifestBase(
-                    session: session, subject: subject)
+                var running = Self.manifestBase(session: session, subject: subject, crop: cropManifest)
                 running["state"] = "running"
                 running["termination"] = "running"
                 running["complete"] = [
@@ -208,8 +211,7 @@ public struct CaptureJobEngine: Sendable {
             if termination != .cancelled {
                 termination = .failed("\(error)")
             }
-            var failure = Self.manifestBase(
-                session: session, subject: subject)
+            var failure = Self.manifestBase(session: session, subject: subject, crop: cropManifest)
             addCleanPage(&failure)
             failure["state"] = Self.state(termination)
             failure["termination"] = Self.termination(termination)
@@ -230,8 +232,7 @@ public struct CaptureJobEngine: Sendable {
         restored = session.restore()
         restoreCleanPage()
         if isCancelled() {
-            var failure = Self.manifestBase(
-                session: session, subject: subject)
+            var failure = Self.manifestBase(session: session, subject: subject, crop: cropManifest)
             addCleanPage(&failure)
             failure["state"] = "cancelled"
             failure["termination"] = "cancelled"
@@ -290,8 +291,7 @@ public struct CaptureJobEngine: Sendable {
                     coverPage: bundlePlan?.coverPage,
                     pageSize: outputPageSize))
         } catch {
-            var failure = Self.manifestBase(
-                session: session, subject: subject)
+            var failure = Self.manifestBase(session: session, subject: subject, crop: cropManifest)
             addCleanPage(&failure)
             failure["state"] = "incomplete"
             failure["termination"] = Self.termination(termination)
@@ -319,13 +319,8 @@ public struct CaptureJobEngine: Sendable {
 
         let completeRequested =
             termination == .endOfBook || termination == .pageLimit
-        var manifest = Self.manifestBase(session: session, subject: subject)
+        var manifest = Self.manifestBase(session: session, subject: subject, crop: cropManifest)
         if let identifier { manifest["asin"] = identifier }
-        manifest["crop"] = [
-            "top": cropTop,
-            "bottom": cropBottom,
-            "automatic": cropAutomatic,
-        ]
         manifest["state"] = Self.state(termination)
         manifest["pageCount"] = capturedPages
         manifest["pdfPages"] = pdfPages
@@ -530,7 +525,8 @@ public struct CaptureJobEngine: Sendable {
     }
 
     private static func manifestBase(
-        session: any ReaderCaptureSession, subject: CaptureSubject
+        session: any ReaderCaptureSession, subject: CaptureSubject,
+        crop: [String: Any] = [:]
     ) -> [String: Any] {
         var manifest: [String: Any] = [
             "version": 2,
@@ -542,6 +538,7 @@ public struct CaptureJobEngine: Sendable {
             "title": captureTitle(session: session, subject: subject),
             "warnings": [],
         ]
+        if !crop.isEmpty { manifest["crop"] = crop }
         if let pageSetup = session.pageSetupOutcome {
             manifest["pageSetup"] = pageSetup.manifest
         }

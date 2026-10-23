@@ -46,8 +46,8 @@ public struct BooksCaptureAdapter: ReaderCaptureAdapter {
             return try BooksCaptureSession(
                 subject: subject, cancellation: cancellation,
                 pageSetupGuard: setupGuard,
-                cropTop: pageSetup?.cropTop ?? 0,
-                cropBottom: pageSetup?.cropBottom)
+                pageCrop: pageSetup?.pageCrop(for: .appleBooks)
+                    ?? .books(PageSetupRequest()))
         } catch {
             _ = setupGuard?.restore()
             throw error

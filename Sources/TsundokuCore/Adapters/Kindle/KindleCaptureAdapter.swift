@@ -42,8 +42,8 @@ public struct KindleCaptureAdapter: ReaderCaptureAdapter {
                 subject: subject, cancellation: cancellation,
                 isFrontmost: KindleLive.isFrontmost,
                 pageSetupGuard: setupGuard,
-                cropTop: pageSetup?.cropTop ?? 0,
-                cropBottom: pageSetup?.cropBottom)
+                pageCrop: pageSetup?.pageCrop(for: .kindle)
+                    ?? .kindle(PageSetupRequest()))
         } catch {
             // The session did not start; put the reader back before the
             // caller sees the failure.

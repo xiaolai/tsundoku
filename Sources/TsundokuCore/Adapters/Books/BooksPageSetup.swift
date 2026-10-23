@@ -97,10 +97,15 @@ public final class BooksPageSetup {
             throw PageSetupError.notConfigured
         }
         originalWindow = window
+        let pageCrop = request.pageCrop(for: .appleBooks)
+        do {
+            try pageCrop.validate(pageHeight: crop.height)
+        } catch {
+            throw PageSetupError.cropInvalid("\(error)")
+        }
         if let raw = try? capture(crop) {
-            let image = cropped(raw, crop: crop)
             originalMark = PageMark(
-                imageHash: ImageFingerprint.averageHash(image),
+                imageHash: ImageFingerprint.detailHash(raw),
                 text: before.text)
         }
         var afterWindow = before
@@ -316,14 +321,6 @@ public final class BooksPageSetup {
         guard let crop = page.cropRect,
             let raw = try? capture(crop)
         else { return false }
-        return ImageFingerprint.averageHash(cropped(raw, crop: crop))
-            == mark.imageHash
-    }
-
-    private func cropped(_ raw: CGImage, crop: CGRect) -> CGImage {
-        PageFooter.removingInsets(
-            from: raw, crop: crop,
-            topPoints: CGFloat(max(0, request.cropTop)),
-            bottomPoints: CGFloat(max(0, request.cropBottom ?? 54))) ?? raw
+        return ImageFingerprint.detailHash(raw) == mark.imageHash
     }
 }

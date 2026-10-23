@@ -33,6 +33,48 @@ private func booksImage(gray: CGFloat) throws -> CGImage {
     return image
 }
 
+private func pixelData(_ image: CGImage) throws -> Data {
+    var data = Data(count: image.width * image.height * 4)
+    let drawn = data.withUnsafeMutableBytes { buffer -> Bool in
+        guard
+            let context = CGContext(
+                data: buffer.baseAddress, width: image.width,
+                height: image.height, bitsPerComponent: 8,
+                bytesPerRow: image.width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return false }
+        context.draw(
+            image,
+            in: CGRect(
+                x: 0, y: 0, width: image.width, height: image.height))
+        return true
+    }
+    guard drawn else { throw BooksTestFailure.noImage }
+    return data
+}
+
+private func addingBottomBand(to image: CGImage) throws -> CGImage {
+    guard
+        let context = CGContext(
+            data: nil, width: image.width, height: image.height,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { throw BooksTestFailure.noImage }
+    context.draw(
+        image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    context.setFillColor(CGColor(gray: 0, alpha: 1))
+    // CGContext is bottom-left origin: y = 0 is the image's bottom, which
+    // the bottom crop removes.
+    context.fill(
+        CGRect(x: 0, y: 0, width: image.width, height: 36))
+    guard let result = context.makeImage() else {
+        throw BooksTestFailure.noImage
+    }
+    return result
+}
+
 private final class FakeBooksReader: @unchecked Sendable {
     let images: [CGImage]
     let clock: BooksClock
@@ -43,6 +85,7 @@ private final class FakeBooksReader: @unchecked Sendable {
     var end = false
     var forwardEnabled = true
     var textOnlyForward = false
+    var changeTextOnForward = true
     var captureFails = false
     var turnDelay: TimeInterval = 0
     var forwardCalls = 0
@@ -51,16 +94,24 @@ private final class FakeBooksReader: @unchecked Sendable {
     var crop = CGRect(x: 10, y: 62, width: 1024, height: 716)
     let window = AXNode.Frame(x: 10, y: 10, width: 1024, height: 768)
 
-    init(clock: BooksClock) throws {
+    init(
+        clock: BooksClock, images: [CGImage]? = nil
+    ) throws {
         self.clock = clock
-        images = [try booksImage(gray: 0.2), try booksImage(gray: 0.8)]
+        if let images {
+            self.images = images
+        } else {
+            self.images = [
+                try booksImage(gray: 0.2), try booksImage(gray: 0.8),
+            ]
+        }
     }
 
     private func applyPending() {
         guard let pendingAt, clock.value >= pendingAt else { return }
         self.pendingAt = nil
         index = min(index + 1, images.count - 1)
-        text = "page two"
+        if changeTextOnForward { text = "page two" }
     }
 
     var image: CGImage { images[index] }
@@ -91,7 +142,7 @@ private final class FakeBooksReader: @unchecked Sendable {
         }
         if turnDelay <= 0 {
             index = min(index + 1, images.count - 1)
-            text = "page two"
+            if changeTextOnForward { text = "page two" }
         } else {
             pendingAt = clock.value + turnDelay
         }
@@ -120,7 +171,7 @@ private func makeBooksSession(
     _ reader: FakeBooksReader,
     _ clock: BooksClock,
     isTrusted: @escaping () -> Bool = { true },
-    cropTop: Int = 0, cropBottom: Int? = nil
+    pageCrop: PageCrop = .books(PageSetupRequest())
 ) throws -> BooksCaptureSession {
     try BooksCaptureSession(
         subject: CaptureSubject(book: nil, kind: .appleBooks),
@@ -146,8 +197,7 @@ private func makeBooksSession(
         hasLease: { reader.lease },
         settleMinimum: 0,
         settleTimeout: 2,
-        cropTop: cropTop,
-        cropBottom: cropBottom)
+        pageCrop: pageCrop)
 }
 
 @Suite("Books capture session")
@@ -217,14 +267,70 @@ struct BooksCaptureTests {
         #expect(session.identity.title == "A Book")
     }
 
+    @Test("reader crop defaults are centralized")
+    func cropDefaults() {
+        let request = PageSetupRequest()
+        let books = request.pageCrop(for: .appleBooks)
+        #expect(books.top == 0)
+        #expect(books.bottom == 54)
+        #expect(!books.automaticPageNumber)
+        let kindle = request.pageCrop(for: .kindle)
+        #expect(kindle.top == 0)
+        #expect(kindle.bottom == 0)
+        #expect(kindle.automaticPageNumber)
+        let clamped = PageSetupRequest(cropTop: 500, cropBottom: -5)
+        #expect(clamped.cropTop == 200)
+        #expect(clamped.cropBottom == 0)
+    }
+
+    @Test("an impossible crop is rejected before capture")
+    func impossibleCrop() throws {
+        let clock = BooksClock()
+        let reader = try FakeBooksReader(clock: clock)
+        reader.crop = CGRect(x: 10, y: 62, width: 1024, height: 300)
+        #expect(throws: ReaderCaptureError.self) {
+            _ = try makeBooksSession(
+                reader, clock,
+                pageCrop: .books(top: 200, bottom: 200))
+        }
+    }
+
     @Test("configured top and bottom crops trim the page image")
     func configuredCrop() throws {
         let clock = BooksClock()
         let reader = try FakeBooksReader(clock: clock)
         let session = try makeBooksSession(
-            reader, clock, cropTop: 20, cropBottom: 54)
+            reader, clock, pageCrop: .books(top: 20, bottom: 54))
         let page = try session.snapshot()
         #expect(page.pixelSize == CGSize(width: 1024, height: 642))
+    }
+
+    @Test("a page difference inside the crop is still a turn")
+    func croppedDifferenceStillTurns() throws {
+        let clock = BooksClock()
+        let base = try booksImage(gray: 0.2)
+        let banded = try addingBottomBand(to: base)
+        let reader = try FakeBooksReader(
+            clock: clock, images: [base, banded])
+        reader.changeTextOnForward = false
+        let crop = CGRect(x: 0, y: 0, width: 1024, height: 716)
+        let deliveredBase = try #require(
+            try PageFooter.removingInsets(
+                from: base, crop: crop, topPoints: 0,
+                bottomPoints: 54))
+        let deliveredBanded = try #require(
+            try PageFooter.removingInsets(
+                from: banded, crop: crop, topPoints: 0,
+                bottomPoints: 54))
+        #expect(try pixelData(deliveredBase) == pixelData(deliveredBanded))
+        let session = try makeBooksSession(
+            reader, clock, pageCrop: .books(top: 0, bottom: 54))
+        let first = try session.snapshot()
+        let transition = try session.advance(after: first.mark)
+        guard case .turned = transition else {
+            Issue.record("a page differing only under the crop was not a turn")
+            return
+        }
     }
 
     @Test("a page turn advances to the next spread")
@@ -685,9 +791,17 @@ struct PageFooterTests {
         let image = try booksImage(gray: 0.2)
         let crop = CGRect(x: 0, y: 0, width: 1024, height: 716)
         let cropped = try #require(
-            PageFooter.removingBooksPageNumber(from: image, crop: crop))
+            try PageFooter.removingBooksPageNumber(from: image, crop: crop))
         #expect(cropped.height == 662)
         #expect(cropped.width == 1024)
+    }
+
+    @Test("an oversized crop fails closed")
+    func oversizedCrop() {
+        #expect(throws: PageCropError.self) {
+            try PageCrop.books(top: 200, bottom: 200)
+                .validate(pageHeight: 300)
+        }
     }
 
     @Test("configured insets trim both edges")
@@ -695,7 +809,7 @@ struct PageFooterTests {
         let image = try booksImage(gray: 0.2)
         let crop = CGRect(x: 0, y: 0, width: 1024, height: 716)
         let trimmed = try #require(
-            PageFooter.removingInsets(
+            try PageFooter.removingInsets(
                 from: image, crop: crop, topPoints: 20,
                 bottomPoints: 54))
         #expect(trimmed.height == 642)

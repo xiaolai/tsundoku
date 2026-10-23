@@ -45,12 +45,20 @@ public struct PageSetupRequest: Sendable, Equatable {
         self.pageSize = pageSize
         self.font = font
         self.booksFontSteps = booksFontSteps
-        self.cropTop = cropTop
-        self.cropBottom = cropBottom
+        self.cropTop = min(max(cropTop, 0), PageCrop.maximumPoints)
+        self.cropBottom = cropBottom.map {
+            min(max($0, 0), PageCrop.maximumPoints)
+        }
     }
 
     public var isRequested: Bool {
         pageSize != .asDisplayed || font != nil || booksFontSteps != 0
+    }
+
+    /// The effective crop for a reader. Books defaults to a 54-point bottom
+    /// (the printed page number); Kindle defaults to 0 (automatic detection).
+    public func pageCrop(for kind: ReaderKind) -> PageCrop {
+        kind == .appleBooks ? .books(self) : .kindle(self)
     }
 }
 
@@ -59,6 +67,7 @@ public enum PageSetupError: Error, CustomStringConvertible, Sendable {
     case windowNotAccepted(expected: CGSize, actual: CGSize)
     case fontNotSet(expected: Int, actual: Int)
     case fontStepRefused(Int)
+    case cropInvalid(String)
     case notConfigured
     case previousSetupUnrestored
 
@@ -75,6 +84,8 @@ public enum PageSetupError: Error, CustomStringConvertible, Sendable {
             "The font size did not reach \(expected); it reads \(actual)."
         case .fontStepRefused(let steps):
             "Apple Books did not change its text size for \(steps) step(s)."
+        case .cropInvalid(let message):
+            message
         case .notConfigured:
             "The page setup needs the reader's live window and font."
         case .previousSetupUnrestored:

@@ -9,6 +9,78 @@ import Vision
 /// macmini-000). Kindle usually draws its number in chrome outside the page
 /// crop; if a layout puts a number in the image, the detector below finds a
 /// small centered numeric line in the bottom strip and crops above it.
+public enum PageCropError: Error, CustomStringConvertible, Sendable {
+    case invalid(String)
+
+    public var description: String {
+        switch self {
+        case .invalid(let message): message
+        }
+    }
+}
+
+/// A configured page crop. Books uses 54 points as the default bottom (the
+/// printed page number); Kindle uses 0, meaning automatic page-number
+/// detection. Values are bounded to 0...200 points at the request boundary.
+public struct PageCrop: Sendable, Equatable {
+    public static let maximumPoints = 200
+
+    public let top: Int
+    public let bottom: Int
+    public let automaticPageNumber: Bool
+
+    private init(top: Int, bottom: Int, automaticPageNumber: Bool) {
+        self.top = top
+        self.bottom = bottom
+        self.automaticPageNumber = automaticPageNumber
+    }
+
+    public static func books(top: Int, bottom: Int?) -> PageCrop {
+        PageCrop(
+            top: clamp(top),
+            bottom: clamp(bottom ?? Int(PageFooter.booksPageNumberInset)),
+            automaticPageNumber: false)
+    }
+
+    public static func kindle(top: Int, bottom: Int?) -> PageCrop {
+        let bottom = clamp(bottom ?? 0)
+        return PageCrop(
+            top: clamp(top), bottom: bottom,
+            automaticPageNumber: bottom == 0)
+    }
+
+    public static func books(_ request: PageSetupRequest) -> PageCrop {
+        books(top: request.cropTop, bottom: request.cropBottom)
+    }
+
+    public static func kindle(_ request: PageSetupRequest) -> PageCrop {
+        kindle(top: request.cropTop, bottom: request.cropBottom)
+    }
+
+    public var manifest: [String: Any] {
+        [
+            "top": top,
+            "bottom": bottom,
+            "automatic": automaticPageNumber,
+        ]
+    }
+
+    public func validate(pageHeight: CGFloat) throws {
+        guard pageHeight.isFinite, pageHeight > 0 else {
+            throw PageCropError.invalid("The page height is invalid.")
+        }
+        guard CGFloat(top + bottom) <= pageHeight - 100 else {
+            throw PageCropError.invalid(
+                "Crop top \(top) plus bottom \(bottom) leaves no page: "
+                    + "the page is \(pageHeight) points high.")
+        }
+    }
+
+    private static func clamp(_ value: Int) -> Int {
+        min(max(value, 0), maximumPoints)
+    }
+}
+
 public enum PageFooter {
     /// Points from the bottom of the page to the top of the Books number.
     public static let booksPageNumberInset: CGFloat = 54
@@ -17,30 +89,53 @@ public enum PageFooter {
     /// page rect in points; the image may be Retina-sized.
     public static func removingBooksPageNumber(
         from image: CGImage, crop: CGRect
-    ) -> CGImage? {
-        removingInsets(
+    ) throws -> CGImage? {
+        try removingInsets(
             from: image, crop: crop, topPoints: 0,
             bottomPoints: booksPageNumberInset)
     }
 
     /// Trim configured top and bottom points from a captured page image.
     /// `crop` is the page rect in points; the image may be Retina-sized.
+    /// Returns nil when both insets are zero; throws when the geometry would
+    /// remove the page or cannot be represented.
     public static func removingInsets(
         from image: CGImage, crop: CGRect,
         topPoints: CGFloat, bottomPoints: CGFloat
-    ) -> CGImage? {
-        guard crop.height > 0, topPoints >= 0, bottomPoints >= 0 else {
-            return nil
+    ) throws -> CGImage? {
+        guard crop.height > 0, crop.height.isFinite,
+            topPoints.isFinite, bottomPoints.isFinite,
+            topPoints >= 0, bottomPoints >= 0
+        else {
+            throw PageCropError.invalid("The crop values are invalid.")
         }
         let scale = CGFloat(image.height) / crop.height
-        let top = Int((topPoints * scale).rounded())
-        let bottom = Int((bottomPoints * scale).rounded())
-        guard top + bottom > 0 else { return nil }
-        let height = image.height - top - bottom
-        guard height > 100 else { return nil }
-        return image.cropping(
-            to: CGRect(
-                x: 0, y: top, width: image.width, height: height))
+        guard scale.isFinite, scale > 0 else {
+            throw PageCropError.invalid("The page scale is invalid.")
+        }
+        let topScaled = topPoints * scale
+        let bottomScaled = bottomPoints * scale
+        guard topScaled <= CGFloat(image.height),
+            bottomScaled <= CGFloat(image.height)
+        else {
+            throw PageCropError.invalid("The crop is larger than the page.")
+        }
+        guard topScaled > 0 || bottomScaled > 0 else { return nil }
+        let top = Int(topScaled.rounded())
+        let bottom = Int(bottomScaled.rounded())
+        guard top + bottom <= image.height - 100 else {
+            throw PageCropError.invalid(
+                "Crop top \(top)px plus bottom \(bottom)px leaves no page.")
+        }
+        guard
+            let cropped = image.cropping(
+                to: CGRect(
+                    x: 0, y: top, width: image.width,
+                    height: image.height - top - bottom))
+        else {
+            throw PageCropError.invalid("The page could not be cropped.")
+        }
+        return cropped
     }
 
     /// Kindle: an explicit bottom value replaces automatic detection; zero
@@ -49,24 +144,50 @@ public enum PageFooter {
     public static func removingKindleInsets(
         from image: CGImage, crop: CGRect,
         topPoints: CGFloat, bottomPoints: CGFloat
-    ) -> CGImage? {
+    ) throws -> CGImage? {
         if bottomPoints > 0 {
-            return removingInsets(
+            return try removingInsets(
                 from: image, crop: crop, topPoints: topPoints,
                 bottomPoints: bottomPoints)
         }
+        guard crop.height > 0, crop.height.isFinite,
+            topPoints.isFinite, topPoints >= 0
+        else {
+            throw PageCropError.invalid("The crop values are invalid.")
+        }
         let scale = crop.height > 0
             ? CGFloat(image.height) / crop.height : 1
-        let top = Int((topPoints * scale).rounded())
-        guard top >= 0, image.height - top > 100 else { return nil }
-        let trimmed = top > 0
-            ? image.cropping(
-                to: CGRect(
-                    x: 0, y: top, width: image.width,
-                    height: image.height - top))
-            : image
-        guard let trimmed else { return nil }
-        return removingDetectedPageNumber(from: trimmed) ?? trimmed
+        guard scale.isFinite, scale > 0 else {
+            throw PageCropError.invalid("The page scale is invalid.")
+        }
+        let topScaled = topPoints * scale
+        guard topScaled <= CGFloat(image.height) else {
+            throw PageCropError.invalid("The crop is larger than the page.")
+        }
+        let top = Int(topScaled.rounded())
+        guard image.height - top > 100 else {
+            throw PageCropError.invalid(
+                "Crop top \(top)px leaves no page.")
+        }
+        let trimmed: CGImage
+        if top > 0 {
+            guard
+                let cropped = image.cropping(
+                    to: CGRect(
+                        x: 0, y: top, width: image.width,
+                        height: image.height - top))
+            else {
+                throw PageCropError.invalid(
+                    "The page could not be cropped.")
+            }
+            trimmed = cropped
+        } else {
+            trimmed = image
+        }
+        if let detected = removingDetectedPageNumber(from: trimmed) {
+            return detected
+        }
+        return top > 0 ? trimmed : nil
     }
 
     /// Detect a page-number line in the bottom strip of a Kindle page. The

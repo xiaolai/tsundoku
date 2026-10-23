@@ -319,7 +319,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         captureFontSize: Int? = nil,
         booksFontSteps: Int = 0,
         captureCropTop: Int = 0,
-        booksCropBottom: Int = 54,
+        booksCropBottom: Int = Int(PageFooter.booksPageNumberInset),
         kindleCropBottom: Int = 0,
         includeCoverPage: Bool = true,
         writeSidecars: Bool = true

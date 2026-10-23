@@ -43,7 +43,7 @@ public struct ExportsView: View {
                         .lineLimit(2)
                 }
 
-                if model.selectedBookIsAppleBooks {
+                if model.captureTargetIsBooks {
                     Label(
                         "Apple Books uses its own font family — set it in "
                             + "Books. Text size can be set here in relative "
@@ -79,9 +79,7 @@ public struct ExportsView: View {
                     value: $model.settings.captureCropTop, in: 0...200)
                     .disabled(model.capturePhase == .running)
 
-                if model.selectedBookIsAppleBooks
-                    || model.sourceFilter == .appleBooks
-                {
+                if model.captureTargetIsBooks {
                     Stepper(
                         "Crop bottom: \(model.settings.booksCropBottom) pt",
                         value: $model.settings.booksCropBottom, in: 0...200)

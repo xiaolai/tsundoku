@@ -33,8 +33,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
     private let pageRect: CGRect
     private let calibration: PageFrameCalibration
     private let opening: PageLocation
-    private let cropTop: Int
-    private let cropBottom: Int?
+    private let pageCrop: PageCrop
     private let openingPageCount: Int?
     private let openingTextWidth: Double?
     private var openingMark: PageMark?
@@ -60,8 +59,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         settleTimeout: TimeInterval = 3.0,
         restoreTimeout: TimeInterval = 60,
         pageSetupGuard: KindlePageSetup? = nil,
-        cropTop: Int = 0,
-        cropBottom: Int? = nil
+        pageCrop: PageCrop = .kindle(PageSetupRequest())
     ) throws {
         guard isTrusted() else {
             throw ReaderCaptureError.notTrusted(.kindle)
@@ -147,8 +145,13 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         self.calibration = calibration
         self.opening = PageLocation(
             pageNumber: first.pageNumber, pageCount: first.pageCount)
-        self.cropTop = max(0, cropTop)
-        self.cropBottom = cropBottom.map { max(0, $0) }
+        self.pageCrop = pageCrop
+        do {
+            try pageCrop.validate(pageHeight: rect.height)
+        } catch {
+            throw ReaderCaptureError.captureFailed(
+                .kindle, reason: "crop: \(error)")
+        }
         self.openingPageCount = first.pageCount
         self.openingTextWidth = textRect.map { Double($0.width) }
         self.pageSetupGuard = pageSetupGuard
@@ -173,9 +176,12 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 .kindle, state: live.state)
         }
         try validate(live)
-        let image = try capturePage()
+        let raw = try captureRaw()
+        let hash = ImageFingerprint.detailHash(raw)
+        let image = try delivered(raw)
         try verifyUnchanged(since: live)
-        let page = snapshot(from: live, image: image)
+        let page = snapshot(
+            from: live, image: image, verificationHash: hash)
         if openingMark == nil { openingMark = page.mark }
         return page
     }
@@ -223,15 +229,15 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 continue
             }
             try validate(live)
-            let image: CGImage
+            let hash: UInt64
             do {
-                image = try capturePage()
+                let raw = try captureRaw()
+                hash = ImageFingerprint.detailHash(raw)
             } catch {
                 lastCaptureError = error
                 sleep(0.05)
                 continue
             }
-            let hash = ImageFingerprint.averageHash(image)
             let textChanged = live.text != before.text
             let hashChanged = hash != mark.imageHash
             guard textChanged || hashChanged else {
@@ -253,9 +259,9 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 records.append(terminal)
                 return .endOfBook(terminal)
             }
-            let settledImage: CGImage
+            let settledRaw: CGImage
             do {
-                settledImage = try capturePage()
+                settledRaw = try captureRaw()
             } catch {
                 lastCaptureError = error
                 sleep(0.05)
@@ -266,8 +272,16 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 settled.text == live.text,
                 // The two frames must agree even when the text changed before
                 // the render did; otherwise the image can still be in motion.
-                ImageFingerprint.averageHash(settledImage) == hash
+                ImageFingerprint.detailHash(settledRaw) == hash
             else {
+                sleep(0.05)
+                continue
+            }
+            let settledImage: CGImage
+            do {
+                settledImage = try delivered(settledRaw)
+            } catch {
+                lastCaptureError = error
                 sleep(0.05)
                 continue
             }
@@ -278,7 +292,9 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 terminal: false, unresolved: false)
             records.append(observed)
             return .turned(
-                snapshot(from: settled, image: settledImage), observed)
+                snapshot(
+                    from: settled, image: settledImage,
+                    verificationHash: hash), observed)
         }
         } catch {
             let cancelled = TurnRecord(
@@ -376,10 +392,10 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         } else if let openingMark, final?.isReading == true {
             // No page numbers in the chrome-hidden state. The text alone can
             // match two blank pages, so the image fingerprint is mandatory.
-            if let image = try? capturePage() {
+            if let raw = try? captureRaw() {
                 exact =
                     final?.text == openingMark.text
-                    && ImageFingerprint.averageHash(image)
+                    && ImageFingerprint.detailHash(raw)
                         == openingMark.imageHash
             } else {
                 exact = false
@@ -462,7 +478,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         }
     }
 
-    private func capturePage() throws -> CGImage {
+    private func captureRaw() throws -> CGImage {
         // ScreenCaptureKit photographs the display, not a window: if another
         // app is in front, the page image is that app.
         if !isFrontmost() {
@@ -476,17 +492,25 @@ public final class KindleCaptureSession: ReaderCaptureSession {
             }
         }
         do {
-            let raw = try capture(pageRect)
-            return PageFooter.removingKindleInsets(
-                from: raw, crop: pageRect,
-                topPoints: CGFloat(cropTop),
-                bottomPoints: CGFloat(cropBottom ?? 0)) ?? raw
+            return try capture(pageRect)
         } catch let error as ScreenCaptureError {
             throw ReaderCaptureError.captureFailed(
                 .kindle, reason: error.description)
         } catch {
             throw ReaderCaptureError.captureFailed(
                 .kindle, reason: "\(error)")
+        }
+    }
+
+    private func delivered(_ raw: CGImage) throws -> CGImage {
+        do {
+            return try PageFooter.removingKindleInsets(
+                from: raw, crop: pageRect,
+                topPoints: CGFloat(pageCrop.top),
+                bottomPoints: CGFloat(pageCrop.bottom)) ?? raw
+        } catch {
+            throw ReaderCaptureError.captureFailed(
+                .kindle, reason: "crop: \(error)")
         }
     }
 
@@ -594,12 +618,13 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         }
     }
 
-    private func snapshot(from live: LivePage, image: CGImage)
-        -> PageSnapshot
-    {
+    private func snapshot(
+        from live: LivePage, image: CGImage,
+        verificationHash: UInt64
+    ) -> PageSnapshot {
         let text = live.text.isEmpty ? nil : live.text
         let mark = PageMark(
-            imageHash: ImageFingerprint.averageHash(image),
+            imageHash: verificationHash,
             text: live.text)
         return PageSnapshot(
             identity: identity, image: image, text: text,

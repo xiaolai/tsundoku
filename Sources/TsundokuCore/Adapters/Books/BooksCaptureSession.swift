@@ -38,8 +38,7 @@ public final class BooksCaptureSession: ReaderCaptureSession {
     private let initialCrop: CGRect
     private let singlePage: Bool
     private let pageSetupGuard: BooksPageSetup?
-    private let cropTop: Int
-    private let cropBottom: Int
+    private let pageCrop: PageCrop
     private let opening: PageLocation
     private var openingMark: PageMark?
     private var records: [TurnRecord] = []
@@ -77,8 +76,7 @@ public final class BooksCaptureSession: ReaderCaptureSession {
         settleTimeout: TimeInterval = 4.0,
         restoreTimeout: TimeInterval = 60,
         pageSetupGuard: BooksPageSetup? = nil,
-        cropTop: Int = 0,
-        cropBottom: Int? = nil
+        pageCrop: PageCrop = .books(PageSetupRequest())
     ) throws {
         guard isTrusted() else {
             throw ReaderCaptureError.notTrusted(.appleBooks)
@@ -134,6 +132,12 @@ public final class BooksCaptureSession: ReaderCaptureSession {
                         + "of one portrait A4 page")
             }
         }
+        do {
+            try pageCrop.validate(pageHeight: crop.height)
+        } catch {
+            throw ReaderCaptureError.captureFailed(
+                .appleBooks, reason: "crop: \(error)")
+        }
         self.cancellation = cancellation
         self.readPage = readPage
         self.capture = capture ?? {
@@ -157,8 +161,7 @@ public final class BooksCaptureSession: ReaderCaptureSession {
         self.singlePage =
             pageSetupGuard?.request.pageSize == .a4
         self.pageSetupGuard = pageSetupGuard
-        self.cropTop = max(0, cropTop)
-        self.cropBottom = max(0, cropBottom ?? 54)
+        self.pageCrop = pageCrop
         self.opening = PageLocation(
             pageNumber: first.pageNumber, pageCount: first.pageCount)
         let title = first.title.trimmingCharacters(
@@ -187,12 +190,13 @@ public final class BooksCaptureSession: ReaderCaptureSession {
             throw ReaderCaptureError.noWindow(.appleBooks)
         }
         let raw = try capturePage(crop)
-        let image = cropped(raw, crop: crop)
+        let hash = ImageFingerprint.detailHash(raw)
+        let image = try cropped(raw, crop: crop)
         try verifyUnchanged(since: live)
         let (text, textSource) = textFor(live: live, image: image)
         let page = snapshot(
             from: live, image: image, crop: crop,
-            text: text, textSource: textSource)
+            text: text, textSource: textSource, verificationHash: hash)
         if openingMark == nil { openingMark = page.mark }
         return page
     }
@@ -242,16 +246,18 @@ public final class BooksCaptureSession: ReaderCaptureSession {
                     sleep(0.05)
                     continue
                 }
-                let image: CGImage
+                let hash: UInt64
                 do {
                     let raw = try capturePage(crop)
-                    image = cropped(raw, crop: crop)
+                    hash = ImageFingerprint.detailHash(raw)
                 } catch {
                     lastCaptureError = error
                     sleep(0.05)
                     continue
                 }
-                let hash = ImageFingerprint.averageHash(image)
+                // The raw page, before the configured crop, is the page of
+                // record for navigation: a crop can remove the only visible
+                // difference between two pages.
                 // The image is the page of record: Books can erase or restore
                 // its AX text without turning the page, so a text change
                 // alone is not a turn.
@@ -270,18 +276,26 @@ public final class BooksCaptureSession: ReaderCaptureSession {
                     sleep(0.05)
                     continue
                 }
-                let settledImage: CGImage
+                let settledRaw: CGImage
                 do {
-                    let raw = try capturePage(settledCrop)
-                    settledImage = cropped(raw, crop: settledCrop)
+                    settledRaw = try capturePage(settledCrop)
                 } catch {
                     lastCaptureError = error
                     sleep(0.05)
                     continue
                 }
                 guard
-                    ImageFingerprint.averageHash(settledImage) == hash
+                    ImageFingerprint.detailHash(settledRaw) == hash
                 else {
+                    sleep(0.05)
+                    continue
+                }
+                let settledImage: CGImage
+                do {
+                    settledImage = try cropped(
+                        settledRaw, crop: settledCrop)
+                } catch {
+                    lastCaptureError = error
                     sleep(0.05)
                     continue
                 }
@@ -297,7 +311,8 @@ public final class BooksCaptureSession: ReaderCaptureSession {
                     snapshot(
                         from: settled, image: settledImage,
                         crop: settledCrop, text: text,
-                        textSource: textSource),
+                        textSource: textSource,
+                        verificationHash: hash),
                     observed)
             }
         } catch {
@@ -330,8 +345,7 @@ public final class BooksCaptureSession: ReaderCaptureSession {
                         "; last capture error: \($0)"
                     } ?? ""))
         }
-        let endImage = cropped(endRaw, crop: endCrop)
-        guard ImageFingerprint.averageHash(endImage) == mark.imageHash
+        guard ImageFingerprint.detailHash(endRaw) == mark.imageHash
         else {
             let unresolved = TurnRecord(
                 attempted: true, posted: true, observed: false,
@@ -426,11 +440,10 @@ public final class BooksCaptureSession: ReaderCaptureSession {
             let crop = final.cropRect,
             let raw = try? capturePage(crop)
         {
-            // The image is the page of record; apply the same configured
-            // crop the opening mark used, then compare hashes.
-            let image = cropped(raw, crop: crop)
+            // The raw page is the verification image; the configured crop
+            // is an export concern and may remove distinguishing margins.
             exact =
-                ImageFingerprint.averageHash(image)
+                ImageFingerprint.detailHash(raw)
                     == openingMark.imageHash
         } else {
             // Without a photographed opening there is nothing to compare; a
@@ -645,18 +658,23 @@ public final class BooksCaptureSession: ReaderCaptureSession {
         }.map(String.init)
     }
 
-    private func cropped(_ raw: CGImage, crop: CGRect) -> CGImage {
-        PageFooter.removingInsets(
-            from: raw, crop: crop,
-            topPoints: CGFloat(cropTop),
-            bottomPoints: CGFloat(cropBottom)) ?? raw
+    private func cropped(_ raw: CGImage, crop: CGRect) throws -> CGImage {
+        do {
+            return try PageFooter.removingInsets(
+                from: raw, crop: crop,
+                topPoints: CGFloat(pageCrop.top),
+                bottomPoints: CGFloat(pageCrop.bottom)) ?? raw
+        } catch {
+            throw ReaderCaptureError.captureFailed(
+                .appleBooks, reason: "crop: \(error)")
+        }
     }
 
     private func snapshot(
         from live: BooksLivePage, image: CGImage, crop: CGRect,
-        text: String, textSource: ReaderTextSource
+        text: String, textSource: ReaderTextSource,
+        verificationHash: UInt64
     ) -> PageSnapshot {
-        let hash = ImageFingerprint.averageHash(image)
         let toolbars = live.windowFrame.map { window in
             max(0, crop.minY - CGFloat(window.y))
         } ?? 0
@@ -679,7 +697,7 @@ public final class BooksCaptureSession: ReaderCaptureSession {
             cropRect: crop,
             pixelSize: CGSize(
                 width: CGFloat(image.width), height: CGFloat(image.height)),
-            mark: PageMark(imageHash: hash, text: text),
+            mark: PageMark(imageHash: verificationHash, text: text),
             calibration: calibration,
             textFrame: nil,
             spread: !singlePage)

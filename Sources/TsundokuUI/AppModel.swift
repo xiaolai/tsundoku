@@ -863,6 +863,27 @@ public final class AppModel: ObservableObject {
 
     // MARK: - Capture
 
+    /// The book a capture will use. The selected book wins; otherwise the
+    /// source filter chooses the first recent ebook, then the first ebook.
+    public func captureBook() -> Book? {
+        if let selectedBook { return selectedBook }
+        let filterSource = sourceFilter.source
+        return books.first {
+            $0.isEbook
+                && (filterSource == nil || $0.source == filterSource)
+                && $0.lastView != nil
+        } ?? books.first {
+            $0.isEbook
+                && (filterSource == nil || $0.source == filterSource)
+        }
+    }
+
+    /// Whether the next capture will use Apple Books. The controls and the
+    /// capture itself read this same resolution.
+    public var captureTargetIsBooks: Bool {
+        captureBook()?.source == .appleBooks
+    }
+
     public func startCapture(pages: Int?) {
         guard let archive else { return }
         guard capturePhase != .running else { return }
@@ -874,18 +895,7 @@ public final class AppModel: ObservableObject {
                 "Tsundoku is reading Kindle's settings. Try again in a moment."
             return
         }
-        let filterSource = sourceFilter.source
-        let book =
-            selectedBook
-            ?? books.first {
-                $0.isEbook
-                    && (filterSource == nil || $0.source == filterSource)
-                    && $0.lastView != nil
-            }
-            ?? books.first {
-                $0.isEbook
-                    && (filterSource == nil || $0.source == filterSource)
-            }
+        let book = captureBook()
         let title = book?.title ?? livePage?.title ?? "Book"
         let folder = exportFolder.appendingPathComponent(
             "\(slug(title))-\(timestamp())")
