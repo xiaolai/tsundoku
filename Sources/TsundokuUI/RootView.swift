@@ -3,6 +3,7 @@ import TsundokuCore
 
 public struct RootView: View {
     @ObservedObject var model: AppModel
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     public init(model: AppModel) {
         self.model = model
@@ -12,20 +13,58 @@ public struct RootView: View {
         ZStack {
             Color(nsColor: .windowBackgroundColor)
                 .ignoresSafeArea()
-            NavigationSplitView {
+            NavigationSplitView(columnVisibility: $columnVisibility) {
                 SidebarView(model: model)
                     .navigationSplitViewColumnWidth(
                         min: 180, ideal: 200, max: 260)
             } detail: {
                 detail
                     .navigationTitle(model.section.title)
-                    .navigationSubtitle(subtitle)
                     .toolbar { toolbarContent }
             }
-            .frame(minWidth: 980, minHeight: 640)
+            .frame(minWidth: 760, minHeight: 540)
         }
         .sheet(isPresented: $model.showPermissions) {
             PermissionsView(model: model)
+        }
+        .sheet(isPresented: $model.showSavedAINotes) {
+            SavedAINotesView(model: model, bookID: nil)
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .tsundokuBrowserCommand)
+        ) { notification in
+            guard browserWindowIsKey else { return }
+            if notification.userInfo?["command"] as? String == "sidebar" {
+                columnVisibility =
+                    columnVisibility == .detailOnly ? .all : .detailOnly
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if model.archive == nil {
+                Label(
+                    model.status,
+                    systemImage: "externaldrive.badge.exclamationmark"
+                )
+                .font(.callout).textSelection(.enabled).padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.regularMaterial)
+            } else if let failure = model.importError {
+                HStack(alignment: .top) {
+                    Label(
+                        "Import incomplete. Showing archived records.",
+                        systemImage: "exclamationmark.triangle")
+                    Spacer()
+                    IconButton("Details…", systemImage: "info.circle") {
+                        model.openSettingsWindow?()
+                    }
+                    IconButton("Retry", systemImage: "arrow.clockwise") {
+                        model.importLibrary()
+                    }.disabled(model.isImporting)
+                }
+                .font(.callout).padding(10)
+                .background(.regularMaterial)
+                .help(failure)
+            }
         }
     }
 
@@ -45,39 +84,9 @@ public struct RootView: View {
         }
     }
 
-    private var subtitle: String {
-        switch model.section {
-        case .library:
-            return "\(model.ebookCount.formatted()) ebooks"
-        case .highlights:
-            return "\(model.userAnnotationCount.formatted()) annotations"
-        case .history:
-            let count = model.sessions.count
-            return "\(count) " + (count == 1 ? "session" : "sessions")
-        case .exports:
-            return "\(model.captures.count.formatted()) captures"
-        case .settings:
-            return "Version \(appVersion)"
-        }
-    }
-
-    private var appVersion: String {
-        let short =
-            Bundle.main.infoDictionary?["CFBundleShortVersionString"]
-            as? String
-        let build =
-            Bundle.main.infoDictionary?["CFBundleVersion"] as? String
-        switch (short, build) {
-        case let (short?, build?): return "\(short) (\(build))"
-        case let (short?, nil): return short
-        // Unbundled runs have no Info.plist; VERSION owns the release number.
-        default: return "dev"
-        }
-    }
-
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if model.permissionsNeeded {
+        if model.permissionsNeeded && model.section == .exports {
             ToolbarItem {
                 Button {
                     model.showPermissions = true
@@ -87,14 +96,6 @@ public struct RootView: View {
                 }
                 .help("Accessibility or Screen Recording is not granted")
             }
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                model.showAIPanel()
-            } label: {
-                Label("Ask page", systemImage: "sparkles")
-            }
-            .help("Ask about the current Kindle page (⌥⌘K)")
         }
         ToolbarItem {
             Button {
@@ -109,7 +110,7 @@ public struct RootView: View {
                 }
             }
             .disabled(model.isImporting)
-            .help("Re-read Kindle's local stores")
+            .help("Re-read the local Kindle and Apple Books stores")
         }
     }
 }
@@ -121,7 +122,7 @@ struct SidebarView: View {
 
     var body: some View {
         List(selection: $model.section) {
-            Section("Library") {
+            Group {
                 Label("Books", systemImage: "books.vertical")
                     .badge(model.ebookCount)
                     .tag(AppModel.Section.library)
@@ -132,12 +133,10 @@ struct SidebarView: View {
                     .badge(model.sessions.count)
                     .tag(AppModel.Section.history)
             }
-            Section("Reading") {
+            Group {
                 Label("Exports", systemImage: "doc.richtext")
                     .badge(model.captures.count)
                     .tag(AppModel.Section.exports)
-                Label("Settings", systemImage: "gearshape")
-                    .tag(AppModel.Section.settings)
             }
         }
         .listStyle(.sidebar)
@@ -151,7 +150,6 @@ struct SidebarView: View {
     private var footer: some View {
         if model.isImporting || model.notice != nil {
             VStack(alignment: .leading, spacing: 0) {
-                Divider()
                 HStack(alignment: .top, spacing: 8) {
                     if model.isImporting {
                         ProgressView().controlSize(.small)
@@ -179,10 +177,7 @@ struct PermissionsView: View {
             Form {
                 Section("Live page access") {
                     Text(
-                        "Accessibility reads the current page and turns "
-                            + "pages. Screen Recording captures the page for "
-                            + "PDF export. The library and archive work "
-                            + "without either."
+                        "Library browsing needs no permissions. Live reader actions use the access below."
                     )
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -237,7 +232,9 @@ struct PermissionsView: View {
 
             HStack {
                 Spacer()
-                Button("Done") {
+                IconButton(
+                    "Done", systemImage: "xmark", tooltip: "Close permissions"
+                ) {
                     model.refreshPermissions()
                     model.showPermissions = false
                 }

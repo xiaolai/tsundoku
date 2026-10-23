@@ -1,64 +1,44 @@
+import AppKit
 import SwiftUI
 
-/// A toolbar search control that starts as a magnifier button and expands
-/// into a field when used. SwiftUI's native macOS search item cannot be
-/// collapsed by default (`SearchToolbarBehavior.minimize` is unavailable on
-/// macOS), so this uses standard controls to get that behavior.
-struct ToolbarSearch: View {
+extension Notification.Name {
+    public static let tsundokuBrowserCommand = Notification.Name(
+        "TsundokuBrowserCommand")
+}
+
+@MainActor var browserWindowIsKey: Bool {
+    NSApp.keyWindow?.identifier?.rawValue == "TsundokuLibrary"
+}
+
+/// Native searchable manages toolbar collapse, expansion and keyboard focus.
+private struct BrowserSearch: ViewModifier {
     @Binding var text: String
     let prompt: String
-
-    @State private var expanded = false
+    @State private var presented = false
     @FocusState private var focused: Bool
 
-    var body: some View {
-        Group {
-            if expanded {
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField(prompt, text: $text)
-                        .textFieldStyle(.plain)
-                        .focused($focused)
-                        .frame(width: 180)
-                    if !text.isEmpty {
-                        Button {
-                            text = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Clear search")
-                    }
-                }
-                .onExitCommand {
-                    text = ""
-                    collapse()
-                }
-                .onChange(of: focused) { _, isFocused in
-                    if !isFocused && text.isEmpty {
-                        collapse()
-                    }
-                }
-            } else {
-                Button {
-                    expanded = true
-                    DispatchQueue.main.async {
-                        focused = true
-                    }
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                }
-                .help("Search")
-                .accessibilityLabel("Search")
+    func body(content: Content) -> some View {
+        content
+            .searchable(
+                text: $text, isPresented: $presented, placement: .toolbar,
+                prompt: prompt
+            )
+            .searchFocused($focused)
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: .tsundokuBrowserCommand)
+            ) { notification in
+                guard browserWindowIsKey,
+                    notification.userInfo?["command"] as? String == "find"
+                else { return }
+                presented = true
+                DispatchQueue.main.async { focused = true }
             }
-        }
-        .animation(.easeInOut(duration: 0.15), value: expanded)
     }
+}
 
-    private func collapse() {
-        expanded = false
-        focused = false
+extension View {
+    func browserSearch(text: Binding<String>, prompt: String) -> some View {
+        modifier(BrowserSearch(text: text, prompt: prompt))
     }
 }

@@ -5,7 +5,7 @@ public struct LibraryView: View {
     @ObservedObject var model: AppModel
     @State private var scope: Scope = .all
     @State private var sortOrder = [KeyPathComparator(\Book.title)]
-    @State private var showInspector = true
+    @AppStorage("library.inspector") private var showInspector = false
 
     public init(model: AppModel) {
         self.model = model
@@ -44,15 +44,82 @@ public struct LibraryView: View {
 
     public var body: some View {
         Group {
+            if let id = model.bookWorkspaceID,
+                let book = model.books.first(where: { $0.asin == id })
+            {
+                VStack(spacing: 0) {
+                    HStack {
+                        IconButton(
+                            "Books", systemImage: "chevron.left",
+                            tooltip: "Back to books"
+                        ) {
+                            model.bookWorkspaceID = nil
+                        }
+                        Text(book.author).foregroundStyle(.secondary).lineLimit(
+                            1)
+                        Spacer()
+                        IconButton(
+                            "Open in Annotations",
+                            systemImage: "arrow.up.right.square"
+                        ) {
+                            model.bookWorkspaceID = nil
+                            model.showAnnotations(for: book)
+                        }
+                    }.padding(.horizontal, 16).padding(.vertical, 8)
+                    HighlightsView(model: model, book: book).id(book.asin)
+                }
+                .navigationTitle(book.title)
+            } else {
+                bookList
+            }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .tsundokuBrowserCommand)
+        ) { notification in
+            guard browserWindowIsKey,
+                let command = notification.userInfo?["command"] as? String
+            else {
+                return
+            }
+            if command == "back" { model.bookWorkspaceID = nil }
+            if model.bookWorkspaceID == nil {
+                if command == "inspector" { showInspector.toggle() }
+                if command == "open", let book = model.selectedBook {
+                    model.bookWorkspaceID = book.asin
+                }
+            }
+        }
+    }
+
+    private var bookList: some View {
+        Group {
             if rows.isEmpty {
-                ContentUnavailableView(
-                    model.search.isEmpty ? "No Books" : "No Matches",
-                    systemImage: "book.closed",
-                    description: Text(
-                        model.search.isEmpty
+                ContentUnavailableView {
+                    Label(
+                        model.books.isEmpty
+                            ? "No Books Imported" : "No Matches",
+                        systemImage: "book.closed")
+                } description: {
+                    Text(
+                        model.books.isEmpty
                             ? "Import your Kindle or Apple Books library to begin."
-                            : "No book matches “\(model.search)”.")
-                )
+                            : "No books match the current source, reading state and search."
+                    )
+                } actions: {
+                    if model.books.isEmpty {
+                        Button("Import Library") { model.importLibrary() }
+                            .disabled(model.isImporting || model.archive == nil)
+                    } else {
+                        IconButton(
+                            "Reset Filters",
+                            systemImage: "line.3.horizontal.decrease.circle"
+                        ) {
+                            model.search = ""
+                            model.sourceFilter = .all
+                            scope = .all
+                        }
+                    }
+                }
             } else {
                 Table(
                     rows, selection: $model.selectedBookID,
@@ -69,11 +136,11 @@ public struct LibraryView: View {
                     .width(min: 90, ideal: 140)
 
                     TableColumn(
-                        "Marks", value: \.userAnnotationCount
+                        "Annotations", value: \.userAnnotationCount
                     ) { book in
                         Text("\(book.userAnnotationCount)")
                     }
-                    .width(50)
+                    .width(min: 70, ideal: 85)
 
                     TableColumn("Source", value: \.source.rawValue) {
                         book in
@@ -81,18 +148,55 @@ public struct LibraryView: View {
                     }
                     .width(85)
 
-                    TableColumn("Last Read") { book in
+                    TableColumn("Last Read", value: \.lastReadSort) { book in
                         Text(TsundokuFormat.date(book.lastView))
                     }
                     .width(85)
                 }
                 .tableStyle(.inset(alternatesRowBackgrounds: true))
                 .scrollContentBackground(.hidden)
+                .contextMenu(forSelectionType: String.self) { ids in
+                    Button("Open Annotations") {
+                        model.bookWorkspaceID = ids.first
+                    }
+                    .disabled(ids.count != 1)
+                } primaryAction: { ids in
+                    model.bookWorkspaceID = ids.first
+                }
+                .safeAreaInset(edge: .bottom) {
+                    HStack {
+                        Text(
+                            "\(rows.count.formatted()) books"
+                                + (model.sourceFilter == .all
+                                    ? "" : " · \(model.sourceFilter.title)")
+                                + (scope == .all ? "" : " · \(scope.title)")
+                        )
+                        .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        IconButton(
+                            "Open Annotations", systemImage: "book.pages"
+                        ) {
+                            model.bookWorkspaceID = model.selectedBookID
+                        }
+                        .disabled(model.selectedBookID == nil)
+                        IconButton(
+                            "Reset Filters",
+                            systemImage: "line.3.horizontal.decrease.circle"
+                        ) {
+                            model.search = ""
+                            model.sourceFilter = .all
+                            scope = .all
+                        }
+                    }.padding(10)
+                }
             }
         }
-        .inspector(isPresented: $showInspector) {
-            BookDetailView(model: model)
-                .inspectorColumnWidth(min: 280, ideal: 340, max: 440)
+        .background {
+            InspectorPanel(isPresented: $showInspector, title: "Book Inspector")
+            {
+                BookDetailView(model: model)
+            }
+            .frame(width: 0, height: 0)
         }
         .onChange(of: rows.map(\.asin)) { _, _ in
             if let selected = model.selectedBookID,
@@ -107,6 +211,7 @@ public struct LibraryView: View {
             if rows.contains(where: { $0.asin == selected }) { return }
             model.selectedBookID = rows.first?.asin
         }
+        .browserSearch(text: $model.search, prompt: "Search books and authors")
         .toolbar {
             ToolbarItem {
                 Menu {
@@ -138,12 +243,6 @@ public struct LibraryView: View {
                 .help("Filter the book list")
             }
             ToolbarItem(placement: .primaryAction) {
-                ToolbarSearch(text: $model.search, prompt: "Search")
-            }
-            if #available(macOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .primaryAction)
-            }
-            ToolbarItem(placement: .primaryAction) {
                 Button {
                     showInspector.toggle()
                 } label: {
@@ -159,14 +258,6 @@ public struct LibraryView: View {
 
 struct BookDetailView: View {
     @ObservedObject var model: AppModel
-
-    private var bookAnnotations: [Annotation] {
-        model.selectedBookAnnotations.sorted { left, right in
-            if left.isResolved != right.isResolved { return left.isResolved }
-            return (left.createdAt ?? .distantPast)
-                > (right.createdAt ?? .distantPast)
-        }
-    }
 
     var body: some View {
         Group {
@@ -227,48 +318,42 @@ struct BookDetailView: View {
                             }
                         }
                         LabeledContent("Annotations") {
-                            Text("\(book.annotationCount)")
+                            Text("\(book.userAnnotationCount)")
                         }
                     }
 
                     Section("Actions") {
-                        if book.source == .kindle {
-                            Button {
-                                model.showAIPanel()
-                            } label: {
-                                Label(
-                                    "Ask About This Page",
-                                    systemImage: "sparkles")
+                        HStack(spacing: 12) {
+                            IconButton(
+                                "Read Annotations", systemImage: "book.pages"
+                            ) {
+                                model.bookWorkspaceID = book.asin
                             }
-                            Button {
-                                model.toggleTracking()
-                            } label: {
-                                Label(
+                            IconButton(
+                                "Ask About the Current Reader Page",
+                                systemImage: "sparkles",
+                                tooltip:
+                                    "Ask about the current reader page, which may differ from this book"
+                            ) {
+                                model.showAIPanel()
+                            }
+                            if book.source == .kindle {
+                                IconButton(
                                     model.trackedBookID == book.asin
                                         ? "Stop Tracking" : "Track Reading",
                                     systemImage: model.trackedBookID
                                         == book.asin
-                                        ? "stop.circle" : "record.circle")
+                                        ? "stop.circle" : "record.circle"
+                                ) {
+                                    model.toggleTracking()
+                                }
                             }
-                            Button {
-                                model.section = .exports
-                            } label: {
-                                Label(
-                                    "Capture as PDF",
-                                    systemImage: "doc.richtext")
-                            }
-                        } else {
-                            Text(
-                                "Apple Books highlights and bookmarks are "
-                                    + "imported. Live page actions are "
-                                    + "Kindle-only in this phase."
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            IconButton(
+                                "Capture as PDF…", systemImage: "doc.richtext"
+                            ) { model.section = .exports }
+                            Spacer(minLength: 0)
                         }
                     }
-
-                    annotations
                 }
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)
@@ -282,36 +367,8 @@ struct BookDetailView: View {
         }
     }
 
-    @ViewBuilder
-    private var annotations: some View {
-        Section("Annotations") {
-            if bookAnnotations.isEmpty {
-                Text("No annotations were found for this book.")
-                    .foregroundStyle(.secondary)
-            } else {
-                let resolved = bookAnnotations.filter(\.isResolved)
-                let positions = bookAnnotations.count - resolved.count
-                ForEach(resolved.prefix(10)) { annotation in
-                    Text(annotation.displayText)
-                        .lineLimit(3)
-                        .textSelection(.enabled)
-                }
-                if positions > 0 {
-                    Text(
-                        "\(positions.formatted()) "
-                            + (positions == 1 ? "entry is" : "entries are")
-                            + " saved as a position only. The local store "
-                            + "keeps the location, not the words."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                if bookAnnotations.count > 10 {
-                    Button("Show All in Annotations") {
-                        model.section = .highlights
-                    }
-                }
-            }
-        }
-    }
+}
+
+extension Book {
+    fileprivate var lastReadSort: Date { lastView ?? .distantPast }
 }

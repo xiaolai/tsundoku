@@ -55,12 +55,14 @@ public struct CompanionTriggerView: View {
                 .foregroundStyle(icon)
                 .frame(
                     width: CompanionMetrics.triggerSize,
-                    height: CompanionMetrics.triggerSize)
+                    height: CompanionMetrics.triggerSize
+                )
                 .contentShape(Circle())
                 .background(fill, in: Circle())
                 .modifier(GlassCircle(tint: tint))
                 .overlay(
-                    Circle().strokeBorder(rim, lineWidth: 0.8))
+                    Circle().strokeBorder(rim, lineWidth: 0.8)
+                )
                 .clipShape(Circle())
         }
         .buttonStyle(.plain)
@@ -116,7 +118,8 @@ public struct CompanionPanelView: View {
         .overlay(
             shape.strokeBorder(
                 Color(nsColor: .separatorColor).opacity(0.6),
-                lineWidth: 0.5))
+                lineWidth: 0.5)
+        )
         .clipShape(shape)
     }
 }
@@ -195,14 +198,13 @@ public struct CompanionOnboardingView: View {
                 Image(systemName: "eyeglasses")
                     .font(.system(size: 26, weight: .medium))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Tsundoku lives in the menu bar")
+                    Text("Reading Companion")
                         .font(.headline)
                     Text(
-                        "It starts hidden. Open a book in Kindle or Apple "
-                            + "Books and a glasses button appears at the "
-                            + "reader's edge.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        "Open a book in Kindle or Apple Books to begin."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
             }
 
@@ -211,8 +213,7 @@ public struct CompanionOnboardingView: View {
             permissionRow(
                 title: "Accessibility",
                 detail:
-                    "Reads the current page, detects the reader window and "
-                    + "registers the global shortcut.",
+                    "Read the current page and control the reader.",
                 granted: permissions.accessibility,
                 grant: permissions.requestAccessibility,
                 openSettings: permissions.openAccessibilitySettings)
@@ -220,8 +221,7 @@ public struct CompanionOnboardingView: View {
             permissionRow(
                 title: "Screen Recording",
                 detail:
-                    "Only for the Apple Books OCR fallback and PDF capture. "
-                    + "Nothing is recorded in the background.",
+                    "Capture PDFs and read pages with OCR.",
                 granted: permissions.screenRecording,
                 grant: permissions.requestScreenRecording,
                 openSettings: permissions.openScreenSettings)
@@ -236,23 +236,21 @@ public struct CompanionOnboardingView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if settings.loginItemStatus == "Requires approval" {
-                        Button("Approve…", action: onOpenLoginItemSettings)
-                            .controlSize(.small)
+                        IconButton(
+                            "Approve…", systemImage: "gearshape",
+                            action: onOpenLoginItemSettings
+                        )
+                        .controlSize(.small)
                     }
                 }
             }
 
-            Text(
-                "A real login cycle is the only proof the login item works; "
-                    + "macOS does not report a permission failure to the app "
-                    + "in advance.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-
             Spacer(minLength: 0)
 
             HStack {
-                Button("Re-check") { permissions.refresh() }
+                IconButton("Re-check", systemImage: "arrow.clockwise") {
+                    permissions.refresh()
+                }
                 Spacer()
                 Button(permissions.missing ? "Continue Anyway" : "Done") {
                     onClose()
@@ -282,10 +280,13 @@ public struct CompanionOnboardingView: View {
                 Text(granted ? "Granted" : "Needed")
                     .font(.caption)
                     .foregroundStyle(granted ? .green : .orange)
-                Button(granted ? "Settings…" : "Grant…") {
-                    if granted { openSettings() } else { grant() }
+                if granted {
+                    IconButton(
+                        "Settings…", systemImage: "gearshape",
+                        action: openSettings)
+                } else {
+                    Button("Grant…", action: grant).controlSize(.small)
                 }
-                .controlSize(.small)
             }
             Text(detail)
                 .font(.caption)
@@ -305,20 +306,25 @@ public struct CompanionSettingsSection: View {
 
     public var body: some View {
         Section("Companion") {
-            Picker("Panel placement", selection: $store.settings.panelPlacement) {
+            Picker("Panel placement", selection: $store.settings.panelPlacement)
+            {
                 ForEach(CompanionSettings.PanelPlacement.allCases, id: \.self) {
                     placement in
                     Text(placement.displayName).tag(placement)
                 }
             }
             Picker("Trigger", selection: $store.settings.triggerPlacement) {
-                ForEach(CompanionSettings.TriggerPlacement.allCases, id: \.self) {
+                ForEach(CompanionSettings.TriggerPlacement.allCases, id: \.self)
+                {
                     placement in
                     Text(placement.displayName).tag(placement)
                 }
             }
             Toggle("Start at login", isOn: $store.settings.launchAtLogin)
-            if !store.loginItemStatus.isEmpty {
+            if !store.loginItemStatus.isEmpty
+                && !["Not registered", "Enabled"].contains(
+                    store.loginItemStatus)
+            {
                 LabeledContent("Login item") {
                     Text(store.loginItemStatus)
                         .foregroundStyle(.secondary)
@@ -328,24 +334,19 @@ public struct CompanionSettingsSection: View {
             LabeledContent("Shortcut") {
                 HotKeyRecorderButton(store: store)
             }
-            if !store.hotKeyStatus.isEmpty {
+            if store.hotKeyConflict && !store.hotKeyStatus.isEmpty {
                 Text(store.hotKeyStatus)
                     .font(.caption)
                     .foregroundStyle(
                         store.hotKeyConflict ? .orange : .secondary)
             }
-            Text(
-                "macOS does not report when another app already owns the "
-                    + "same shortcut: both apps can receive it. Use Test to "
-                    + "check the current binding yourself.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             LabeledContent("Test") {
-                Button("Test Shortcut") {
+                IconButton(
+                    "Test Shortcut", systemImage: "play",
+                    tooltip: "Test the shortcut from another app"
+                ) {
                     store.hotKeyTestNote =
-                        "Press the shortcut while another app is frontmost. "
-                        + "If this panel opens, Tsundoku received it. If the "
-                        + "other app also reacts, macOS delivered it to both."
+                        "Press the shortcut in another app to check delivery and conflicts."
                 }
                 .controlSize(.small)
             }
@@ -376,10 +377,17 @@ public struct HotKeyRecorderButton: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-            Button(recording ? "Press a shortcut…" : "Record") {
+            IconButton(
+                recording ? "Press a shortcut…" : "Record",
+                systemImage: recording ? "keyboard" : "pencil"
+            ) {
                 beginRecording()
             }
             .controlSize(.small)
+            if recording {
+                Text("Press a shortcut…").font(.caption).foregroundStyle(
+                    .secondary)
+            }
             if store.hotKeyConflict {
                 Label("Unavailable", systemImage: "exclamationmark.triangle")
                     .font(.caption)

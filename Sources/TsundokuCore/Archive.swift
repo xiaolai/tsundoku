@@ -176,6 +176,9 @@ public final class Archive: @unchecked Sendable {
         try ensureColumn(
             database, table: "annotations", column: "book_source",
             definition: "book_source TEXT NOT NULL DEFAULT 'Kindle'")
+        try ensureColumn(
+            database, table: "ai_notes", column: "book_source",
+            definition: "book_source TEXT")
         for (column, definition) in [
             ("source", "source TEXT NOT NULL DEFAULT 'kindle'"),
             ("identity_confidence", "identity_confidence TEXT"),
@@ -333,7 +336,8 @@ public final class Archive: @unchecked Sendable {
                 guard let asin = row.string("asin") else { continue }
                 countMap[asin] = (
                     Int(row.int("total") ?? 0),
-                    Int(row.int("mine") ?? 0))
+                    Int(row.int("mine") ?? 0)
+                )
             }
             let rows = try database.query(
                 """
@@ -564,21 +568,52 @@ public final class Archive: @unchecked Sendable {
 
     public func saveAISNote(
         asin: String?, position: String?, kind: String, prompt: String,
-        answer: String, provider: String
+        answer: String, provider: String, source: BookSource? = nil
     ) throws {
         try queue.sync {
             try database.execute(
                 """
                 INSERT INTO ai_notes
-                (asin, position, kind, prompt, answer, provider, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (asin, position, kind, prompt, answer, provider, created_at, book_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     asin.map { .text($0) } ?? .null,
                     position.map { .text($0) } ?? .null, .text(kind),
                     .text(prompt), .text(answer), .text(provider),
                     .real(Date().timeIntervalSince1970),
+                    source.map { .text($0.rawValue) } ?? .null,
                 ])
+        }
+    }
+
+    public func aiNotes(asin: String? = nil) throws -> [SavedAINote] {
+        try queue.sync {
+            var sql = """
+                SELECT n.*, COALESCE(b.title, '') AS book_title,
+                       COALESCE(n.book_source, b.source) AS resolved_source
+                FROM ai_notes n LEFT JOIN books b ON b.asin = n.asin
+                """
+            var bindings: [SQLValue] = []
+            if let asin {
+                sql += " WHERE n.asin = ?"
+                bindings.append(.text(asin))
+            }
+            sql += " ORDER BY n.created_at DESC, n.id DESC"
+            return try database.query(sql, bindings).map { row in
+                SavedAINote(
+                    id: row.int("id") ?? 0, asin: row.string("asin"),
+                    bookTitle: row.string("book_title") ?? "",
+                    bookSource: row.string("resolved_source").flatMap(
+                        BookSource.init(rawValue:)),
+                    position: row.string("position"),
+                    kind: row.string("kind") ?? "",
+                    prompt: row.string("prompt") ?? "",
+                    answer: row.string("answer") ?? "",
+                    provider: row.string("provider") ?? "",
+                    createdAt: Date(
+                        timeIntervalSince1970: row.double("created_at") ?? 0))
+            }
         }
     }
 
@@ -703,6 +738,13 @@ public final class Archive: @unchecked Sendable {
     ) throws {
         let rows = try annotations(
             asin: asin, provenance: provenance, search: nil, source: source)
+        try exportAnnotations(rows, to: url, format: format)
+    }
+
+    /// Exports an immutable browsing snapshot; never re-runs broader filters.
+    public func exportAnnotations(
+        _ rows: [Annotation], to url: URL, format: AnnotationExportFormat
+    ) throws {
         let text: String
         switch format {
         case .json:
@@ -738,15 +780,17 @@ public final class Archive: @unchecked Sendable {
                 "|---|---|---|---|---|---|",
             ]
             for annotation in rows {
-                // displayText prefers the highlighted text, so a note attached
-                // to a highlight would otherwise vanish from the export.
-                let note = annotation.note?.trimmingCharacters(
-                    in: .whitespacesAndNewlines) ?? ""
-                var cell = annotation.displayText
-                if !note.isEmpty {
-                    cell = cell.isEmpty ? "Note: \(note)"
-                        : "\(cell) — Note: \(note)"
+                var parts: [String] = []
+                if let passage = annotation.passageText {
+                    parts.append(passage)
                 }
+                if let note = annotation.personalNote {
+                    parts.append("Note: \(note)")
+                }
+                let cell =
+                    parts.isEmpty
+                    ? "Text unavailable in the local store"
+                    : parts.joined(separator: " — ")
                 lines.append(
                     "| \(escapeMarkdown(annotation.bookTitle)) "
                         + "| \(annotation.bookSource.displayName) "
@@ -758,7 +802,7 @@ public final class Archive: @unchecked Sendable {
             text = lines.joined(separator: "\n") + "\n"
         case .csv:
             var lines = [
-                "id,asin,book,book_source,kind,provenance,start,end,text,note,color,created_at",
+                "id,asin,book,book_source,kind,provenance,start,end,text,note,color,created_at"
             ]
             for annotation in rows {
                 lines.append(

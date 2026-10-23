@@ -107,6 +107,15 @@ public final class AppModel: ObservableObject {
     @Published public var annotationFilter: AnnotationFilter = .mine
     @Published public var annotationSearch = ""
     @Published public var sourceFilter: SourceFilter = .all
+    @Published public var annotationSourceFilter: SourceFilter = .all
+    @Published public var annotationBookID: String?
+    @Published public var bookWorkspaceID: String?
+    @Published public var savedAINotes: [SavedAINote] = []
+    @Published public var showSavedAINotes = false
+    @Published public var sourceHealth: [BookSource: String] = [:]
+    @Published public var sourceLastImport: [BookSource: Date] = [:]
+    public var openSettingsWindow: (() -> Void)?
+    public var openSavedNotesWindow: (() -> Void)?
     @Published public var settings = AISettings.load() {
         didSet {
             settings.save()
@@ -168,9 +177,19 @@ public final class AppModel: ObservableObject {
 
     public init() {
         do {
-            let archive = try Archive.standard()
+            let arguments = CommandLine.arguments
+            let archive: Archive
+            if let index = arguments.firstIndex(of: "--archive-path"), arguments.indices.contains(index + 1) {
+                archive = try Archive(path: URL(fileURLWithPath: arguments[index + 1]))
+            } else {
+                archive = try Archive.standard()
+            }
             self.archive = archive
             self.sessionLogger = SessionLogger(archive: archive)
+            for source in BookSource.allCases {
+                if let raw = archive.meta("last_import_source_\(source.rawValue)"),
+                   let date = ISO8601DateFormatter().date(from: raw) { sourceLastImport[source] = date }
+            }
             reloadFromArchive()
         } catch {
             self.archive = nil
@@ -212,7 +231,7 @@ public final class AppModel: ObservableObject {
         {
             settings.language = CommandLine.arguments[index + 1]
         }
-        recoverSettingsIfNeeded()
+        if !CommandLine.arguments.contains("--shell-only") { recoverSettingsIfNeeded() }
     }
 
     /// A crash between turning Popular Highlights off and restoring it leaves
@@ -314,7 +333,23 @@ public final class AppModel: ObservableObject {
 
     public var selectedBookAnnotations: [Annotation] {
         guard let selectedBookID else { return [] }
-        return annotations.filter { $0.asin == selectedBookID }
+        return annotations.filter { $0.asin == selectedBookID && $0.bookSource == selectedBook?.source }
+    }
+
+    public func showAnnotations(for book: Book) {
+        annotationBookID = book.asin
+        annotationSourceFilter = book.source == .kindle ? .kindle : .appleBooks
+        annotationSearch = ""
+        annotationFilter = .mine
+        section = .highlights
+    }
+
+    public func refreshAINotes() {
+        guard let archive else { return }
+        Task {
+            do { savedAINotes = try await Task.detached { try archive.aiNotes() }.value }
+            catch { post("Could not read saved AI notes: \(error)", seconds: 12) }
+        }
     }
 
     public var ebookCount: Int {
@@ -406,6 +441,7 @@ public final class AppModel: ObservableObject {
                 self.annotations = annotations
                 self.sessions = sessions
                 self.captures = captures
+                self.refreshAINotes()
                 self.counts = counts
                 self.status =
                     "\(counts.books) books · \(counts.annotations) "
@@ -442,6 +478,7 @@ public final class AppModel: ObservableObject {
     }
 
     public func importLibrary(announce: Bool = true) {
+        guard !CommandLine.arguments.contains("--no-import") else { return }
         guard !isImporting, let archive else { return }
         TsundokuDiagnostics.shared.event("library_import_started")
         isImporting = true
@@ -457,6 +494,7 @@ public final class AppModel: ObservableObject {
             do {
                 let paths = KindlePaths.standard()
                 if paths.exists {
+                    self.sourceHealth[.kindle] = "Importing…"
                     let data = try await Task.detached {
                         try KindleReader.readAll(paths)
                     }.value
@@ -469,13 +507,20 @@ public final class AppModel: ObservableObject {
                     totalUser += imported.userAnnotations
                     lastImportDate = imported.importedAt
                     importedSources.append("Kindle")
+                    self.sourceLastImport[.kindle] = imported.importedAt
+                    try archive.setMeta("last_import_source_Kindle", ISO8601DateFormatter().string(from: imported.importedAt))
+                    self.sourceHealth[.kindle] = "Imported \(imported.books.formatted()) books · \(TsundokuFormat.relative(imported.importedAt))"
+                } else {
+                    self.sourceHealth[.kindle] = "No local store found; showing any archived records."
                 }
             } catch {
                 failures.append("Kindle: \(error)")
+                self.sourceHealth[.kindle] = "Import failed: \(error)"
             }
 
             let booksPaths = BooksPaths.standard()
             if booksPaths.exists {
+                self.sourceHealth[.appleBooks] = "Importing…"
                 do {
                     let data = try await Task.detached {
                         try BooksReader.readAll(booksPaths)
@@ -492,9 +537,15 @@ public final class AppModel: ObservableObject {
                         lastImportDate ?? imported.importedAt,
                         imported.importedAt)
                     importedSources.append("Apple Books")
+                    self.sourceLastImport[.appleBooks] = imported.importedAt
+                    try archive.setMeta("last_import_source_Apple Books", ISO8601DateFormatter().string(from: imported.importedAt))
+                    self.sourceHealth[.appleBooks] = "Imported \(imported.books.formatted()) books · \(TsundokuFormat.relative(imported.importedAt))"
                 } catch {
                     failures.append("Apple Books: \(error)")
+                    self.sourceHealth[.appleBooks] = "Import failed: \(error)"
                 }
+            } else {
+                self.sourceHealth[.appleBooks] = "No local store found; showing any archived records."
             }
 
             self.isImporting = false
@@ -514,6 +565,9 @@ public final class AppModel: ObservableObject {
                         + "\(totalAnnotations.formatted()) annotations "
                         + "from \(sourceLabel).",
                     enabled: announce)
+                if !failures.isEmpty {
+                    self.status = "Import partially completed. Some archived records may be out of date."
+                }
             } else if !importedSources.isEmpty {
                 self.status = "The local stores are empty."
                 self.post(
@@ -799,7 +853,7 @@ public final class AppModel: ObservableObject {
     public func showAIPanel() {
         if capturePhase == .running {
             status =
-                "Kindle is busy capturing. The reading panel waits until the "
+                "The reader is busy capturing. The reading panel waits until the "
                 + "capture finishes."
             return
         }
@@ -887,6 +941,11 @@ public final class AppModel: ObservableObject {
     public func startCapture(pages: Int?) {
         guard let archive else { return }
         guard capturePhase != .running else { return }
+        refreshPermissions()
+        guard !permissionsNeeded else {
+            showPermissions = true
+            return
+        }
         // The probe and the crash recovery both open Kindle's settings panel;
         // a capture must not start on top of either.
         guard !popularHighlightsProbeRunning, !cleanRecoveryRunning else {

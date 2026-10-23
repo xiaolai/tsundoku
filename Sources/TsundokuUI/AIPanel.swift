@@ -49,6 +49,7 @@ public final class AIPanelModel: ObservableObject {
     private var failureKind: FailureKind?
     private var submittedRequest: AIRequest?
     private var submittedPrompt: String?
+    private var submittedOnDevice = false
 
     public init(app: AppModel?, context: any ReaderContext) {
         self.app = app
@@ -82,6 +83,15 @@ public final class AIPanelModel: ObservableObject {
     public var canSave: Bool {
         submittedRequest != nil && !answer.isEmpty && !saved
     }
+
+    public var transmissionLabel: String {
+        guard submittedRequest != nil else { return "Not sent" }
+        if submittedOnDevice { return "Processed on this Mac" }
+        return source?.disclosure == nil
+            ? "Sent: current page" : "Sent: OCR text from the current page"
+    }
+
+    public func openSavedNotes() { app?.openSavedNotesWindow?() }
 
     /// Opening must not send anything. The caller chooses when to read the
     /// page; `run()` is only reached from an explicit action.
@@ -175,6 +185,7 @@ public final class AIPanelModel: ObservableObject {
         failureKind = nil
         provider = settings.provider.displayName
         submittedRequest = request
+        submittedOnDevice = settings.provider == .appleOnDevice
         submittedPrompt = AIComposer.prompt(
             for: request, settings: settings)
         TsundokuDiagnostics.shared.event(
@@ -263,16 +274,19 @@ public final class AIPanelModel: ObservableObject {
         else { return }
         guard let asin = pageIdentifier ?? matchedBook()?.asin else {
             saveError =
-                "Could not identify this book unambiguously. Open the "
-                + "library, select the book, and try again."
+                "This page could not be matched to a single archived book. "
+                + "Import the library and try again."
             return
         }
         do {
             try archive.saveAISNote(
                 asin: asin, position: nil,
                 kind: request.action.rawValue, prompt: prompt,
-                answer: answer, provider: provider)
+                answer: answer, provider: provider,
+                source: readerKind.map { $0 == .kindle ? .kindle : .appleBooks }
+            )
             saved = true
+            app?.refreshAINotes()
             saveError = nil
         } catch {
             saveError = "Could not save: \(error)"
@@ -316,19 +330,18 @@ public struct AIPanelView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: compact ? 10 : 14) {
             header
-            Divider()
             pageSection
             actionPicker
             if model.action == .ask {
                 questionField
             }
             answerSection
-            Divider()
             footer
         }
         .padding(compact ? 12 : 16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity,
-               alignment: .topLeading)
+        .frame(
+            maxWidth: .infinity, maxHeight: .infinity,
+            alignment: .topLeading)
     }
 
     private var header: some View {
@@ -340,16 +353,17 @@ public struct AIPanelView: View {
                 )
                 .font(compact ? .subheadline : .headline)
                 .lineLimit(1)
-                Text(model.readerLabel)
+                Text(model.readerKind?.displayName ?? "Reader")
+                    .help(model.readerLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 4)
-            Text(model.provider.isEmpty ? "Local Page" : model.provider)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            if !model.provider.isEmpty {
+                Text(model.provider).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
             Button {
                 model.loadPage()
             } label: {
@@ -365,7 +379,8 @@ public struct AIPanelView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .frame(
                             width: CompanionMetrics.closeSize,
-                            height: CompanionMetrics.closeSize)
+                            height: CompanionMetrics.closeSize
+                        )
                         .background(.thinMaterial, in: Circle())
                         .contentShape(Circle())
                 }
@@ -378,12 +393,15 @@ public struct AIPanelView: View {
 
     private var pageSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(model.excerpt.isEmpty ? "Reading the page…" : model.excerpt)
-                .lineLimit(compact ? 2 : 5)
-                .textSelection(.enabled)
-                .foregroundStyle(
-                    model.excerpt.isEmpty ? .secondary : .primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if !model.excerpt.isEmpty {
+                Text(model.excerpt)
+                    .lineLimit(compact ? 2 : 5)
+                    .textSelection(.enabled)
+                    .foregroundStyle(
+                        model.excerpt.isEmpty ? .secondary : .primary
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if let disclosure = model.source?.disclosure {
                 Label(disclosure, systemImage: "exclamationmark.triangle")
                     .font(.caption2)
@@ -402,10 +420,8 @@ public struct AIPanelView: View {
                         model.run()
                     }
                 } label: {
-                    Text(action == .define ? "Terms" : action.displayName)
-                        .font(compact ? .caption2 : .caption)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                    Image(systemName: action.symbolName)
+                        .font(.body)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 4)
                         .padding(.horizontal, 4)
@@ -413,10 +429,13 @@ public struct AIPanelView: View {
                             model.action == action
                                 ? Color.accentColor.opacity(0.22)
                                 : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 6))
+                            in: RoundedRectangle(cornerRadius: 6)
+                        )
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .help(action.displayName)
+                .accessibilityLabel(action.displayName)
                 .disabled(!model.canRun)
                 .accessibilityAddTraits(
                     model.action == action ? .isSelected : [])
@@ -436,24 +455,30 @@ public struct AIPanelView: View {
                 onSubmit: { model.run() },
                 onActivate: onActivate,
                 onEscape: { onClose?() })
-            Button("Ask") { model.run() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(compact ? .small : .regular)
-                .disabled(!model.canRun)
+            Button {
+                model.run()
+            } label: {
+                Label("Ask", systemImage: "paperplane.fill").labelStyle(
+                    .iconOnly)
+            }
+            .help("Ask about this page")
+            .buttonStyle(.borderedProminent)
+            .controlSize(compact ? .small : .regular)
+            .disabled(!model.canRun)
         }
     }
 
     private var answerSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("Answer")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 Spacer()
                 if model.phase == .loadingAnswer
                     || model.phase == .loadingPage
                 {
                     ProgressView().controlSize(.small)
+                    IconButton("Stop", systemImage: "stop.fill") {
+                        model.cancel()
+                    }.controlSize(.small)
                 }
             }
             Group {
@@ -469,8 +494,9 @@ public struct AIPanelView: View {
                         Text(model.error ?? "Something went wrong.")
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
-                        Button("Try Again") { model.retry() }
-                            .controlSize(compact ? .small : .regular)
+                        IconButton("Try Again", systemImage: "arrow.clockwise")
+                        { model.retry() }
+                        .controlSize(compact ? .small : .regular)
                     }
                 case .ready:
                     ScrollView {
@@ -481,9 +507,10 @@ public struct AIPanelView: View {
                     }
                 case .idle:
                     Text(
-                        "Choose an action. Only this page is sent; the rest "
-                            + "of the book stays on the Mac.")
-                        .foregroundStyle(.secondary)
+                        model.pageText.isEmpty
+                            ? "Reload the page to begin." : "Choose an action."
+                    )
+                    .foregroundStyle(.secondary)
                 }
             }
             .frame(
@@ -502,20 +529,32 @@ public struct AIPanelView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
-                Text(
-                    model.source?.disclosure == nil
-                        ? "Sent: current page"
-                        : "Sent: OCR text from the current page")
+                Image(systemName: "info.circle")
+                    .help(
+                        model.transmissionLabel
+                            + ". Only this page is used; the rest of the book stays on this Mac."
+                    )
+                    .accessibilityLabel(model.transmissionLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
-                Button("Copy") { model.copy() }
+                if model.saved {
+                    IconButton(
+                        "View Saved Notes",
+                        systemImage: "sparkles.rectangle.stack"
+                    ) { model.openSavedNotes() }.controlSize(.small)
+                }
+                IconButton("Copy", systemImage: "doc.on.doc") { model.copy() }
                     .controlSize(.small)
                     .disabled(model.answer.isEmpty)
-                Button(model.saved ? "Saved" : "Save Note") { model.save() }
-                    .controlSize(.small)
-                    .disabled(!model.canSave)
+                IconButton(
+                    model.saved ? "Saved" : "Save Note",
+                    systemImage: model.saved
+                        ? "checkmark.circle" : "square.and.arrow.down"
+                ) { model.save() }
+                .controlSize(.small)
+                .disabled(!model.canSave)
             }
         }
     }

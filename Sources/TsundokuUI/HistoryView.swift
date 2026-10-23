@@ -13,7 +13,7 @@ public struct HistoryView: View {
             .filter { $0.isEbook && ($0.lastView != nil || $0.isRead) }
             .sorted { left, right in
                 switch (left.lastView, right.lastView) {
-                case let (leftDate?, rightDate?) where leftDate != rightDate:
+                case (let leftDate?, let rightDate?) where leftDate != rightDate:
                     return leftDate > rightDate
                 case (.some, .none):
                     return true
@@ -57,14 +57,14 @@ public struct HistoryView: View {
                 LabeledContent("Sessions") {
                     Text("\(model.sessions.count)")
                 }
-                LabeledContent("Pages Seen") {
+                LabeledContent("Pages Observed") {
                     Text(
                         "\(model.sessions.reduce(0) { $0 + $1.pageCount })"
                     )
                 }
             }
 
-            Section("Recently Read") {
+            Section("Recently Opened in Your Libraries") {
                 if recentBooks.isEmpty {
                     Text("No last-read dates were found.")
                         .foregroundStyle(.secondary)
@@ -75,6 +75,8 @@ public struct HistoryView: View {
                                 book.source == .appleBooks
                                 ? .appleBooks : .kindle
                             model.selectedBookID = book.asin
+                            model.bookWorkspaceID = book.asin
+                            model.annotationSearch = ""
                             model.section = .library
                         } label: {
                             HStack(alignment: .firstTextBaseline) {
@@ -108,11 +110,16 @@ public struct HistoryView: View {
                 }
             }
 
+            Section {
+                Text("Sessions are recorded only while tracking is on.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if sessionDays.isEmpty {
                 Section("Sessions") {
                     Text("No sessions yet.")
                         .foregroundStyle(.secondary)
-                    Button("Turn Tracking On") {
+                    IconButton("Turn Tracking On", systemImage: "record.circle")
+                    {
                         model.toggleTracking()
                     }
                 }
@@ -123,7 +130,14 @@ public struct HistoryView: View {
                             date: .complete, time: .omitted)
                     ) {
                         ForEach(group.sessions) { session in
-                            SessionListRow(session: session)
+                            Button {
+                                model.selectedBookID = session.asin
+                                model.bookWorkspaceID = session.asin
+                                model.annotationSearch = ""
+                                model.section = .library
+                            } label: {
+                                SessionListRow(session: session)
+                            }.buttonStyle(.plain)
                         }
                     }
                 }
@@ -141,7 +155,10 @@ public struct HistoryView: View {
                             ? "Track Reading" : "Stop Tracking",
                         systemImage: model.trackedBookID == nil
                             ? "record.circle" : "stop.circle")
-                }
+                }.labelStyle(.iconOnly)
+                    .help(
+                        model.trackedBookID == nil
+                            ? "Track reading" : "Stop tracking")
             }
         }
         .onAppear { model.refreshActivity() }
@@ -168,19 +185,14 @@ struct SessionListRow: View {
                 .foregroundStyle(.secondary)
             }
             Spacer()
-            Text(duration)
+            Text(session.durationLabel)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("\(session.pageCount) pages")
+            Text("\(session.pageCount) pages observed")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
     }
 
-    private var duration: String {
-        let minutes = max(1, Int(session.duration / 60))
-        if minutes < 60 { return "\(minutes) min" }
-        return "\(minutes / 60)h \(minutes % 60)m"
-    }
 }

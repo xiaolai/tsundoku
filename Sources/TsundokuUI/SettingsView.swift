@@ -3,161 +3,196 @@ import Security
 import SwiftUI
 import TsundokuCore
 
+public enum SettingsPane: String, CaseIterable, Identifiable {
+    case companion = "Companion"
+    case ai = "AI Provider"
+    case data = "Library Data"
+    case about = "About"
+    public var id: String { rawValue }
+}
+
 public struct SettingsView: View {
+    let pane: SettingsPane?
     @ObservedObject var model: AppModel
     @State private var apiKey = Keychain.get(account: "http.apiKey") ?? ""
     @State private var testStatus = ""
     @State private var testing = false
     @State private var testGeneration = 0
 
-    public init(model: AppModel) {
+    public init(model: AppModel, pane: SettingsPane? = nil) {
         self.model = model
+        self.pane = pane
     }
 
     public var body: some View {
         Form {
-            if let companion = model.companionSettings {
-                CompanionSettingsSection(store: companion)
+            if pane == nil || pane == .companion {
+                if let companion = model.companionSettings {
+                    CompanionSettingsSection(store: companion)
+                }
+
             }
-
-            Section("Reading Companion") {
-                Picker("Provider", selection: $model.settings.provider) {
-                    ForEach(AIProviderKind.allCases, id: \.self) { kind in
-                        Text(kind.displayName).tag(kind)
+            if pane == nil || pane == .ai {
+                Section("Reading Companion") {
+                    Picker("Provider", selection: $model.settings.provider) {
+                        ForEach(AIProviderKind.allCases, id: \.self) { kind in
+                            Text(kind.displayName).tag(kind)
+                        }
                     }
-                }
-                .disabled(testing)
-                Text(providerNote)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                TextField(
-                    "Model", text: $model.settings.model,
-                    prompt: Text("Provider default"))
                     .disabled(testing)
-                if model.settings.provider == .http {
-                    TextField("Endpoint", text: $model.settings.endpoint)
+                    .help(providerNote)
+
+                    TextField(
+                        "Model", text: $model.settings.model,
+                        prompt: Text("Provider default")
+                    )
+                    .disabled(testing)
+                    if model.settings.provider == .http {
+                        TextField("Endpoint", text: $model.settings.endpoint)
+                            .disabled(testing)
+                        SecureField("API Key", text: $apiKey)
+                            .disabled(testing)
+                        IconButton("Save Key to Keychain", systemImage: "key") {
+                            let status = Keychain.set(
+                                apiKey, account: "http.apiKey")
+                            testStatus =
+                                status == errSecSuccess
+                                ? "Key saved to the login Keychain."
+                                : "Could not save the key (OSStatus \(status))."
+                        }
+                        .controlSize(.small)
                         .disabled(testing)
-                    SecureField("API Key", text: $apiKey)
-                        .disabled(testing)
-                    Button("Save Key to Keychain") {
-                        let status = Keychain.set(
-                            apiKey, account: "http.apiKey")
-                        testStatus =
-                            status == errSecSuccess
-                            ? "Key saved to the login Keychain."
-                            : "Could not save the key (OSStatus \(status))."
                     }
-                    .controlSize(.small)
+                    TextField(
+                        "Answer Language", text: $model.settings.language
+                    )
                     .disabled(testing)
-                }
-                TextField(
-                    "Answer Language", text: $model.settings.language)
-                    .disabled(testing)
-                Toggle(
-                    "Record Pages While Tracking",
-                    isOn: $model.settings.sessionLogging)
+                    Toggle(
+                        "Record Pages While Tracking",
+                        isOn: $model.settings.sessionLogging
+                    )
                     .disabled(testing)
 
-                LabeledContent("Connection") {
-                    HStack(spacing: 8) {
-                        Button("Test Provider") { test() }
+                    LabeledContent("Connection") {
+                        HStack(spacing: 8) {
+                            IconButton("Test Provider", systemImage: "network")
+                            { test() }
                             .controlSize(.small)
                             .disabled(testing)
-                        if testing {
-                            ProgressView().controlSize(.small)
+                            if testing {
+                                ProgressView().controlSize(.small)
+                            }
+                            Text(testStatus)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                            Spacer(minLength: 0)
                         }
-                        Text(testStatus)
+                    }
+                    .onChange(of: model.settings.provider) { _, _ in
+                        testStatus = ""
+                        testGeneration += 1
+                    }
+                    .onChange(of: model.settings.model) { _, _ in
+                        testStatus = ""
+                        testGeneration += 1
+                    }
+                    .onChange(of: model.settings.endpoint) { _, _ in
+                        testStatus = ""
+                        testGeneration += 1
+                    }
+                }
+
+            }
+            if pane == nil || pane == .companion {
+                Section("Permissions") {
+                    permissionRow(
+                        "Accessibility",
+                        detail: "Read the page and turn pages.",
+                        granted: model.permissionAccessibility,
+                        action: model.openAccessibilitySettings)
+                    permissionRow(
+                        "Screen Recording",
+                        detail: "Capture the page for PDF export.",
+                        granted: model.permissionScreen,
+                        action: model.openScreenSettings)
+                    IconButton("Re-check", systemImage: "arrow.clockwise") {
+                        model.refreshPermissions()
+                    }
+                    .controlSize(.small)
+
+                }
+
+            }
+            if pane == nil || pane == .data {
+                Section("Library Data") {
+                    LabeledContent("Archive") {
+                        Text(archiveSummary)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(BookSource.allCases, id: \.self) { source in
+                        LabeledContent(source.displayName) {
+                            VStack(alignment: .trailing, spacing: 4) {
+                                Text(
+                                    model.sourceHealth[source]
+                                        ?? "Not checked this session")
+                                Text(
+                                    "Last successful import: \(model.sourceLastImport[source]?.formatted(date: .abbreviated, time: .shortened) ?? "Unavailable")"
+                                ).font(.caption)
+                            }.foregroundStyle(.secondary).textSelection(
+                                .enabled)
+                        }
+                    }
+                    Text(
+                        "Local caches may not contain every cloud annotation."
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
+                    LabeledContent("Last Import") {
+                        Text(TsundokuFormat.relative(model.lastImport))
+                            .foregroundStyle(.secondary)
+                    }
+                    LabeledContent("Export Folder") {
+                        HStack(spacing: 8) {
+                            Text(model.exportFolder.path)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            IconButton(
+                                "Choose…", systemImage: "folder.badge.plus",
+                                tooltip: "Choose export folder"
+                            ) {
+                                model.chooseExportFolder()
+                            }
+                        }
+                    }
+                    IconButton(
+                        "Import Now", systemImage: "arrow.triangle.2.circlepath"
+                    ) {
+                        model.importLibrary()
+                    }
+                    .controlSize(.small)
+                    .disabled(model.isImporting)
+                    if let importError = model.importError {
+                        Text(importError)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                        Spacer(minLength: 0)
+                            .textSelection(.enabled)
                     }
                 }
-                .onChange(of: model.settings.provider) { _, _ in
-                    testStatus = ""
-                    testGeneration += 1
-                }
-                .onChange(of: model.settings.model) { _, _ in
-                    testStatus = ""
-                    testGeneration += 1
-                }
-                .onChange(of: model.settings.endpoint) { _, _ in
-                    testStatus = ""
-                    testGeneration += 1
-                }
-            }
 
-            Section("Permissions") {
-                permissionRow(
-                    "Accessibility",
-                    detail: "Read the page and turn pages.",
-                    granted: model.permissionAccessibility,
-                    action: model.openAccessibilitySettings)
-                permissionRow(
-                    "Screen Recording",
-                    detail: "Capture the page for PDF export.",
-                    granted: model.permissionScreen,
-                    action: model.openScreenSettings)
-                Button("Re-check") {
-                    model.refreshPermissions()
-                }
-                .controlSize(.small)
             }
-
-            Section("Library Data") {
-                LabeledContent("Archive") {
-                    Text(archiveSummary)
-                        .foregroundStyle(.secondary)
-                }
-                LabeledContent("Sources") {
-                    Text(
-                        "Kindle \(model.kindleBookCount.formatted()) · "
-                            + "Apple Books "
-                            + model.appleBooksBookCount.formatted())
-                        .foregroundStyle(.secondary)
-                }
-                LabeledContent("Last Import") {
-                    Text(TsundokuFormat.relative(model.lastImport))
-                        .foregroundStyle(.secondary)
-                }
-                LabeledContent("Export Folder") {
-                    HStack(spacing: 8) {
-                        Text(model.exportFolder.path)
+            if pane == nil || pane == .about {
+                Section("About") {
+                    LabeledContent("Tsundoku") {
+                        Text(version)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Button("Choose…") {
-                            model.chooseExportFolder()
-                        }
                     }
+                    Text(
+                        "Your local Kindle and Apple Books archive."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
-                Button("Import Now") {
-                    model.importLibrary()
-                }
-                .controlSize(.small)
-                .disabled(model.isImporting)
-                if let importError = model.importError {
-                    Text(importError)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-            }
-
-            Section("About") {
-                LabeledContent("Tsundoku") {
-                    Text(version)
-                        .foregroundStyle(.secondary)
-                }
-                Text(
-                    "A local reader for the Kindle and Apple Books libraries "
-                        + "you already own. It reads only the data those apps "
-                        + "keep on this Mac, never uploads a whole book, and "
-                        + "never rates, recommends or buys anything."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -191,8 +226,8 @@ public struct SettingsView: View {
         let build =
             Bundle.main.infoDictionary?["CFBundleVersion"] as? String
         switch (short, build) {
-        case let (short?, build?): return "\(short) (\(build))"
-        case let (short?, nil): return short
+        case (let short?, let build?): return "\(short) (\(build))"
+        case (let short?, nil): return short
         // Unbundled runs have no Info.plist; VERSION owns the release number.
         default: return "dev"
         }
@@ -207,13 +242,12 @@ public struct SettingsView: View {
                 HStack(spacing: 8) {
                     Text(granted ? "Granted" : "Needed")
                         .foregroundStyle(.secondary)
-                    Button("Open Settings") { action() }
-                        .controlSize(.small)
+                    IconButton("Open Settings", systemImage: "gearshape") {
+                        action()
+                    }
+                    .controlSize(.small)
                 }
-            }
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            }.help(detail)
         }
     }
 

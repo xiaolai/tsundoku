@@ -124,6 +124,24 @@ public struct Annotation: Identifiable, Hashable, Sendable {
     public var bookSource: BookSource
 
     public var isResolved: Bool { !(text ?? "").isEmpty }
+    /// Kindle notes can store their body in `text`; Books uses `note`.
+    public var personalNote: String? {
+        Self.content(note) ?? (kind == .note ? Self.content(text) : nil)
+    }
+    public var passageText: String? {
+        if kind == .note && Self.content(note) == nil { return nil }
+        return Self.content(text)
+    }
+    public var hasContent: Bool { passageText != nil || personalNote != nil }
+
+    private static func content(_ value: String?) -> String? {
+        guard let value,
+            !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        return value
+    }
     public var displayText: String {
         if let text, !text.isEmpty { return text }
         if let note, !note.isEmpty { return note }
@@ -165,6 +183,19 @@ public struct Annotation: Identifiable, Hashable, Sendable {
 
 // MARK: - History
 
+public struct SavedAINote: Identifiable, Sendable, Hashable {
+    public let id: Int64
+    public let asin: String?
+    public let bookTitle: String
+    public let bookSource: BookSource?
+    public let position: String?
+    public let kind: String
+    public let prompt: String
+    public let answer: String
+    public let provider: String
+    public let createdAt: Date
+}
+
 public struct ReadingSession: Identifiable, Hashable, Sendable {
     public let id: Int64
     public let asin: String
@@ -174,6 +205,12 @@ public struct ReadingSession: Identifiable, Hashable, Sendable {
     public let pageCount: Int
 
     public var duration: TimeInterval { endedAt.timeIntervalSince(startedAt) }
+    public var durationLabel: String {
+        let minutes = max(0, Int(duration / 60))
+        if minutes == 0 { return "Less than 1 min" }
+        if minutes < 60 { return "\(minutes) min" }
+        return "\(minutes / 60)h \(minutes % 60)m"
+    }
 
     public init(
         id: Int64,
@@ -420,7 +457,8 @@ public struct AISettings: Codable, Sendable, Equatable {
 
     public static func load() -> AISettings {
         guard let data = UserDefaults.standard.data(forKey: "ai.settings"),
-            let settings = try? JSONDecoder().decode(AISettings.self, from: data)
+            let settings = try? JSONDecoder().decode(
+                AISettings.self, from: data)
         else { return .defaults }
         return settings
     }

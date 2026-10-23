@@ -43,20 +43,6 @@ public struct ExportsView: View {
                         .lineLimit(2)
                 }
 
-                if model.captureTargetIsBooks {
-                    Label(
-                        "Apple Books uses its own font family — set it in "
-                            + "Books. Text size can be set here in relative "
-                            + "steps and is restored after the capture."
-                            + (model.settings.capturePageSize == .a4
-                                ? " A4 captures one page per PDF page; the "
-                                    + "reader is resized to A4 and restored."
-                                : " Without A4, one two-page spread fills "
-                                    + "each PDF page."),
-                        systemImage: "info.circle")
-                        .foregroundStyle(.secondary)
-                }
-
                 Picker("Pages", selection: $pageLimit) {
                     ForEach(PageLimit.allCases) { limit in
                         Text(limit.title).tag(limit)
@@ -64,151 +50,128 @@ public struct ExportsView: View {
                 }
                 .disabled(model.capturePhase == .running)
 
-                Picker(
-                    "Page size",
-                    selection: $model.settings.capturePageSize
-                ) {
-                    ForEach(CapturePageSize.allCases, id: \.self) { size in
-                        Text(size.title).tag(size)
-                    }
-                }
-                .disabled(model.capturePhase == .running)
-
-                Stepper(
-                    "Crop top: \(model.settings.captureCropTop) pt",
-                    value: $model.settings.captureCropTop, in: 0...200)
-                    .disabled(model.capturePhase == .running)
-
-                if model.captureTargetIsBooks {
-                    Stepper(
-                        "Crop bottom: \(model.settings.booksCropBottom) pt",
-                        value: $model.settings.booksCropBottom, in: 0...200)
-                        .disabled(model.capturePhase == .running)
-                    Text(
-                        "Points trimmed from each captured page. Bottom 0 "
-                            + "keeps the printed page numbers; the default "
-                            + "54 removes them.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
+                DisclosureGroup("Advanced Capture Options") {
                     Picker(
-                        "Text size",
-                        selection: $model.settings.booksFontSteps
+                        "Page size",
+                        selection: $model.settings.capturePageSize
                     ) {
-                        Text("Much smaller").tag(-2)
-                        Text("Smaller").tag(-1)
-                        Text("Keep current").tag(0)
-                        Text("Larger").tag(1)
-                        Text("Much larger").tag(2)
-                    }
-                    .disabled(model.capturePhase == .running)
-                } else {
-                    Stepper(
-                        "Crop bottom: \(model.settings.kindleCropBottom) pt",
-                        value: $model.settings.kindleCropBottom, in: 0...200)
-                        .disabled(model.capturePhase == .running)
-                    Text(
-                        "Points trimmed from each captured page. Bottom 0 "
-                            + "detects a page number automatically.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Picker(
-                        "Font size",
-                        selection: $model.settings.captureFontSize
-                    ) {
-                        Text("Keep current").tag(Int?.none)
-                        ForEach([5, 6, 7, 8, 9], id: \.self) { size in
-                            Text("\(size)").tag(Int?.some(size))
+                        ForEach(CapturePageSize.allCases, id: \.self) { size in
+                            Text(size.title).tag(size)
                         }
                     }
                     .disabled(model.capturePhase == .running)
-                }
+                    .help(
+                        "A4 temporarily resizes the reader. Layout and text size are restored afterward."
+                    )
 
-                Text(
-                    "A4 resizes the reader to a 595×842 pt page and restores "
-                        + "it; a font change reflows the book and is restored "
-                        + "afterwards. Kindle font size and Apple Books "
-                        + "text size are applied for the capture and "
-                        + "restored. Apple Books uses its own font family, "
-                        + "set in Books. Apple Books at A4 captures one page "
-                        + "per PDF page. Crop values trim the delivered page "
-                        + "image.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    Stepper(
+                        "Crop top: \(model.settings.captureCropTop) pt",
+                        value: $model.settings.captureCropTop, in: 0...200
+                    )
+                    .help("Trim points from the top of each captured page.")
+                    .disabled(model.capturePhase == .running)
 
-                Toggle(
-                    "Include cover page",
-                    isOn: $model.settings.includeCoverPage
-                )
-                .disabled(model.capturePhase == .running)
-                Text(
-                    "A vector cover page with the title, author, identifier, "
-                        + "source, export date and captured page count is "
-                        + "written before the captured pages.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    if model.captureTargetIsBooks {
+                        Stepper(
+                            "Crop bottom: \(model.settings.booksCropBottom) pt",
+                            value: $model.settings.booksCropBottom, in: 0...200
+                        )
+                        .help(
+                            "Bottom crop in points; zero keeps printed page numbers."
+                        )
+                        .disabled(model.capturePhase == .running)
+                        Picker(
+                            "Text size",
+                            selection: $model.settings.booksFontSteps
+                        ) {
+                            Text("Much smaller").tag(-2)
+                            Text("Smaller").tag(-1)
+                            Text("Keep current").tag(0)
+                            Text("Larger").tag(1)
+                            Text("Much larger").tag(2)
+                        }
+                        .disabled(model.capturePhase == .running)
+                    } else {
+                        Stepper(
+                            "Crop bottom: \(model.settings.kindleCropBottom) pt",
+                            value: $model.settings.kindleCropBottom, in: 0...200
+                        )
+                        .help(
+                            "Bottom crop in points; zero detects page numbers automatically."
+                        )
+                        .disabled(model.capturePhase == .running)
+                        Picker(
+                            "Font size",
+                            selection: $model.settings.captureFontSize
+                        ) {
+                            Text("Keep current").tag(Int?.none)
+                            ForEach([5, 6, 7, 8, 9], id: \.self) { size in
+                                Text("\(size)").tag(Int?.some(size))
+                            }
+                        }
+                        .disabled(model.capturePhase == .running)
+                    }
 
-                Toggle(
-                    "Write text and metadata sidecars",
-                    isOn: $model.settings.writeSidecars
-                )
-                .disabled(model.capturePhase == .running)
-                Text(
-                    "Adds cover.jpg, metadata.json, original.json, text.md and a "
-                        + ".txt file beside each page. A sidecar failure is "
-                        + "a warning, never a failed capture.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    Toggle(
+                        "Include cover page",
+                        isOn: $model.settings.includeCoverPage
+                    )
+                    .disabled(model.capturePhase == .running)
+                    .help("Add a cover with book details and the capture date.")
+                    Toggle(
+                        "Write text and metadata sidecars",
+                        isOn: $model.settings.writeSidecars
+                    )
+                    .disabled(model.capturePhase == .running)
+                    .help("Save extracted text and metadata alongside the PDF.")
+                    originalWarning
 
-                originalWarning
-
-                Toggle(
-                    "Hide Popular Highlights during capture",
-                    isOn: $model.settings.cleanPageDuringCapture
-                )
-                .disabled(
-                    model.capturePhase == .running
-                        || model.selectedBookIsAppleBooks)
-                Text(
-                    "Kindle's display setting is turned off for the capture "
-                        + "and restored afterwards. Your own highlights stay "
-                        + "in the page images.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                if let count = personalMarkCount {
-                    Text(
-                        "Your annotations in this book: \(count) — "
-                            + "they stay in the page images.")
+                    Toggle(
+                        "Hide Popular Highlights during capture",
+                        isOn: $model.settings.cleanPageDuringCapture
+                    )
+                    .disabled(
+                        model.capturePhase == .running
+                            || model.selectedBookIsAppleBooks
+                    )
+                    .help(
+                        "Temporarily hide Amazon popular highlights and restore the setting afterward. Personal annotations remain visible."
+                    )
+                    if let count = personalMarkCount, count > 0 {
+                        Text(
+                            "\(count) personal annotations remain visible."
+                        )
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                }
-
-                if model.settings.cleanPageDuringCapture {
-                    if let on = model.popularHighlightsState {
-                        Text(
-                            on
-                                ? "Popular Highlights: on — they will be "
-                                    + "turned off for the capture and "
-                                    + "restored afterwards."
-                                : "Popular Highlights: already off.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else if let note = model.popularHighlightsNote {
-                        Text(note)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
-                }
 
+                    if model.settings.cleanPageDuringCapture {
+                        if let on = model.popularHighlightsState {
+                            Text(
+                                on
+                                    ? "Popular highlights will be hidden temporarily."
+                                    : "Popular highlights are already hidden."
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        } else if let note = model.popularHighlightsNote {
+                            Text(note)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                }
                 LabeledContent("Output") {
                     HStack(spacing: 8) {
                         Text(model.exportFolder.path)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        Button("Choose…") {
+                        IconButton(
+                            "Choose…", systemImage: "folder.badge.plus",
+                            tooltip: "Choose export folder"
+                        ) {
                             model.chooseExportFolder()
                         }
                     }
@@ -216,7 +179,10 @@ public struct ExportsView: View {
 
                 HStack(spacing: 8) {
                     if model.capturePhase == .running {
-                        Button("Cancel") {
+                        IconButton(
+                            "Cancel", systemImage: "xmark",
+                            tooltip: "Cancel capture"
+                        ) {
                             model.cancelCapture()
                         }
                     } else {
@@ -225,6 +191,8 @@ public struct ExportsView: View {
                         } label: {
                             Label("Start Capture", systemImage: "play.fill")
                         }
+                        .labelStyle(.iconOnly)
+                        .help("Start capture")
                         .buttonStyle(.borderedProminent)
                     }
                 }
@@ -232,24 +200,19 @@ public struct ExportsView: View {
                 statusArea
             }
 
-            Section("Before You Start") {
-                Text(
-                    "Open the book in Kindle or Apple Books and keep the "
-                        + "reader window fully on screen. For Kindle, hide "
-                        + "the reading toolbar. For Apple Books, set the "
-                        + "font family in Books; the text size picker is "
-                        + "relative.")
-                Text(
-                    "The page text becomes an invisible, searchable layer in "
-                        + "the PDF. Apple Books pages are captured as "
-                        + (model.settings.capturePageSize == .a4
-                            ? "single A4 pages." : "two-page spreads."))
+            Section("Reader") {
+                Text("Open the book and keep its reader visible.")
+                    .font(.callout).foregroundStyle(.secondary)
                 if model.permissionsNeeded {
                     Label(
-                        "Accessibility or Screen Recording is not granted.",
-                        systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.secondary)
-                    Button("Review Permissions…") {
+                        "Capture permissions required.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .foregroundStyle(.secondary)
+                    IconButton(
+                        "Review Permissions…", systemImage: "lock.shield",
+                        tooltip: "Review capture permissions"
+                    ) {
                         model.showPermissions = true
                     }
                 }
@@ -268,18 +231,26 @@ public struct ExportsView: View {
                                     "\(capture.pageCount) pages · "
                                         + capture.createdAt.formatted(
                                             date: .abbreviated,
-                                            time: .shortened))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                            time: .shortened)
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                             }
                             Spacer()
                             if let path = capture.pdfPath {
-                                Button("Open") {
+                                IconButton(
+                                    "Open",
+                                    systemImage: "arrow.up.right.square",
+                                    tooltip: "Open PDF"
+                                ) {
                                     NSWorkspace.shared.open(
                                         URL(fileURLWithPath: path))
                                 }
                                 .controlSize(.small)
-                                Button("Reveal") {
+                                IconButton(
+                                    "Reveal", systemImage: "folder",
+                                    tooltip: "Show in Finder"
+                                ) {
                                     NSWorkspace.shared.selectFile(
                                         path,
                                         inFileViewerRootedAtPath:
@@ -311,14 +282,15 @@ public struct ExportsView: View {
             case .available:
                 Label(
                     availability.warning ?? "",
-                    systemImage: "book.closed")
-                    .foregroundStyle(.secondary)
+                    systemImage: "book.closed"
+                )
+                .foregroundStyle(.secondary)
                 HStack(spacing: 8) {
-                    Button("Reveal Original") {
+                    IconButton("Reveal Original", systemImage: "folder") {
                         model.revealOriginal()
                     }
                     .controlSize(.small)
-                    Button("Copy Original") {
+                    IconButton("Copy Original", systemImage: "doc.on.doc") {
                         model.copyOriginal()
                     }
                     .controlSize(.small)
@@ -326,8 +298,9 @@ public struct ExportsView: View {
             case .protected(let reason):
                 Label(
                     "The original is protected: \(reason)",
-                    systemImage: "lock")
-                    .foregroundStyle(.secondary)
+                    systemImage: "lock"
+                )
+                .foregroundStyle(.secondary)
             case .missing:
                 if let note = model.originalNote {
                     Text(note)
@@ -386,10 +359,14 @@ public struct ExportsView: View {
                         model.captureMessage,
                         systemImage: "checkmark.circle")
                     Spacer()
-                    Button("Open PDF") { model.openPDF() }
-                        .controlSize(.small)
-                    Button("Reveal") { model.revealCapture() }
-                        .controlSize(.small)
+                    IconButton("Open PDF", systemImage: "arrow.up.right.square")
+                    { model.openPDF() }
+                    .controlSize(.small)
+                    IconButton(
+                        "Reveal", systemImage: "folder",
+                        tooltip: "Show in Finder"
+                    ) { model.revealCapture() }
+                    .controlSize(.small)
                 }
                 if let note = model.captureCleanPage?.note {
                     Text(note)
@@ -408,9 +385,10 @@ public struct ExportsView: View {
         case .failed:
             Label(
                 model.captureMessage,
-                systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
+                systemImage: "exclamationmark.triangle"
+            )
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
         case .idle:
             EmptyView()
         }

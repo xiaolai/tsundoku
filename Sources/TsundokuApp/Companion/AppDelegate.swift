@@ -16,7 +16,7 @@ enum TsundokuMain {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let settings = CompanionSettingsStore()
     private let permissions = PermissionsModel()
     private var companion: CompanionController!
@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: StatusItemController!
     private var artifacts: ArtifactsWindowController!
     private var onboardingWindow: NSWindow?
+    private var settingsWindow: NSWindow?
     private var appModel: AppModel?
     private var loginStatus = ""
     private var hotKeyTestArmed = false
@@ -82,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             watcher.start()
         }
 
-        if permissions.missing,
+        if arguments.contains("--show-onboarding"), permissions.missing,
             !arguments.contains("--no-onboarding")
         {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -153,6 +154,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.permissions = permissions
         model.openCompanion = { [weak self, weak model] in
             guard let self, let model else { return }
+            if !self.permissions.accessibility {
+                self.showOnboarding()
+                return
+            }
             guard self.companion.canShowPanel else {
                 model.post(
                     "Open a book in Kindle or Apple Books first. The companion "
@@ -160,6 +165,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             self.companion.showPanel()
+        }
+        model.openSettingsWindow = { [weak self] in self?.openSettings() }
+        model.openSavedNotesWindow = { [weak self] in
+            guard let self else { return }
+            self.artifacts.show(section: .highlights, importLibrary: false)
+            self.appModel?.showSavedAINotes = true
         }
         appModel = model
         TsundokuDiagnostics.shared.event("app_model_created")
@@ -202,7 +213,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKey.onPress = { [weak self] in
             guard let self else { return }
             let wasArmed = self.hotKeyTestArmed
-            self.companion.togglePanel()
+            self.permissions.refresh()
+            if self.permissions.accessibility {
+                self.companion.togglePanel()
+            } else {
+                self.showOnboarding()
+            }
             guard wasArmed else { return }
             self.hotKeyTestArmed = false
             self.settings.hotKeyTestNote = "The shortcut reached Tsundoku."
@@ -221,8 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             + (companion.isPanelOpen
                 ? "opened the companion."
                 : "ran the action, but no reader was available.")
-            + "\n\nIf the other app also reacted, macOS delivered the "
-            + "shortcut to both; no app can detect that in advance."
+            + "\n\nIf another app also reacts, choose a different shortcut."
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
@@ -270,10 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "Test \(settings.settings.hotKey.displayName)"
         alert.informativeText =
-            "Click I'm Ready, then press the shortcut while another app is "
-            + "frontmost. Tsundoku will report whether it received the key. "
-            + "If the other app also reacts, macOS delivered it to both and "
-            + "neither app can tell."
+            "Switch to another app, then press the shortcut to test it."
         alert.addButton(withTitle: "I'm Ready")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -293,9 +305,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // menu action and reopen events must always show the library.
         let section =
             useRequestedSection ? (requestedSection ?? .library) : .library
-        artifacts.show(section: section, importLibrary: true)
+        artifacts.show(section: section, importLibrary: !CommandLine.arguments.contains("--no-import"))
         if let model = artifacts.modelIfCreated() {
-            model.startLivePolling()
+            if !CommandLine.arguments.contains("--shell-only") { model.startLivePolling() }
         }
     }
 
@@ -312,7 +324,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openSettings() {
-        artifacts.show(section: .settings, importLibrary: false)
+        if settingsWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 720),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "Tsundoku Settings"
+            window.identifier = NSUserInterfaceItemIdentifier("TsundokuSettings")
+            window.contentView = NSHostingView(rootView: SettingsWindowView(model: ensureAppModel()))
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
+        }
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func showOnboarding() {
@@ -542,6 +565,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q")
 
+        let fileItem = NSMenuItem()
+        let fileMenu = NSMenu(title: "File")
+        fileItem.submenu = fileMenu
+        mainMenu.addItem(fileItem)
+        addBrowserItem("Open Book Annotations", command: "open", key: "o", to: fileMenu)
+        let importItem = NSMenuItem(title: "Import Library", action: #selector(importFromMenu), keyEquivalent: "r")
+        importItem.target = self
+        fileMenu.addItem(importItem)
+        addBrowserItem("Export Annotation Results…", command: "export", key: "e", to: fileMenu)
+        addBrowserItem("Saved AI Notes…", command: "aiNotes", key: "", to: fileMenu)
+
         let editItem = NSMenuItem()
         mainMenu.addItem(editItem)
         let editMenu = NSMenu(title: "Edit")
@@ -550,13 +584,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ("Undo", Selector(("undo:")), "z"),
             ("Redo", Selector(("redo:")), "Z"),
             ("Cut", #selector(NSText.cut(_:)), "x"),
-            ("Copy", #selector(NSText.copy(_:)), "c"),
+            ("Copy", #selector(copyFromMenu), "c"),
             ("Paste", #selector(NSText.paste(_:)), "v"),
-            ("Select All", #selector(NSText.selectAll(_:)), "a"),
+            ("Select All", #selector(selectAllFromMenu), "a"),
         ] {
-            editMenu.addItem(
-                withTitle: title, action: selector, keyEquivalent: key)
+            let item = editMenu.addItem(withTitle: title, action: selector, keyEquivalent: key)
+            if title == "Copy" || title == "Select All" { item.target = self }
         }
+        editMenu.addItem(.separator())
+        addBrowserItem("Find…", command: "find", key: "f", to: editMenu)
+
+        let viewItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        viewItem.submenu = viewMenu
+        mainMenu.addItem(viewItem)
+        addBrowserItem("Cards", command: "cards", key: "1", to: viewMenu)
+        addBrowserItem("List", command: "list", key: "2", to: viewMenu)
+        viewMenu.addItem(.separator())
+        addBrowserItem("Show / Hide Sidebar", command: "sidebar", key: "", to: viewMenu)
+        addBrowserItem("Show / Hide Inspector", command: "inspector", key: "i", to: viewMenu)
+        addBrowserItem("Back to Books", command: "back", key: "[", to: viewMenu)
 
         let windowItem = NSMenuItem()
         mainMenu.addItem(windowItem)
@@ -572,5 +619,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
+    }
+
+    private func addBrowserItem(_ title: String, command: String, key: String, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: #selector(browserFromMenu(_:)), keyEquivalent: key)
+        item.target = self
+        item.representedObject = command
+        menu.addItem(item)
+    }
+
+    @objc private func browserFromMenu(_ sender: NSMenuItem) {
+        guard let command = sender.representedObject as? String else { return }
+        TsundokuDiagnostics.shared.event("browser_menu_command", [
+            "command": command, "window": NSApp.keyWindow?.identifier?.rawValue ?? "none",
+        ])
+        if command == "aiNotes" { ensureAppModel().openSavedNotesWindow?(); return }
+        if NSApp.keyWindow?.identifier?.rawValue == "TsundokuInspector" {
+            NSApp.mainWindow?.makeKeyAndOrderFront(nil)
+        }
+        NotificationCenter.default.post(name: .tsundokuBrowserCommand, object: NSApp.keyWindow,
+                                        userInfo: ["command": command])
+    }
+
+    @objc private func importFromMenu() { ensureAppModel().importLibrary() }
+
+    @objc private func selectAllFromMenu() { textOrBrowserAction(#selector(NSText.selectAll(_:)), command: "selectAll") }
+    @objc private func copyFromMenu() { textOrBrowserAction(#selector(NSText.copy(_:)), command: "copy") }
+
+    private func textOrBrowserAction(_ action: Selector, command: String) {
+        if NSApp.keyWindow?.firstResponder is NSTextView {
+            NSApp.sendAction(action, to: nil, from: nil)
+        } else {
+            NotificationCenter.default.post(name: .tsundokuBrowserCommand, object: NSApp.keyWindow,
+                                            userInfo: ["command": command])
+        }
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(browserFromMenu(_:)), let command = item.representedObject as? String {
+            if command == "aiNotes" { return true }
+            let keyID = NSApp.keyWindow?.identifier?.rawValue
+            let browserActive = keyID == "TsundokuLibrary" || (keyID == "TsundokuInspector" && NSApp.mainWindow?.identifier?.rawValue == "TsundokuLibrary")
+            guard browserActive, let model = appModel else { return false }
+            let annotations = model.section == .highlights || (model.section == .library && model.bookWorkspaceID != nil)
+            switch command {
+            case "cards", "list", "export": return annotations
+            case "find", "inspector": return model.section == .library || model.section == .highlights
+            case "open": return model.section == .library && model.bookWorkspaceID == nil && model.selectedBookID != nil
+            case "back": return model.section == .library && model.bookWorkspaceID != nil
+            default: return true
+            }
+        }
+        if item.action == #selector(importFromMenu) { return appModel?.isImporting != true }
+        return true
     }
 }

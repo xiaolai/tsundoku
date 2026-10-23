@@ -63,12 +63,13 @@ final class ArtifactsWindowController: NSObject, NSWindowDelegate {
             ],
             backing: .buffered, defer: false)
         window.title = ""
+        window.identifier = NSUserInterfaceItemIdentifier("TsundokuLibrary")
         window.titleVisibility = .visible
         window.titlebarAppearsTransparent = true
         window.isOpaque = false
         window.backgroundColor = .clear
         window.contentView = hosting
-        window.minSize = NSSize(width: 980, height: 640)
+        window.minSize = NSSize(width: 760, height: 540)
         window.setContentSize(NSSize(width: 1280, height: 820))
         window.center()
         window.isReleasedWhenClosed = false

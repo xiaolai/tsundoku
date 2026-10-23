@@ -2,6 +2,10 @@ import Foundation
 
 /// Shared, presentation-neutral formatting helpers.
 public enum TsundokuFormat {
+    public static func annotationDate(_ date: Date?) -> String {
+        date?.formatted(date: .abbreviated, time: .omitted) ?? "Date unavailable"
+    }
+
     public static func date(_ date: Date?) -> String {
         guard let date else { return "Never" }
         return date.formatted(date: .abbreviated, time: .omitted)
