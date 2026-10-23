@@ -5,6 +5,8 @@ cd "$(dirname "$0")/.."
 VERSION="$(tr -d '[:space:]' < VERSION)"
 SDK_VERSION="$(xcrun --show-sdk-version)"
 MIN_VERSION="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
+source scripts/signing-identity.sh
+SIGN_ID="$(tsundoku_signing_identity)"
 APP="${TSUNDOKU_APP_PATH:-$PWD/build/Tsundoku.app}"
 
 # TSUNDOKU_APP_PATH becomes a recursive delete target below. Refuse anything
@@ -123,7 +125,6 @@ then
     exit 1
 fi
 
-SIGN_ID="${CODESIGN_IDENTITY:--}"
 if [ "$SIGN_ID" = "-" ]; then
     codesign --force --sign - "$STAGE"
 else

@@ -128,6 +128,7 @@ public final class AppModel: ObservableObject {
     @Published public var showPermissions = false
     @Published public private(set) var permissionAccessibility = AXIsProcessTrusted()
     @Published public private(set) var permissionScreen = CGPreflightScreenCaptureAccess()
+    @Published public private(set) var permissionCheckResult: String?
     @Published public var livePage: LivePage?
     @Published public var liveError: String?
     @Published public var importError: String?
@@ -611,10 +612,14 @@ public final class AppModel: ObservableObject {
             permissions.refresh()
             permissionAccessibility = permissions.accessibility
             permissionScreen = permissions.screenRecording
+            permissionCheckResult = permissions.checkResult
             return
         }
         permissionAccessibility = AXIsProcessTrusted()
         permissionScreen = CGPreflightScreenCaptureAccess()
+        let result = permissionsNeeded
+            ? "Access not granted to this running copy." : "Both permissions granted."
+        permissionCheckResult = "Checked \(Date().formatted(date: .omitted, time: .standard)). \(result)"
     }
 
     private func observePermissions() {

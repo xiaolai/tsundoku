@@ -128,17 +128,34 @@ public struct CompanionPanelView: View {
 
 @MainActor
 public final class PermissionsModel: ObservableObject {
-    @Published public var accessibility = AXIsProcessTrusted()
-    @Published public var screenRecording =
-        CGPreflightScreenCaptureAccess()
+    @Published public private(set) var accessibility: Bool
+    @Published public private(set) var screenRecording: Bool
+    @Published public private(set) var lastChecked: Date?
+    private let accessibilityCheck: () -> Bool
+    private let screenRecordingCheck: () -> Bool
 
     public var missing: Bool { !(accessibility && screenRecording) }
 
-    public init() {}
+    public var checkResult: String? {
+        guard let lastChecked else { return nil }
+        let result = missing ? "Access not granted to this running copy." : "Both permissions granted."
+        return "Checked \(lastChecked.formatted(date: .omitted, time: .standard)). \(result)"
+    }
+
+    public init(
+        accessibilityCheck: @escaping () -> Bool = { AXIsProcessTrusted() },
+        screenRecordingCheck: @escaping () -> Bool = { CGPreflightScreenCaptureAccess() }
+    ) {
+        self.accessibilityCheck = accessibilityCheck
+        self.screenRecordingCheck = screenRecordingCheck
+        accessibility = accessibilityCheck()
+        screenRecording = screenRecordingCheck()
+    }
 
     public func refresh() {
-        accessibility = AXIsProcessTrusted()
-        screenRecording = CGPreflightScreenCaptureAccess()
+        accessibility = accessibilityCheck()
+        screenRecording = screenRecordingCheck()
+        lastChecked = Date()
     }
 
     public func requestAccessibility() {

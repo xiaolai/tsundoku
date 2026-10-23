@@ -66,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
 
         configureStatusItem()
-        configureHotKey()
+        if !arguments.contains("--no-system-integrations") { configureHotKey() }
         settings.onChange = { [weak self] settings in
             self?.applySettings(settings, userInitiated: true)
         }
@@ -246,6 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         _ new: CompanionSettings, userInitiated: Bool
     ) {
         guard companion != nil, statusItem != nil else { return }
+        guard !CommandLine.arguments.contains("--no-system-integrations") else { return }
         if appliedHotKey != new.hotKey {
             let status = hotKey.install(new.hotKey)
             settings.hotKeyConflict = status != noErr

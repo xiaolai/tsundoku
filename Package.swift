@@ -29,6 +29,7 @@ let package = Package(
             name: "TsundokuTests",
             dependencies: [
                 "TsundokuCore",
+                "TsundokuUI",
                 .product(name: "KindleAX", package: "ax-driver"),
             ]
         ),

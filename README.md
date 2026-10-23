@@ -60,6 +60,14 @@ script records the real macOS SDK version in `LC_BUILD_VERSION` while keeping th
 deployment target at macOS 15; without it, macOS runs the app in legacy
 appearance (square window corners, no Liquid Glass).
 
+Ordinary builds use the sole available Developer ID Application signing identity.
+Set `CODESIGN_IDENTITY` explicitly if more than one is available, or use
+`CODESIGN_IDENTITY=-` for an isolated ad-hoc test build. Without a Developer ID
+identity, the script warns and falls back to ad-hoc signing. macOS permission
+grants apply to a signing identity: a differently signed rebuild can show
+“Needed” even while the earlier copy remains enabled in System Settings.
+Re-check reports access for the running copy; quit and reopen after granting access.
+
 The icon is rendered from `Resources/IconSources` by
 `./scripts/build-icons.sh` into `Resources/AppIcon.icns` and
 `Resources/Assets.car`. Those two artifacts are committed; an ordinary build

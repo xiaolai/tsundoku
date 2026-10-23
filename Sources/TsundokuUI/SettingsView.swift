@@ -120,7 +120,17 @@ public struct SettingsView: View {
                         model.refreshPermissions()
                     }
                     .controlSize(.small)
-
+                    if let result = model.permissionCheckResult {
+                        Text(result)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("permission-check-result")
+                        if model.permissionsNeeded {
+                            Text("Already enabled? Quit and reopen Tsundoku. A differently signed build needs its own grant.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
             }
