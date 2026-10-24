@@ -177,6 +177,32 @@ def repository_report(root, run_gitleaks=True):
             'passed': not unique, 'findings': unique}
 
 
+def without_code_signature(data):
+    """Drop the Mach-O LC_CODE_SIGNATURE blob.
+
+    The embedded signature carries Apple's public code-directory hashes as
+    base64 strings; they look like credentials to a generic secret scanner but
+    are not secret. The signature is verified separately with codesign.
+    """
+    if len(data) < 32 or int.from_bytes(data[:4], 'little') != 0xfeedfacf:
+        return data
+    count = int.from_bytes(data[16:20], 'little')
+    offset = 32
+    for _ in range(count):
+        if offset + 8 > len(data): break
+        cmd = int.from_bytes(data[offset:offset + 4], 'little')
+        size = int.from_bytes(data[offset + 4:offset + 8], 'little')
+        if size < 8: break
+        if cmd == 0x1d and offset + 16 <= len(data):
+            start = int.from_bytes(data[offset + 8:offset + 12], 'little')
+            length = int.from_bytes(data[offset + 12:offset + 16], 'little')
+            if 0 <= start <= start + length <= len(data):
+                return data[:start] + data[start + length:]
+            break
+        offset += size
+    return data
+
+
 def artifact_report(root, run_gitleaks=False):
     original = Path(root)
     if original.is_symlink():
@@ -192,7 +218,7 @@ def artifact_report(root, run_gitleaks=False):
             if not path.resolve().is_relative_to(root): result.append(finding('escaping-symlink', name))
         elif path.is_file():
             checked += 1
-            data = path.read_bytes()
+            data = without_code_signature(path.read_bytes())
             result.extend(scan_bytes(data, name))
             if run_gitleaks:
                 if path.name == 'CodeResources' and path.parent.name == '_CodeSignature':
