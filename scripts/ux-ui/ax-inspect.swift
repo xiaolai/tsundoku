@@ -84,12 +84,18 @@ func visit(_ element: AXUIElement, depth: Int = 0, action: (AXUIElement, Int) ->
 if args.count > 2 {
     let command = args[2]
     if command != "windows" { NSRunningApplication(processIdentifier: pid)?.activate(options: []) }
-    if command != "windows", let window = (attr(app, kAXWindowsAttribute) as? [AXUIElement])?.first(where: {
-           !string($0, kAXTitleAttribute).hasSuffix("Inspector")
-       }) {
-        // Best-effort: raising brings the target forward, but a window that
-        // cannot be raised yet must not fail a command that presses a menu.
-        _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+    if command != "windows" {
+        // Raise the focused window, not the first window in the list. After
+        // opening Settings from the library, the library is still first but
+        // Settings is focused; raising the library would make the tab press
+        // fail. The raise is best-effort.
+        let focused = attr(app, kAXFocusedWindowAttribute)
+            .map { unsafeBitCast($0, to: AXUIElement.self) }
+        let fallback = (attr(app, kAXWindowsAttribute) as? [AXUIElement])?
+            .first { !string($0, kAXTitleAttribute).hasSuffix("Inspector") }
+        if let window = focused ?? fallback {
+            _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        }
     }
     Thread.sleep(forTimeInterval: 0.2)
     if command == "windows" {
@@ -222,9 +228,19 @@ if args.count > 2 {
             if command == "select" {
                 if found == nil, role == kAXRowRole, containsLabel(element, args[3]) { found = element }
             } else if found == nil, labels.contains(args[3]),
-               (command == "set" ? role == kAXTextFieldRole : role != kAXStaticTextRole) { found = element }
+               (command == "set" ? role == kAXTextFieldRole
+                : role != kAXStaticTextRole && role != kAXWindowRole
+                  && role != kAXApplicationRole) { found = element }
         }
         if let found {
+            // Bring the element's own window forward. After opening Settings
+            // from the library, the library is still the first/focused
+            // window; pressing a tab in the background cannot complete.
+            if let windowValue = attr(found, kAXWindowAttribute) {
+                let window = unsafeBitCast(windowValue, to: AXUIElement.self)
+                _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+                _ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            }
             print("TARGET", string(found, kAXRoleAttribute), string(found, kAXTitleAttribute), "enabled", string(found, kAXEnabledAttribute))
             if command == "frame" {
                 if let p = attr(found, kAXPositionAttribute), let z = attr(found, kAXSizeAttribute) {

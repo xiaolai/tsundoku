@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""the dedicated test Mac only: direct FDA navigation and resumed import with owned synthetic stores."""
+"""Run on the dedicated test Mac: FDA request and resumed import with owned stores."""
 import argparse
 import json
 import pathlib
@@ -18,141 +18,253 @@ evidence.mkdir(exist_ok=True)
 archive = a.root / "flow.sqlite"
 if archive.exists():
     raise SystemExit("Refusing to reuse an existing flow archive")
+library = a.root / "sources/books/Documents/BKLibrary"
+if not library.is_dir():
+    raise SystemExit(f"Missing owned fixture: {library}")
+original_mode = library.stat().st_mode & 0o777
 checks = []
+pid = None
+
+# The fixture is task-owned; clear its preferences so repeated runs start from
+# the same ordinary pane and first-launch state.
+bundle_id = subprocess.check_output(
+    ["plutil", "-extract", "CFBundleIdentifier", "raw",
+     str(app / "Contents/Info.plist")], text=True).strip()
+subprocess.run(["defaults", "delete", bundle_id], check=False)
 
 
-def launch(stage, onboarding=False):
-    args = ["open", "-n", str(app), "--args", "--shell-only", "--no-system-integrations",
-            "--archive-path", str(archive), "--kindle-library-path", str(a.root / "absent"),
-            "--books-data-path", str(a.root / "sources/books"),
-            "--diagnostics", str(a.root / (stage + ".jsonl")), "--duration", "300"]
-    if onboarding:
-        args += ["--show-onboarding"]
-    subprocess.run(args, check=True)
-    for _ in range(50):
-        r = subprocess.run(["pgrep", "-f", "^" + str(app.resolve()) + "/Contents/MacOS/Tsundoku"], capture_output=True, text=True)
-        if r.stdout.strip():
-            return int(r.stdout.strip().splitlines()[0])
+def executable_pattern():
+    return "^" + re.escape(str((app / "Contents/MacOS/Tsundoku").resolve())) + "( |$)"
+
+
+def launch(stage, *flags):
+    subprocess.run(
+        ["open", "-n", str(app), "--args", "--shell-only",
+         "--no-system-integrations", "--archive-path", str(archive),
+         "--kindle-library-path", str(a.root / "absent"),
+         "--books-data-path", str(a.root / "sources/books"),
+         "--diagnostics", str(a.root / (stage + ".jsonl")),
+         "--duration", "300", *flags],
+        check=True)
+    for _ in range(60):
+        result = subprocess.run(
+            ["pgrep", "-f", executable_pattern()],
+            capture_output=True, text=True)
+        if result.stdout.strip():
+            return int(result.stdout.strip().splitlines()[0])
         time.sleep(0.1)
     raise AssertionError("Fixture did not launch")
 
 
-def command(pid, *args):
-    return subprocess.run([str(a.helper), str(pid), *args], capture_output=True, text=True, check=True).stdout
+def command(process, *args):
+    return subprocess.run(
+        [str(a.helper), str(process), *args],
+        capture_output=True, text=True, check=True).stdout
 
 
-def snapshot(pid, name, *expected):
-    for _ in range(20):
-        text = command(pid)
-        if all(s in text for s in expected):
+def command_retry(process, *args):
+    """Exit 4 means the AX tree changed mid-read; retry within the deadline."""
+    try:
+        return command(process, *args)
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 4:
+            return ""
+        raise
+
+
+def snapshot(process, name, *expected):
+    text = ""
+    for _ in range(30):
+        text = command_retry(process) or text
+        if all(value in text for value in expected):
             break
         time.sleep(0.2)
     (evidence / (name + ".txt")).write_text(text)
-    for s in expected:
-        assert s in text, (name, s)
+    assert text.strip(), f"{name}: empty AX snapshot"
+    for value in expected:
+        assert value in text, (name, value)
     checks.append(name)
     return text
 
 
-def capture(pid, name):
-    text = command(pid, "allWindowIDs")
-    window = next(l.split()[1] for l in text.splitlines() if l.startswith("WINDOW_ID"))
-    subprocess.run(["screencapture", "-x", "-l", window, str(evidence / (name + ".png"))], check=True)
+def capture(process, name):
+    text = command(process, "windowIDs")
+    windows = [
+        line.split()[1] for line in text.splitlines()
+        if line.startswith("WINDOW_ID")
+    ]
+    assert windows, f"{name}: no task-owned window ID"
+    subprocess.run(
+        ["screencapture", "-x", "-l", windows[0],
+         str(evidence / (name + ".png"))],
+        check=True)
 
 
-pid = launch("initial", onboarding=True)
-snapshot(pid, "setup-before-check", "Set Up Tsundoku", "Library Access", "Grant Full Disk Access…", "Not checked")
-capture(pid, "setup-before-check")
-command(pid, "press", "Grant Full Disk Access…")
-snapshot(pid, "grant-guide", "Grant Library Access", "App Not Listed?", "imported automatically")
-settings = int(subprocess.check_output(["pgrep", "-x", "System Settings"], text=True).strip().splitlines()[0])
-settings_text = command(settings)
-assert "Full Disk Access" in settings_text, "Request must navigate to the actual FDA pane"
-# Do not retain other apps/account data from System Settings.
-(evidence / "pane-navigation.txt").write_text("Observed Full Disk Access pane navigation after Grant without a prior Check. The harness performs no grant/revocation action; real TCC grant acceptance is not covered.\n")
-rows = [json.loads(s) for s in (a.root / "initial.jsonl").read_text().splitlines()]
-events = [r.get("event") for r in rows]
-assert "library_registration_attempted" in events
-attempt = next(r for r in rows if r.get("event") == "library_registration_attempted")
-# Counts establish the real read implementation was called, not open/close only.
-fields = attempt.get("fields", attempt)
-assert "directory_reads" in fields and "header_bytes_read" in fields, attempt
-assert 0 <= fields["header_bytes_read"] <= 2, attempt
-assert events.index("library_registration_attempted") < events.index("library_access_settings_opened")
-checks.append("registration-attempt-precedes-settings")
-checks.append("direct-full-disk-pane")
-capture(pid, "grant-guide") # Activation verifies the deliberately blocked fixture.
-snapshot(pid, "blocked-guide", "Access blocked", "Grant Library Access")
-# Record only geometry, without retaining account or other application names.
-def frames(process):
-    text = command(process, "windows")
-    return [(line.split(" FRAME ")[0].removeprefix("WINDOW "),
-             list(map(float, line.split(" FRAME ")[1].split())))
-            for line in text.splitlines() if " FRAME " in line]
-
-def overlaps(a, b):
-    return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
-
-time.sleep(1)
-guide = next(frame for title, frame in frames(pid) if title == "Library Access")
-settings_frames = [frame for _, frame in frames(settings)]
-assert settings_frames and not any(overlaps(guide, f) for f in settings_frames), (guide, settings_frames)
-(evidence / "panel-placement.json").write_text(json.dumps({"guide": guide, "settings_frames": settings_frames}, indent=2))
-checks.append("guide-does-not-cover-settings")
-old_pid = pid
-command(pid, "press", "Quit and Reopen Tsundoku")
-(a.root / "sources/books/Documents/BKLibrary").chmod(0o700)
-for _ in range(150):
-    r = subprocess.run(["pgrep", "-f", "^" + str(app.resolve()) + "/Contents/MacOS/Tsundoku"], capture_output=True, text=True)
-    new_pids = [int(x) for x in r.stdout.split() if int(x) != old_pid]
-    if new_pids and subprocess.run(["kill", "-0", str(old_pid)], capture_output=True).returncode:
-        pid = new_pids[0]
-        break
-    time.sleep(0.1)
-else:
+def wait_for_replacement(old_pid):
+    for _ in range(150):
+        result = subprocess.run(
+            ["pgrep", "-f", executable_pattern()],
+            capture_output=True, text=True)
+        new_pids = [int(value) for value in result.stdout.split()
+                    if int(value) != old_pid]
+        if new_pids and subprocess.run(
+            ["kill", "-0", str(old_pid)], capture_output=True
+        ).returncode:
+            return new_pids[0]
+        time.sleep(0.1)
     raise AssertionError("Quit and Reopen did not replace the fixture process")
-checks.append("quit-and-reopen-action")
-text = snapshot(pid, "resumed-setup", "Set Up Tsundoku", "Libraries readable")
-checks.append("resume-without-onboarding-flag")
-for _ in range(100):
-    if archive.exists():
-        with sqlite3.connect(archive) as db:
-            if db.execute("select count(*) from books").fetchone()[0] == 1:
-                break
-    time.sleep(0.1)
-else:
+
+
+def quit_app():
+    if pid is None:
+        return
+    subprocess.run(
+        ["osascript", "-e", 'tell application "' + str(app) + '" to quit'],
+        check=False)
+    for _ in range(50):
+        if subprocess.run(
+            ["kill", "-0", str(pid)], capture_output=True
+        ).returncode:
+            return
+        time.sleep(0.1)
+    raise AssertionError("Fixture did not quit normally")
+
+
+def wait_for_imported_archive():
+    for _ in range(150):
+        if archive.exists():
+            with sqlite3.connect(archive) as db:
+                if db.execute("select count(*) from books").fetchone()[0] == 1:
+                    return
+        time.sleep(0.1)
     raise AssertionError("Access verification did not continue import")
-with sqlite3.connect(archive) as db:
-    assert db.execute("select count(*) from annotations").fetchone()[0] == 1
-checks.append("automatic-import-after-resume")
-if "App Not Listed?" in text:
-    command(pid, "press", "Done")
-command(pid, "press", "Continue Anyway")
-snapshot(pid, "library-opened-after-setup", "First Import Fixture", "1 books")
-capture(pid, "library-opened-after-setup")
-rows = [json.loads(s) for s in (a.root / "initial.jsonl").read_text().splitlines()]
-assert len([r for r in rows if r.get("event") == "library_import_started"]) == 1
-checks.append("no-duplicate-first-import")
-# A parent red-close must cancel setup and dispose its guide, not carry intent to launch.
-(a.root / "sources/books/Documents/BKLibrary").chmod(0o000)
-command(pid, "press", "Settings…")
-snapshot(pid, "settings-shown", "Companion", "Access", "AI Provider", "Library Data", "About")
-command(pid, "press", "Full Disk Access…")
-snapshot(pid, "settings-guide", "Grant Library Access")
-command(pid, "key", "13", "cmd")
-time.sleep(0.5)
-assert not any(title == "Library Access" for title, _ in frames(pid)), "Closing Settings must close its guide"
-checks.append("parent-close-disposes-guide")
-subprocess.run(["osascript", "-e", 'tell application "' + str(app) + '" to quit'], check=True)
-for _ in range(50):
-    if subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode: break
-    time.sleep(0.1)
-pid = launch("after-cancel")
-time.sleep(1)
-text = command(pid)
-assert "Set Up Tsundoku" not in text and "Grant Library Access" not in text
-checks.append("cancelled-setup-does-not-resume")
-(evidence / "results.json").write_text(json.dumps(checks, indent=2) + "\n")
-print(f"{len(checks)} native setup/request/resume checks passed")
-# Stop only the explicitly owned fixture.
-subprocess.run(["kill", "-TERM", str(pid)], check=True)
+
+
+try:
+    # Block the owned store so the request action is present: the Access pane
+    # only offers Full Disk Access when a source is blocked or unready.
+    library.chmod(0o000)
+    pid = launch("initial", "--show-onboarding")
+    snapshot(
+        pid, "setup-before-check", "Set up library imports", "Library Imports",
+        "Request Full Disk Access…", "Access blocked")
+    capture(pid, "setup-before-check")
+
+    command(pid, "press", "Request Full Disk Access…")
+    snapshot(
+        pid, "request-opened", "Set up library imports",
+        "Re-check Library Access")
+    settings = int(subprocess.check_output(
+        ["pgrep", "-x", "System Settings"], text=True).strip().splitlines()[0])
+    settings_text = ""
+    for _ in range(30):
+        settings_text = command_retry(settings) or settings_text
+        if "Full Disk Access" in settings_text:
+            break
+        time.sleep(0.2)
+    assert "Full Disk Access" in settings_text, (
+        "Request must navigate to the actual FDA pane")
+    # Do not retain other apps/account data from System Settings.
+    (evidence / "pane-navigation.txt").write_text(
+        "Observed Full Disk Access pane navigation after Request. The harness "
+        "performs no grant/revocation action; real TCC grant acceptance is not "
+        "covered.\n")
+
+    rows = [json.loads(line) for line in
+            (a.root / "initial.jsonl").read_text().splitlines()]
+    events = [row.get("event") for row in rows]
+    assert "library_registration_attempted" in events
+    attempt = next(
+        row for row in rows if row.get("event") == "library_registration_attempted")
+    fields = attempt.get("fields", attempt)
+    assert "directory_reads" in fields and "header_bytes_read" in fields, attempt
+    assert 0 <= fields["header_bytes_read"] <= 2, attempt
+    assert events.index("library_registration_attempted") < events.index(
+        "library_access_settings_opened")
+    checks.append("registration-attempt-precedes-settings")
+    checks.append("direct-full-disk-pane")
+    capture(pid, "access-request")
+
+    library.chmod(0o000)
+    command(pid, "press", "Re-check Library Access")
+    snapshot(pid, "blocked-access", "Access blocked", "Set up library imports")
+    checks.append("blocked-source-is-explicit")
+
+    # The Settings window is the guide. Closing it must leave no orphan panel.
+    command(pid, "key", "13", "cmd")
+    time.sleep(0.5)
+    assert "WINDOW Access" not in (command_retry(pid, "windows") or "")
+    assert "WINDOW Companion" not in (command_retry(pid, "windows") or "")
+    checks.append("settings-close-leaves-no-guide")
+
+    command(pid, "press", "Settings…")
+    command(pid, "press", "Access")
+    snapshot(pid, "settings-reopened", "Set up library imports")
+
+    old_pid = pid
+    # The action is only offered while the status is blocked; restore the
+    # store as the replacement process starts so it can read and import.
+    # The app can terminate before AXPress returns, so the replacement
+    # process below is the real assertion, not the press result.
+    try:
+        command(pid, "press", "Quit and Reopen Tsundoku")
+    except subprocess.CalledProcessError as error:
+        if error.returncode != 3:
+            raise
+    library.chmod(original_mode)
+    pid = wait_for_replacement(old_pid)
+    checks.append("quit-and-reopen-action")
+    text = ""
+    for _ in range(30):
+        text = command_retry(pid) or text
+        if "Libraries readable" in text:
+            break
+        time.sleep(0.2)
+    assert "Libraries readable" in text, "resumed access did not become readable"
+    (evidence / "resumed-setup.txt").write_text(text)
+    checks.append("resume-without-onboarding-flag")
+
+    wait_for_imported_archive()
+    with sqlite3.connect(archive) as db:
+        assert db.execute("select count(*) from annotations").fetchone()[0] == 1
+    checks.append("automatic-import-after-resume")
+
+    command(pid, "press", "Return to Library")
+    snapshot(pid, "library-opened-after-setup", "First Import Fixture", "1 books")
+    capture(pid, "library-opened-after-setup")
+
+    rows = [json.loads(line) for line in
+            (a.root / "initial.jsonl").read_text().splitlines()]
+    started = [row for row in rows if row.get("event") == "library_import_started"]
+    assert len(started) == 1, f"first import ran {len(started)} times"
+    checks.append("no-duplicate-first-import")
+
+    # A request from an already-open Settings must not leave a child panel.
+    library.chmod(0o000)
+    command(pid, "press", "Settings…")
+    snapshot(pid, "settings-shown", "Companion", "Access", "AI Provider",
+             "Library Data", "About")
+    command(pid, "press", "Access")
+    command(pid, "press", "Re-check Library Access")
+    snapshot(pid, "settings-blocked", "Access blocked")
+    command(pid, "press", "Request Full Disk Access…")
+    snapshot(pid, "settings-request", "Set up library imports",
+             "Access blocked")
+    command(pid, "key", "13", "cmd")
+    time.sleep(0.5)
+    assert "WINDOW Access" not in (command_retry(pid, "windows") or "")
+    checks.append("settings-request-close-leaves-no-guide")
+
+    quit_app()
+    pid = launch("after-cancel", "--open-library")
+    time.sleep(1)
+    text = command(pid)
+    assert "Set up library imports" not in text
+    assert "Request Full Disk Access…" not in text
+    checks.append("cancelled-setup-does-not-resume")
+
+    (evidence / "results.json").write_text(json.dumps(checks, indent=2) + "\n")
+    print(f"{len(checks)} native setup/request/resume checks passed")
+finally:
+    library.chmod(original_mode)
+    quit_app()

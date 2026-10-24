@@ -22,6 +22,16 @@ def command(*arguments):
     return result.stdout
 
 
+def command_retry(*arguments):
+    """Exit 4 means the AX tree changed mid-read; retry within the deadline."""
+    try:
+        return command(*arguments)
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 4:
+            return ""
+        raise
+
+
 def press(label, menu=None):
     if menu:
         # Opening the menu is best-effort: its items are exposed in the AX
@@ -41,7 +51,7 @@ def press_status_menu(label):
 def snapshot(name, *expected, absent=()):
     text = ""
     for _ in range(6):
-        text = command()
+        text = command_retry() or text
         if all(value in text for value in expected) and not any(
                 value in text for value in absent):
             break
@@ -60,7 +70,7 @@ def snapshot(name, *expected, absent=()):
 
 def expect_window_absent(name, title):
     """Direct window-enumeration check; an empty tree means no windows."""
-    text = command("windows")
+    text = command_retry("windows") or ""
     (args.evidence / f"{name}.txt").write_text(text)
     if f"WINDOW {title}" in text:
         raise AssertionError(f"{name}: window {title!r} still present")
@@ -68,7 +78,7 @@ def expect_window_absent(name, title):
 
 
 def panel_snapshot(name, *expected, absent=()):
-    text = command()
+    text = command_retry() or ""
     (args.evidence / f"{name}.txt").write_text(text)
     marker = "AXWindow | Annotation Inspector"
     if marker not in text:

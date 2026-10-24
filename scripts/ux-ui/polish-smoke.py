@@ -36,18 +36,38 @@ def press_status_menu(label):
     call("pressStatusMenu", "Tsundoku", label)
 
 
+def call_retry(*items):
+    """Exit 4 means the AX tree changed mid-read; retry within the deadline."""
+    try:
+        return call(*items)
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 4:
+            return ""
+        raise
+
+
 def snapshot(name, *expected):
-    text = call()
+    text = call_retry() or ""
     (args.evidence / (name + ".txt")).write_text(text)
+    assert text.strip(), f"{name}: empty AX snapshot"
     for value in expected:
         assert value in text, (name, value)
     checks.append({"check": name, "passed": True})
     return text
 
 
-def preference(key):
-    result = subprocess.run(["defaults", "read", args.domain, key], text=True, capture_output=True)
-    return int(result.stdout.strip()) if result.returncode == 0 else 0
+def preference(key, *, missing_ok=False):
+    result = subprocess.run(
+        ["defaults", "read", args.domain, key], text=True, capture_output=True)
+    if result.returncode == 0:
+        try:
+            return int(result.stdout.strip())
+        except ValueError:
+            raise AssertionError(f"{key}: non-integer preference {result.stdout.strip()!r}")
+    message = (result.stderr + result.stdout).lower()
+    if missing_ok and ("could not find key" in message or "does not exist" in message):
+        return None
+    raise AssertionError(f"{key}: defaults read failed: {result.stderr.strip()}")
 
 
 def capture(name):
@@ -63,7 +83,7 @@ assert "HELP View options" in call("help", "Options")
 assert " |  |  | Show Details" not in text
 assert "annotations |" not in text.splitlines()[1]
 checks.append({"check": "icon-actions-retain-help-and-accessible-names", "passed": True})
-if preference("browser.randomBorders"):
+if preference("browser.randomBorders", missing_ok=True) == 1:
     press("Options")
     press("Random Border Colors")
 capture("cards-neutral.png")
@@ -72,7 +92,7 @@ press("Random Border Colors")
 assert preference("browser.randomBorders") == 1
 snapshot("random-border-option", "6 results")
 capture("cards-colored.png")
-old_seed = preference("browser.borderSeed")
+old_seed = preference("browser.borderSeed", missing_ok=True) or 0
 press("Options")
 press("Shuffle Border Colors")
 assert preference("browser.borderSeed") != old_seed
@@ -91,7 +111,8 @@ press("Open Book Annotations", "File")
 text = snapshot("scoped-card-metadata", "3 results", "Open in Annotations")
 title = "Learning Through Small Experiments"
 visible_titles = [line for line in text.splitlines() if "AXStaticText" in line and line.endswith("| " + title)]
-assert len(visible_titles) <= 1, "Book title repeats on scoped cards"
+assert visible_titles, f"Scoped cards do not show {title!r}"
+assert len(visible_titles) == 1, "Book title repeats on scoped cards"
 checks.append({"check": "scoped-book-title-is-not-repeated", "passed": True})
 press("Open in Annotations")
 press("Options")

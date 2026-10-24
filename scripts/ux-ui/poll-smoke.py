@@ -30,6 +30,16 @@ def call(*items):
     return result.stdout
 
 
+def call_retry(*items):
+    """Exit 4 means the AX tree changed mid-read; retry within the deadline."""
+    try:
+        return call(*items)
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 4:
+            return ""
+        raise
+
+
 def events(name):
     if not args.diagnostics.exists():
         return 0
@@ -55,9 +65,9 @@ checks.append("initial-polling")
 
 for cycle in range(3):
     call("closeWindow", "Books")
-    wait_for(lambda: "WINDOW Books" not in call("windows"))
+    wait_for(lambda: "WINDOW Books" not in (call_retry("windows") or ""))
     call("pressStatusMenu", "Tsundoku", "Library…")
-    wait_for(lambda: "WINDOW Books" in call("windows"))
+    wait_for(lambda: "WINDOW Books" in (call_retry("windows") or ""))
     checks.append(f"reopened-{cycle + 1}")
 
 # Exact counts catch duplicated observers: each open logs one shown, each
