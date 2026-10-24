@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""macmini-000 only: diagnostic check side effects and completed empty-import UI."""
+"""the dedicated test Mac only: diagnostic check side effects and completed empty-import UI."""
 import argparse
 import json
 import pathlib

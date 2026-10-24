@@ -6,7 +6,7 @@ import Vision
 ///
 /// Books draws the number into the page image 54 points above the bottom, in
 /// both the two-page spread and the A4 single-page layout (measured on
-/// macmini-000). Kindle usually draws its number in chrome outside the page
+/// the dedicated test Mac). Kindle usually draws its number in chrome outside the page
 /// crop; if a layout puts a number in the image, the detector below finds a
 /// small centered numeric line in the bottom strip and crops above it.
 public enum PageCropError: Error, CustomStringConvertible, Sendable {

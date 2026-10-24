@@ -1,4 +1,4 @@
-// Run only on macmini-000. Inspects the explicitly supplied process; never finds a reader app.
+// Run only on the dedicated test Mac. Inspects the explicitly supplied process; never finds a reader app.
 import AppKit
 import ApplicationServices
 import Foundation

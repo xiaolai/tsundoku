@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""macmini-000 only: direct FDA navigation and resumed import with owned synthetic stores."""
+"""the dedicated test Mac only: direct FDA navigation and resumed import with owned synthetic stores."""
 import argparse
 import json
 import pathlib

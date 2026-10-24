@@ -5,6 +5,9 @@ cd "$(dirname "$0")/.."
 VERSION="$(tr -d '[:space:]' < VERSION)"
 SDK_VERSION="$(xcrun --show-sdk-version)"
 MIN_VERSION="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
+BUILD_NUMBER="${TSUNDOKU_BUILD_NUMBER:-1}"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid VERSION' >&2; exit 1; }
+[[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid build number' >&2; exit 1; }
 source scripts/signing-identity.sh
 SIGN_ID="$(tsundoku_signing_identity)"
 APP="${TSUNDOKU_APP_PATH:-$PWD/build/Tsundoku.app}"
@@ -59,7 +62,11 @@ esac
 # applies the current appearance while the minimum stays at macOS 15.
 swift build -c release --product Tsundoku \
     -Xlinker -platform_version -Xlinker macos \
-    -Xlinker "$MIN_VERSION" -Xlinker "$SDK_VERSION"
+    -Xlinker "$MIN_VERSION" -Xlinker "$SDK_VERSION" \
+    -Xswiftc -debug-prefix-map -Xswiftc "$PWD=/src/tsundoku" \
+    -Xswiftc -file-prefix-map -Xswiftc "$PWD=/src/tsundoku" \
+    -Xswiftc -debug-prefix-map -Xswiftc "$HOME=/build/user" \
+    -Xswiftc -file-prefix-map -Xswiftc "$HOME=/build/user"
 BIN="$(swift build -c release --show-bin-path)"
 
 # Assemble into a staging bundle, then replace the destination atomically.
@@ -69,6 +76,8 @@ trap 'rm -rf "$STAGE"' EXIT
 rm -rf "$STAGE"
 mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 cp "$BIN/Tsundoku" "$STAGE/Contents/MacOS/Tsundoku"
+# Keep debug receipts local: linker debug symbols carry absolute object-file paths.
+strip -S "$STAGE/Contents/MacOS/Tsundoku"
 
 # Icon artifacts are generated from Resources/IconSources by
 # scripts/build-icons.sh and committed. An ordinary build must not need Xcode's
@@ -96,7 +105,7 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
 <key>CFBundleExecutable</key><string>Tsundoku</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>${VERSION}</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleIconName</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>${MIN_VERSION}</string>
@@ -105,6 +114,22 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+
+# Only the release controller supplies provenance; ordinary builds remain unlabelled.
+python3 - "$STAGE/Contents/Info.plist" <<'PYBUILD'
+import os, plistlib, re, sys
+path = sys.argv[1]
+keys = {'TSUNDOKU_SOURCE_COMMIT': 'TsundokuSourceCommit',
+        'TSUNDOKU_SOURCE_TREE': 'TsundokuSourceTree',
+        'TSUNDOKU_DRIVER_COMMIT': 'TsundokuDriverCommit'}
+values = {k: os.environ.get(k, '') for k in keys}
+if any(values.values()):
+    if not all(re.fullmatch('[a-f0-9]{40}', v) for v in values.values()):
+        raise SystemExit('Release provenance must contain three complete Git object IDs.')
+    with open(path, 'rb') as stream: info = plistlib.load(stream)
+    info.update({keys[k]: v for k, v in values.items()})
+    with open(path, 'wb') as stream: plistlib.dump(info, stream)
+PYBUILD
 
 # SwiftPM can record the deployment target as the SDK (15.0 / 15.0), which makes
 # macOS apply the compatibility appearance. The linker flag above prevents it;

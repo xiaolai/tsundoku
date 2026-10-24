@@ -9,7 +9,7 @@ let package = Package(
         .executable(name: "tsundoku-cli", targets: ["TsundokuCLI"]),
     ],
     dependencies: [
-        .package(path: "../../kindle-toolkit/packages/ax-driver")
+        .package(path: "vendor/kindle-toolkit/packages/ax-driver")
     ],
     targets: [
         .target(

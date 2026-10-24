@@ -4,13 +4,13 @@ A local macOS reader for Kindle and Apple Books libraries you own. It reads the
 catalog, annotations and reading state both apps keep on this Mac, and exports
 the combined archive. The Kindle lane can also capture a book as a searchable
 PDF by capturing the reader and send the current page to an AI provider you
-choose. Apple Books is a data lane today: its highlights, bookmarks and reading
-progress are imported; live page capture is not implemented.
+choose. Apple Books highlights, bookmarks and reading progress are also imported, and
+both reader apps have page-capture adapters.
 
-- SwiftUI, Swift 6, macOS 15 or later. The UI uses standard SwiftUI controls, so
+- SwiftUI, Swift 6.3 or later, macOS 15 or later. The UI uses standard SwiftUI controls, so
   macOS 26+ gets Liquid Glass from the system and macOS 15 keeps the same
   structure without it.
-- `KindleAX` from `../kindle-toolkit/packages/ax-driver`.
+- `KindleAX` is pinned under `vendor/kindle-toolkit/packages/ax-driver`.
 - No sandbox. Accessibility and Screen Recording are needed for the live page,
   capture and AI panel; the library and archive need neither.
 - No telemetry. Only the current page leaves the Mac, on an explicit action.
@@ -33,9 +33,10 @@ Apple Books and a glasses button appears at the reader edge.
   not activate the app.
 - Escape, the inside close control, or a click outside closes the panel. Closing
   cancels in-flight AI work and writes nothing.
-- The library, annotations, history, exports and settings stay in one window.
-  Open it from the menu bar (`Library…`, `Settings…`) or by reopening the app.
-  It is created on demand; login does not import the library or poll Kindle.
+- The library, annotations, history and exports share one Library window.
+  Settings is one separate native window; Access contains setup and recovery.
+  Open them from the menu bar or reopen the app to browse the Library.
+  Login does not import the library or poll Kindle.
 
 The panel reads the current Kindle page through `KindleLive` and the Apple Books
 page through its `AXStaticText` nodes, with a Vision OCR fallback that is
@@ -44,7 +45,12 @@ page is sent, and only when an action is chosen; no whole book is uploaded.
 
 ## Build
 
+The driver is a private submodule. Source builds require authorized access to
+`xiaolai/kindle-toolkit`; public binary installations do not. No private driver
+source or development documentation is copied into this repository.
+
 ```sh
+git submodule update --init --recursive
 swift build
 swift test
 ./scripts/build-app.sh
@@ -111,7 +117,7 @@ the standard one.
 | `Sources/TsundokuCore/Companion` | settings, geometry, state machine, diagnostics |
 | `Sources/TsundokuCore/Reader` | Kindle and Apple Books page contexts, OCR fallback |
 | `Sources/TsundokuUI` | SwiftUI views, app model, AI panel |
-| `Sources/TsundokuUI/Companion` | trigger, glass panel, onboarding, settings |
+| `Sources/TsundokuUI/Companion` | trigger, panel, companion settings |
 | `Sources/TsundokuApp` | `@main`, menu-bar shell, tracker, hot key, login item |
 | `Sources/TsundokuCLI` | headless e2e and inspection |
 | `Tests/TsundokuTests` | identity, dates, archive, Books reader, geometry, state, cancellation |
@@ -124,33 +130,60 @@ the project's documentation repository.
 
 ## Release
 
+The pipeline uses an existing `notarytool` Keychain profile. It never loads an
+environment file or provisions credentials as part of a release. Set up a
+profile interactively with Apple's `xcrun notarytool store-credentials` once.
+
 ```sh
-# Real release: read the notary credentials from the workspace .env, store the
-# keychain profile, then build, notarize, staple and verify.
-./scripts/release.sh
+# Show the phases and exact public asset names without changing anything.
+./scripts/release.sh plan
 
-# Check the credentials and the profile only; nothing is built:
-./scripts/release.sh --profile-only
+# Scan all local refs, Git messages/tags, current source and private filenames.
+python3 scripts/privacy_audit.py --report build/privacy-report.json
 
-# Local ad-hoc DMG, no notarization:
-./scripts/release.sh --adhoc
+# Build from a clean committed tree, run tests, sign, notarize and staple.
+./scripts/release.sh build --profile "$NOTARY_PROFILE"
+
+# Verify the exact DMG and its mounted app on the dedicated test Mac.
+# The alias is private local configuration. This command does not launch an app.
+./scripts/release.sh verify --host "$TSUNDOKU_TEST_HOST"
+
+# Publish audited source separately, with the intended branch named explicitly.
+git push origin HEAD:refs/heads/main
+
+# Upload only the DMG, public provenance and checksums into a private draft.
+./scripts/release.sh draft --notes /path/to/reviewed-release-notes.md
+
+# Re-download and verify every asset, recheck source/privacy, then publish.
+./scripts/release.sh publish
+
+# Independently verify the public assets before updating the tap.
+./scripts/release.sh cask --tap "$TSUNDOKU_TAP_DIR"
 ```
 
-`scripts/release.sh` reads `APPLE_ID`, `APP_SPECIFIC_PASSWORD` (or
-`APPLE_PASSWORD`) and `TEAM_ID` from the workspace `.env`, prints names and
-never values, and stores the profile as `tsundoku-notary` unless `--profile`
-names another. The owner is `REPO_OWNER`/`GITHUB_OWNER` from `.env`, else
-`xiaolai`. `scripts/release-build.sh` is the raw pipeline behind it and writes
-`build/release/tsundoku.rb` from `scripts/distribution/tsundoku.rb.in`.
+All phases use `--build 1` by default; use the same explicit build number across
+phases if it differs. Build output is isolated by version, build and source
+commit under `build/release`. Internal reports, notarization IDs and verification
+receipts remain there and are never uploaded. The public manifest identifies
+the source commit/tree, pinned driver commit, version/build and DMG checksum.
+No glob selects release assets.
 
-A release is three steps:
+Each app is stapled before the DMG is assembled. The DMG is then signed,
+notarized, stapled and checked independently. Remote verification checks the
+mounted app's signature, ticket, version and embedded source provenance. A
+known notarization ID resumes waiting; an upload with an unknown outcome stops
+for reconciliation instead of submitting again. Published releases and their
+assets are never overwritten.
 
-1. `./scripts/release.sh` — build, sign, notarize, staple, write the cask.
-2. `gh release create v$(cat VERSION) build/release/Tsundoku-$(cat VERSION).dmg`
-   with a title and notes.
-3. `./scripts/publish-cask.sh` — verify the asset URL and sha256, then commit
-   and push `Casks/tsundoku.rb` to `xiaolai/homebrew-tap`; install with
-   `brew install --cask xiaolai/tap/tsundoku`.
+A draft requires the exact audited source commit on `origin/main`. Existing
+historical privacy findings block the build and publication stages until they
+are removed. Jev reviews public inputs before upload/publication. Public CI
+runs the repository audit without checking out the private driver, writing
+credentials or uploading private reports. Functional GUI/E2E checks remain
+on demand on the dedicated test Mac.
 
-The pipeline publishes nothing itself: the disk image path and its sha256 are
-printed.
+The privacy policy stores hashes of reviewed, intentionally public contributor
+contact addresses. New unreviewed addresses are flagged without printing them;
+GitHub noreply identities and synthetic example contacts are recognized. These
+checks complement the credential scanner; neither a clean report nor a history
+rewrite can remove copies that other people already downloaded.

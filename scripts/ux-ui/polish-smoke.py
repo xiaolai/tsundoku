@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UI-only appearance/tooltips checks against an isolated preview on macmini-000."""
+"""UI-only appearance/tooltips checks against an isolated preview on the dedicated test Mac."""
 import argparse
 import json
 import pathlib

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run on macmini-000 against an owned synthetic import fixture process only."""
+"""Run on the dedicated test Mac against an owned synthetic import fixture process only."""
 import argparse
 import json
 import pathlib

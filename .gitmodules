@@ -1,0 +1,3 @@
+[submodule "vendor/kindle-toolkit"]
+	path = vendor/kindle-toolkit
+	url = https://github.com/xiaolai/kindle-toolkit.git

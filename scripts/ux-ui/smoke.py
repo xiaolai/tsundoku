@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native fixture smoke test. Run only on macmini-000 against a task-owned PID."""
+"""Native fixture smoke test. Run only on the dedicated test Mac against a task-owned PID."""
 import argparse
 import json
 import pathlib
