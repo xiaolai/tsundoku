@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import ScreenCaptureKit
 import SwiftUI
 import TsundokuCore
@@ -45,10 +46,14 @@ public final class PermissionsModel: ObservableObject {
     @Published public private(set) var activeLibraryGuideID: UUID?
     @Published public private(set) var libraryStatus: LibraryAccessStatus = .notChecked
     @Published public private(set) var libraryChecking = false
+    @Published public private(set) var libraryRegistrationInProgress = false
     @Published public private(set) var libraryFailures: [LibraryImportFailure] = []
     @Published public private(set) var librarySettingsError: String?
     private let libraryAccessCheck: @MainActor () async -> LibraryAccessResult
     private let librarySettingsOpener: () -> Bool
+    private let libraryRegistrationRequest: @MainActor () async -> Void
+    private var libraryRegistrationTask: Task<Void, Never>?
+    private var libraryRegistrationID: UUID?
     private let setupDefaults: UserDefaults
     private let librarySetupKey = "permissions.librarySetupPending"
     private let librarySetupDateKey = "permissions.librarySetupRequestedAt"
@@ -103,8 +108,15 @@ public final class PermissionsModel: ObservableObject {
             let books = launchPath("--books-data-path").map { BooksPaths(container: $0) } ?? .standard()
             return await Task.detached { LibraryAccessProbe.check(kindle: kindle, books: books) }.value
         },
+        libraryRegistrationRequest: @escaping @MainActor () async -> Void = {
+            let result = await Task.detached { FullDiskAccessRegistration.request() }.value
+            TsundokuDiagnostics.shared.event("library_registration_attempted", [
+                "attempted": result.attempted, "opened": result.opened,
+                "permission_denials": result.errors.filter { $0 == EPERM || $0 == EACCES }.count,
+            ])
+        },
         librarySettingsOpener: @escaping () -> Bool = {
-            guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return false }
+            guard let url = URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles") else { return false }
             return NSWorkspace.shared.open(url)
         },
         setupDefaults: UserDefaults = .standard,
@@ -115,6 +127,7 @@ public final class PermissionsModel: ObservableObject {
         self.screenAccessCheck = screenAccessCheck
         self.libraryAccessCheck = libraryAccessCheck
         self.librarySettingsOpener = librarySettingsOpener
+        self.libraryRegistrationRequest = libraryRegistrationRequest
         self.setupDefaults = setupDefaults
         self.now = now
         if setupDefaults.bool(forKey: librarySetupKey), setupDefaults.object(forKey: librarySetupDateKey) == nil {
@@ -182,19 +195,36 @@ public final class PermissionsModel: ObservableObject {
         snapshot = next
     }
 
-    /// Full Disk Access is approved in System Settings. This action opens that pane directly.
+    /// First give TCC an access attempt attributed to this app, then open Settings.
+    /// macOS controls listing; the person must still approve the access switch.
     public func requestLibraryAccess() {
+        guard !libraryRegistrationInProgress, !applicationIsTerminating else { return }
         if !librarySetupPending {
             setupGeneration += 1
             importedSetupSources.removeAll()
         }
         setupDefaults.set(true, forKey: librarySetupKey)
         setupDefaults.set(now(), forKey: librarySetupDateKey)
-        openLibrarySettings()
+        librarySettingsError = nil
+        let id = UUID()
+        libraryRegistrationID = id
+        libraryRegistrationInProgress = true
+        libraryRegistrationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.libraryRegistrationRequest()
+            guard self.libraryRegistrationID == id else { return }
+            self.libraryRegistrationTask = nil
+            self.libraryRegistrationID = nil
+            self.libraryRegistrationInProgress = false
+            guard !Task.isCancelled, !self.applicationIsTerminating, self.librarySetupPending else { return }
+            self.openLibrarySettings()
+        }
     }
 
     public func openLibrarySettings() {
-        librarySettingsError = librarySettingsOpener() ? nil
+        let opened = librarySettingsOpener()
+        TsundokuDiagnostics.shared.event("library_access_settings_opened", ["success": opened])
+        librarySettingsError = opened ? nil
             : "Open System Settings → Privacy & Security → Full Disk Access."
     }
 
@@ -202,6 +232,10 @@ public final class PermissionsModel: ObservableObject {
 
     public func cancelLibrarySetup() {
         guard !applicationIsTerminating else { return }
+        libraryRegistrationID = nil
+        libraryRegistrationTask?.cancel()
+        libraryRegistrationTask = nil
+        libraryRegistrationInProgress = false
         setupGeneration += 1
         importedSetupSources.removeAll()
         setupDefaults.removeObject(forKey: librarySetupKey)
@@ -209,12 +243,12 @@ public final class PermissionsModel: ObservableObject {
     }
 
     public func resumeLibrarySetupIfNeeded() {
-        guard librarySetupPending else { return }
+        guard librarySetupPending, !libraryRegistrationInProgress else { return }
         Task { await verifyLibraryAccess() }
     }
 
     public func verifyLibraryAccess() async {
-        guard !libraryChecking, !applicationIsTerminating else { return }
+        guard !libraryChecking, !libraryRegistrationInProgress, !applicationIsTerminating else { return }
         libraryChecking = true
         let pendingAtStart = librarySetupPending
         let generation = setupGeneration
@@ -224,7 +258,7 @@ public final class PermissionsModel: ObservableObject {
         readableLibrarySources = result.readableSources
         libraryFailures = result.failures
         libraryChecking = false
-        guard generation == setupGeneration, pendingAtStart, librarySetupPending else { return }
+        guard generation == setupGeneration, pendingAtStart, librarySetupPending, !libraryRegistrationInProgress else { return }
         let newSources = Set(result.readableSources).subtracting(importedSetupSources)
         importedSetupSources.formUnion(newSources)
         if result.status == .available || result.status == .notFound {

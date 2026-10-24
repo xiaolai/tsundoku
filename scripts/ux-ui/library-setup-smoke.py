@@ -64,12 +64,17 @@ pid = launch("initial", onboarding=True)
 snapshot(pid, "setup-before-check", "Set Up Tsundoku", "Library Access", "Grant Full Disk Access…", "Not checked")
 capture(pid, "setup-before-check")
 command(pid, "press", "Grant Full Disk Access…")
-snapshot(pid, "grant-guide", "Grant Library Access", "Drag into", "imported automatically")
+snapshot(pid, "grant-guide", "Grant Library Access", "App Not Listed?", "imported automatically")
 settings = int(subprocess.check_output(["pgrep", "-x", "System Settings"], text=True).strip().splitlines()[0])
 settings_text = command(settings)
 assert "Full Disk Access" in settings_text, "Request must navigate to the actual FDA pane"
 # Do not retain other apps/account data from System Settings.
 (evidence / "pane-navigation.txt").write_text("Observed Full Disk Access pane navigation after Grant without a prior Check. The harness performs no grant/revocation action; real TCC grant acceptance is not covered.\n")
+rows = [json.loads(s) for s in (a.root / "initial.jsonl").read_text().splitlines()]
+events = [r.get("event") for r in rows]
+assert "library_registration_attempted" in events
+assert events.index("library_registration_attempted") < events.index("library_access_settings_opened")
+checks.append("registration-attempt-precedes-settings")
 checks.append("direct-full-disk-pane")
 capture(pid, "grant-guide") # Activation verifies the deliberately blocked fixture.
 snapshot(pid, "blocked-guide", "Access blocked", "Grant Library Access")
@@ -115,7 +120,7 @@ else:
 with sqlite3.connect(archive) as db:
     assert db.execute("select count(*) from annotations").fetchone()[0] == 1
 checks.append("automatic-import-after-resume")
-if "Drag into" in text:
+if "App Not Listed?" in text:
     command(pid, "press", "Done")
 command(pid, "press", "Continue Anyway")
 snapshot(pid, "library-opened-after-setup", "First Import Fixture", "1 books")

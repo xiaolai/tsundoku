@@ -18,7 +18,7 @@ struct LibraryAccessRequestButton: View {
             showGuide = true
             permissions.requestLibraryAccess()
         }
-        .disabled(permissions.libraryChecking)
+        .disabled(permissions.libraryChecking || permissions.libraryRegistrationInProgress)
         .background {
             LibraryAccessGuidePresenter(permissions: permissions, isPresented: $showGuide)
                 .frame(width: 0, height: 0)
@@ -66,7 +66,7 @@ struct LibraryAccessRow: View {
                     .font(.caption).foregroundStyle(.secondary)
                 IconButton("Re-check Library Access", systemImage: "arrow.clockwise") {
                     Task { await permissions.verifyLibraryAccess() }
-                }.disabled(permissions.libraryChecking)
+                }.disabled(permissions.libraryChecking || permissions.libraryRegistrationInProgress)
             }
             HStack {
                 Text("Read Kindle and Apple Books libraries.")
@@ -103,29 +103,31 @@ struct LibraryAccessGuideView: View {
                             NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications", isDirectory: true))
                         }
                     } else {
-                        Text("In Full Disk Access, add this app and turn it on.")
+                        Text("In Full Disk Access, turn on Tsundoku.")
                     }
-                    HStack(spacing: 12) {
-                        Image(nsImage: NSWorkspace.shared.icon(forFile: appURL.path))
-                            .resizable().frame(width: 40, height: 40)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Tsundoku").font(.headline)
-                            Text("Drag into the Full Disk Access list, or use its + button.")
-                                .font(.caption).foregroundStyle(.secondary)
+                    DisclosureGroup("App Not Listed?") {
+                        HStack(spacing: 12) {
+                            Image(nsImage: NSWorkspace.shared.icon(forFile: appURL.path))
+                                .resizable().frame(width: 40, height: 40)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Tsundoku").font(.headline)
+                                Text("Drag into the Full Disk Access list, or use its + button.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                         }
+                        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+                        .onDrag { needsInstallation ? NSItemProvider() : NSItemProvider(object: appURL as NSURL) }
+                        .opacity(needsInstallation ? 0.5 : 1)
+                        .accessibilityLabel("Tsundoku app. Drag into Full Disk Access.")
+                        Text("If an older Tsundoku entry stays blocked, remove it and add this copy.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
-                    .onDrag { needsInstallation ? NSItemProvider() : NSItemProvider(object: appURL as NSURL) }
-                    .opacity(needsInstallation ? 0.5 : 1)
-                    .accessibilityLabel("Tsundoku app. Drag into Full Disk Access.")
-                    Text("If an older Tsundoku entry is listed but access stays blocked, remove it and add this copy.")
-                        .font(.caption).foregroundStyle(.secondary)
                     Text("Return here after enabling access. Your library will be checked and imported automatically. If access stays blocked, quit and reopen Tsundoku below; setup will resume.")
                         .fixedSize(horizontal: false, vertical: true)
                     HStack {
                         Button("Open Full Disk Access…", action: permissions.requestLibraryAccess)
-                            .disabled(needsInstallation)
+                            .disabled(needsInstallation || permissions.libraryRegistrationInProgress || permissions.libraryChecking)
                         IconButton("Show Tsundoku in Finder", systemImage: "folder") {
                             NSWorkspace.shared.activateFileViewerSelecting([appURL])
                         }
@@ -138,7 +140,9 @@ struct LibraryAccessGuideView: View {
                         Text(error).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
-                    if permissions.libraryChecking {
+                    if permissions.libraryRegistrationInProgress {
+                        ProgressView("Preparing Full Disk Access…")
+                    } else if permissions.libraryChecking {
                         ProgressView("Verifying library access…")
                     } else {
                         Label(permissions.libraryStatus.title,
@@ -166,7 +170,7 @@ struct LibraryAccessGuideView: View {
             HStack {
                 Button("Re-check Library Access") {
                     Task { await permissions.verifyLibraryAccess() }
-                }.disabled(permissions.libraryChecking)
+                }.disabled(permissions.libraryChecking || permissions.libraryRegistrationInProgress)
                 Spacer()
                 if permissions.libraryStatus == .available {
                     Button("Done", action: onClose).keyboardShortcut(.defaultAction)

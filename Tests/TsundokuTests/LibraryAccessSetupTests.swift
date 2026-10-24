@@ -9,6 +9,91 @@ struct LibraryAccessSetupTests {
         UserDefaults(suiteName: "tsundoku-library-setup-\(UUID().uuidString)")!
     }
 
+    private func waitForRegistration(_ model: PermissionsModel) async {
+        for _ in 0..<100 where model.libraryRegistrationInProgress { await Task.yield() }
+        #expect(!model.libraryRegistrationInProgress)
+    }
+
+    @Test func registrationPrecedesSettingsAndDoesNotGrantOrImport() async throws {
+        var events: [String] = []
+        var continuation: CheckedContinuation<Void, Never>?
+        var imports = 0
+        let model = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
+            libraryRegistrationRequest: {
+                events.append("registration")
+                await withCheckedContinuation { continuation = $0 }
+            }, librarySettingsOpener: { events.append("settings"); return true }, setupDefaults: defaults())
+        model.onLibraryAccessReady = { imports += 1 }
+        model.requestLibraryAccess()
+        model.requestLibraryAccess()
+        for _ in 0..<100 where continuation == nil { await Task.yield() }
+        #expect(events == ["registration"])
+        #expect(model.libraryRegistrationInProgress)
+        let pending = try #require(continuation)
+        pending.resume()
+        for _ in 0..<100 where model.libraryRegistrationInProgress { await Task.yield() }
+        #expect(events == ["registration", "settings"])
+        #expect(model.libraryStatus == .notChecked)
+        #expect(model.librarySetupPending)
+        #expect(imports == 0)
+    }
+
+    @Test func cancellingRegistrationDoesNotOpenSettingsAfterward() async throws {
+        var opened = 0
+        var continuation: CheckedContinuation<Void, Never>?
+        let model = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
+            libraryRegistrationRequest: { await withCheckedContinuation { continuation = $0 } },
+            librarySettingsOpener: { opened += 1; return true }, setupDefaults: defaults())
+        model.requestLibraryAccess()
+        for _ in 0..<100 where continuation == nil { await Task.yield() }
+        let pending = try #require(continuation)
+        model.cancelLibrarySetup()
+        pending.resume()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(opened == 0)
+        #expect(!model.librarySetupPending)
+        #expect(!model.libraryRegistrationInProgress)
+    }
+
+    @Test func oldRegistrationCannotFinishNewRequest() async throws {
+        var continuations: [CheckedContinuation<Void, Never>] = []
+        var opened = 0
+        let model = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
+            libraryRegistrationRequest: { await withCheckedContinuation { continuations.append($0) } },
+            librarySettingsOpener: { opened += 1; return true }, setupDefaults: defaults())
+        model.requestLibraryAccess()
+        for _ in 0..<100 where continuations.count < 1 { await Task.yield() }
+        #expect(continuations.count == 1)
+        model.cancelLibrarySetup()
+        model.requestLibraryAccess()
+        for _ in 0..<100 where continuations.count < 2 { await Task.yield() }
+        #expect(continuations.count == 2)
+        guard continuations.count == 2 else { continuations.forEach { $0.resume() }; return }
+        continuations[0].resume()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(opened == 0)
+        #expect(model.libraryRegistrationInProgress)
+        continuations[1].resume()
+        await waitForRegistration(model)
+        #expect(opened == 1)
+    }
+
+    @Test func terminatingDuringRegistrationPreservesIntentWithoutOpeningSettings() async throws {
+        var continuation: CheckedContinuation<Void, Never>?
+        var opened = 0
+        let model = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
+            libraryRegistrationRequest: { await withCheckedContinuation { continuation = $0 } },
+            librarySettingsOpener: { opened += 1; return true }, setupDefaults: defaults())
+        model.requestLibraryAccess()
+        for _ in 0..<100 where continuation == nil { await Task.yield() }
+        let pending = try #require(continuation)
+        model.prepareForTermination()
+        pending.resume()
+        await waitForRegistration(model)
+        #expect(opened == 0)
+        #expect(model.librarySetupPending)
+    }
+
     @Test func grantOpensSettingsWithoutRequiringCheckFirst() async {
         let store = defaults()
         var opened = 0
@@ -16,9 +101,10 @@ struct LibraryAccessSetupTests {
         var imports = 0
         let model = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
             libraryAccessCheck: { probes += 1; return LibraryAccessResult(readableSources: [.appleBooks], failures: []) },
-            librarySettingsOpener: { opened += 1; return true }, setupDefaults: store)
+            libraryRegistrationRequest: {}, librarySettingsOpener: { opened += 1; return true }, setupDefaults: store)
         model.onLibraryAccessReady = { imports += 1 }
         model.requestLibraryAccess()
+        await waitForRegistration(model)
         #expect(opened == 1)
         #expect(probes == 0)
         #expect(model.librarySetupPending)
@@ -34,7 +120,7 @@ struct LibraryAccessSetupTests {
         var imports = 0
         let model = PermissionsModel(accessibilityCheck: { true }, screenRecordingCheck: { true },
             libraryAccessCheck: { LibraryAccessResult(readableSources: [.kindle], failures: []) },
-            librarySettingsOpener: { true }, setupDefaults: defaults())
+            libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: defaults())
         model.onLibraryAccessReady = { imports += 1 }
         await model.verifyLibraryAccess()
         await model.verifyLibraryAccess()
@@ -49,9 +135,10 @@ struct LibraryAccessSetupTests {
         let denied = LibraryImportFailure(source: .kindle, error: SQLiteError(code: 23, message: "denied"))
         let model = PermissionsModel(accessibilityCheck: { true }, screenRecordingCheck: { true },
             libraryAccessCheck: { LibraryAccessResult(readableSources: [.appleBooks], failures: [denied]) },
-            librarySettingsOpener: { true }, setupDefaults: defaults())
+            libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: defaults())
         model.onLibraryAccessReady = { imports += 1 }
         model.requestLibraryAccess()
+        await waitForRegistration(model)
         await model.verifyLibraryAccess()
         await model.verifyLibraryAccess()
         #expect(model.libraryStatus == .blocked)
@@ -71,11 +158,12 @@ struct LibraryAccessSetupTests {
         #expect(!model.librarySetupPending)
     }
 
-    @Test func onlyTheCurrentGuideCanCancelSetup() {
+    @Test func onlyTheCurrentGuideCanCancelSetup() async {
         let model = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
-            librarySettingsOpener: { true }, setupDefaults: defaults())
+            libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: defaults())
         let first = UUID(), second = UUID()
         model.requestLibraryAccess()
+        await waitForRegistration(model)
         model.claimLibraryGuide(first)
         model.claimLibraryGuide(second)
         model.dismissLibraryGuide(first)
@@ -106,14 +194,16 @@ struct LibraryAccessSetupTests {
         var imports = 0
         let model = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
             libraryAccessCheck: { await withCheckedContinuation { continuation = $0 } },
-            librarySettingsOpener: { true }, setupDefaults: defaults())
+            libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: defaults())
         model.onLibraryAccessReady = { imports += 1 }
         model.requestLibraryAccess()
+        await waitForRegistration(model)
         let task = Task { await model.verifyLibraryAccess() }
         for _ in 0..<100 where continuation == nil { await Task.yield() }
         let pending = try #require(continuation)
         model.cancelLibrarySetup()
         model.requestLibraryAccess()
+        await waitForRegistration(model)
         pending.resume(returning: LibraryAccessResult(readableSources: [.kindle], failures: []))
         await task.value
         #expect(imports == 0)
@@ -125,9 +215,10 @@ struct LibraryAccessSetupTests {
         let denied = LibraryImportFailure(source: .kindle, error: SQLiteError(code: 23, message: "authorization denied"))
         let model = PermissionsModel(accessibilityCheck: { true }, screenRecordingCheck: { true },
             libraryAccessCheck: { LibraryAccessResult(readableSources: [], failures: [denied]) },
-            librarySettingsOpener: { true }, setupDefaults: defaults())
+            libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: defaults())
         model.onLibraryAccessReady = { imports += 1 }
         model.requestLibraryAccess()
+        await waitForRegistration(model)
         await model.verifyLibraryAccess()
         #expect(model.libraryStatus == .blocked)
         #expect(model.setupIncomplete)
@@ -139,11 +230,12 @@ struct LibraryAccessSetupTests {
     @Test func pendingSetupSurvivesRelaunchAndCanBeDeferred() async {
         let store = defaults()
         let first = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
-            librarySettingsOpener: { true }, setupDefaults: store)
+            libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: store)
         first.requestLibraryAccess()
+        await waitForRegistration(first)
         let resumed = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
             libraryAccessCheck: { LibraryAccessResult(readableSources: [.kindle], failures: []) },
-            librarySettingsOpener: { true }, setupDefaults: store)
+            libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: store)
         #expect(resumed.librarySetupPending)
         resumed.cancelLibrarySetup()
         #expect(!first.librarySetupPending)
@@ -152,8 +244,9 @@ struct LibraryAccessSetupTests {
     @Test func noLibraryAndSettingsFailureAreExplained() async {
         let model = PermissionsModel(accessibilityCheck: { true }, screenRecordingCheck: { true },
             libraryAccessCheck: { LibraryAccessResult(readableSources: [], failures: []) },
-            librarySettingsOpener: { false }, setupDefaults: defaults())
+            libraryRegistrationRequest: {}, librarySettingsOpener: { false }, setupDefaults: defaults())
         model.requestLibraryAccess()
+        await waitForRegistration(model)
         #expect(model.librarySettingsError?.contains("Privacy & Security") == true)
         await model.verifyLibraryAccess()
         #expect(model.libraryStatus == .notFound)
@@ -163,15 +256,16 @@ struct LibraryAccessSetupTests {
     @Test func quitAndReopenResumesVerificationAndImport() async {
         let store = defaults()
         let first = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
-            librarySettingsOpener: { true }, setupDefaults: store)
+            libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: store)
         first.requestLibraryAccess()
+        await waitForRegistration(first)
         first.prepareForTermination()
         first.cancelLibrarySetup() // Sheet teardown during quit must preserve the pending intent.
         #expect(first.librarySetupPending)
         var imports = 0
         let resumed = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
             libraryAccessCheck: { LibraryAccessResult(readableSources: [.kindle], failures: []) },
-            librarySettingsOpener: { true }, setupDefaults: store)
+            libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: store)
         resumed.onLibraryAccessReady = { imports += 1 }
         resumed.resumeLibrarySetupIfNeeded()
         for _ in 0..<100 where imports == 0 { await Task.yield() }
@@ -184,9 +278,10 @@ struct LibraryAccessSetupTests {
         var imports = 0
         let model = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
             libraryAccessCheck: { await withCheckedContinuation { continuation = $0 } },
-            librarySettingsOpener: { true }, setupDefaults: defaults())
+            libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: defaults())
         model.onLibraryAccessReady = { imports += 1 }
         model.requestLibraryAccess()
+        await waitForRegistration(model)
         let task = Task { await model.verifyLibraryAccess() }
         for _ in 0..<100 where continuation == nil { await Task.yield() }
         let pending = try #require(continuation)
