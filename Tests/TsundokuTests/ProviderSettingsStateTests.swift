@@ -58,4 +58,32 @@ struct ProviderSettingsStateTests {
         #expect(state.testStatus == "Connected · Fixture")
     }
 
+    @Test func failedTestShowsTheProviderReasonWithoutTheKey() async {
+        let state = ProviderSettingsState(loadKey: { "fixture-key-value-123" }, saveKey: { _ in 0 },
+            connectionTest: { _ in
+                throw AIProviderError.http(
+                    400, #"{"error":"Model Not Exist","echo":"fixture-key-value-123"}"#)
+            })
+        state.loadKeyIfNeeded()
+        state.test(settings: AISettings(provider: .http))
+        for _ in 0..<100 where state.testing { await Task.yield() }
+        #expect(state.testStatus.contains("400"))
+        #expect(state.testStatus.contains("Model Not Exist"))
+        #expect(state.testStatus.contains("<key>"))
+        #expect(!state.testStatus.contains("fixture-key-value-123"))
+    }
+
+    @Test func failureDetailIsBoundedAndRedactsOnlyPlausibleKeys() {
+        let long = String(repeating: "x", count: 400)
+        #expect(ProviderSettingsState.detail(for: AIProviderError.failed(long), secrets: []).count == 300)
+        #expect(ProviderSettingsState.detail(
+            for: AIProviderError.http(401, "bad fixture-secret-abcdef"),
+            secrets: ["fixture-secret-abcdef"]).contains("<key>"))
+        #expect(ProviderSettingsState.detail(
+            for: AIProviderError.http(401, "bad abc"), secrets: ["abc"])
+            == "The endpoint answered 401: bad abc")
+        #expect(ProviderSettingsState.detail(for: AIProviderError.invalidEndpoint, secrets: [])
+            == "The endpoint is not a valid HTTPS or loopback HTTP URL.")
+    }
+
 }

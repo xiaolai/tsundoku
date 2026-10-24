@@ -42,7 +42,9 @@ public struct SettingsView: View {
 
                     TextField(
                         "Model", text: $model.settings.model,
-                        prompt: Text("Provider default")
+                        prompt: Text(
+                            model.settings.provider == .http
+                                ? "gpt-4o-mini" : "Provider default")
                     )
                     .disabled(providerState.testing)
                     if model.settings.provider == .http {
@@ -51,15 +53,18 @@ public struct SettingsView: View {
                         SecureField("API Key", text: $providerState.draftKey)
                             .accessibilityIdentifier("provider-api-key")
                             .disabled(providerState.testing)
+                            .help("Stored in the Keychain. Environment variables and .env files are not read.")
                             .onSubmit { providerState.saveKey() }
                         HStack {
-                            Text(providerState.keyStatus.isEmpty && providerState.hasUnsavedKey ? "Unsaved key" : providerState.keyStatus)
-                                .font(.caption).foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(providerState.keyStatus.isEmpty && providerState.hasUnsavedKey ? "Unsaved key" : providerState.keyStatus)
+                                Text("Stored in the Keychain; environment variables are not read.")
+                            }
+                            .font(.caption).foregroundStyle(.secondary)
                             Spacer()
                             Button("Save Key", action: providerState.saveKey)
                                 .disabled(!providerState.hasUnsavedKey || providerState.testing)
                         }
-
                     }
                     TextField(
                         "Answer Language", text: $model.settings.language

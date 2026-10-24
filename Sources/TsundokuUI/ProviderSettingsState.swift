@@ -61,11 +61,25 @@ import TsundokuCore
                 self.testStatus = result
             } catch {
                 guard !Task.isCancelled, self.generation == current else { return }
-                // Providers can return URLs/error details, but never echo the key.
-                self.testStatus = "Connection failed. Check the provider settings and try again."
+                self.testStatus = "Connection failed. "
+                    + Self.detail(for: error, secrets: [self.savedKey, self.draftKey])
             }
             guard self.generation == current else { return }
             self.testing = false; self.testTask = nil
         }
+    }
+
+    /// Why a connection test failed. A bare "check the settings" leaves a
+    /// missing key (401), an unknown model (400) and an unreachable host
+    /// indistinguishable, so the provider's own message is shown, bounded, with
+    /// the stored key removed in case the endpoint echoed it.
+    nonisolated static func detail(for error: any Error, secrets: [String]) -> String {
+        let reason = (error as? AIProviderError)?.description
+            ?? error.localizedDescription
+        var text = reason.isEmpty ? "Unknown error." : reason
+        for secret in secrets where secret.count >= 8 {
+            text = text.replacingOccurrences(of: secret, with: "<key>")
+        }
+        return String(text.prefix(300))
     }
 }
