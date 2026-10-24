@@ -73,6 +73,11 @@ assert "Full Disk Access" in settings_text, "Request must navigate to the actual
 rows = [json.loads(s) for s in (a.root / "initial.jsonl").read_text().splitlines()]
 events = [r.get("event") for r in rows]
 assert "library_registration_attempted" in events
+attempt = next(r for r in rows if r.get("event") == "library_registration_attempted")
+# Counts establish the real read implementation was called, not open/close only.
+fields = attempt.get("fields", attempt)
+assert "directory_reads" in fields and "header_bytes_read" in fields, attempt
+assert 0 <= fields["header_bytes_read"] <= 2, attempt
 assert events.index("library_registration_attempted") < events.index("library_access_settings_opened")
 checks.append("registration-attempt-precedes-settings")
 checks.append("direct-full-disk-pane")

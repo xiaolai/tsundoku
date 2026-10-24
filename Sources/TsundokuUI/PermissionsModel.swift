@@ -1,5 +1,4 @@
 import AppKit
-import Darwin
 import ScreenCaptureKit
 import SwiftUI
 import TsundokuCore
@@ -111,8 +110,9 @@ public final class PermissionsModel: ObservableObject {
         libraryRegistrationRequest: @escaping @MainActor () async -> Void = {
             let result = await Task.detached { FullDiskAccessRegistration.request() }.value
             TsundokuDiagnostics.shared.event("library_registration_attempted", [
-                "attempted": result.attempted, "opened": result.opened,
-                "permission_denials": result.errors.filter { $0 == EPERM || $0 == EACCES }.count,
+                "attempted": result.attempted, "directory_reads": result.directoriesRead,
+                "header_bytes_read": result.headerBytesRead, "permission_denials": result.permissionDenials,
+                "missing_targets": result.missingTargets, "other_failures": result.otherFailures,
             ])
         },
         librarySettingsOpener: @escaping () -> Bool = {
