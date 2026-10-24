@@ -24,8 +24,17 @@ public struct RootView: View {
             }
             .frame(minWidth: 760, minHeight: 540)
         }
+        .background {
+            if let permissions = model.permissions {
+                LibraryAccessGuidePresenter(permissions: permissions, isPresented: $model.showLibraryAccessGuide)
+                    .frame(width: 0, height: 0)
+            }
+        }
         .sheet(isPresented: $model.showPermissions) {
             PermissionsView(model: model)
+        }
+        .sheet(isPresented: $model.showImportReport) {
+            LibraryImportReportView(model: model)
         }
         .sheet(isPresented: $model.showSavedAINotes) {
             SavedAINotesView(model: model, bookID: nil)
@@ -48,14 +57,16 @@ public struct RootView: View {
                 .font(.callout).textSelection(.enabled).padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.regularMaterial)
-            } else if let failure = model.importError {
+            } else if let failure = model.importError,
+                !(model.books.isEmpty && model.annotations.isEmpty
+                    && (model.section == .library || model.section == .highlights)) {
                 HStack(alignment: .top) {
                     Label(
-                        "Import incomplete. Showing archived records.",
+                        model.importFailures.first?.summary ?? "Library import failed.",
                         systemImage: "exclamationmark.triangle")
                     Spacer()
                     IconButton("Details…", systemImage: "info.circle") {
-                        model.openSettingsWindow?()
+                        model.showImportReport = true
                     }
                     IconButton("Retry", systemImage: "arrow.clockwise") {
                         model.importLibrary()
@@ -177,7 +188,7 @@ struct PermissionsView: View {
             Form {
                 Section("Live page access") {
                     Text(
-                        "Library browsing needs no permissions. Live reader actions use the access below."
+                        "These permissions enable live reader actions. macOS may separately ask for access to Kindle and Apple Books library data."
                     )
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -187,7 +198,7 @@ struct PermissionsView: View {
                     LabeledContent("Status") {
                         Text(
                             model.permissionAccessibility
-                                ? "Granted" : "Needed")
+                                ? "Available" : "Unavailable")
                     }
                     Text(
                         "Read the current page, turn pages, and detect the "
@@ -210,7 +221,7 @@ struct PermissionsView: View {
                 Section("Screen Recording") {
                     LabeledContent("Status") {
                         Text(
-                            model.permissionScreen ? "Granted" : "Needed")
+                            model.permissionScreenStatus)
                     }
                     Text("Capture the page rectangle for PDF export.")
                         .font(.caption)
@@ -231,6 +242,9 @@ struct PermissionsView: View {
             Divider()
 
             HStack {
+                IconButton("Re-check", systemImage: "arrow.clockwise", tooltip: "Verify reader access. macOS may ask for authorization.") {
+                    Task { await model.verifyPermissions() }
+                }.disabled(model.permissionChecking)
                 Spacer()
                 IconButton(
                     "Done", systemImage: "xmark", tooltip: "Close permissions"

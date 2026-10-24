@@ -94,32 +94,16 @@ public struct LibraryView: View {
     private var bookList: some View {
         Group {
             if rows.isEmpty {
-                ContentUnavailableView {
-                    Label(
-                        model.books.isEmpty
-                            ? "No Books Imported" : "No Matches",
-                        systemImage: "book.closed")
-                } description: {
-                    Text(
-                        model.books.isEmpty
-                            ? "Import your Kindle or Apple Books library to begin."
-                            : "No books match the current source, reading state and search."
-                    )
-                } actions: {
-                    if model.books.isEmpty {
-                        Button("Import Library") { model.importLibrary() }
-                            .disabled(model.isImporting || model.archive == nil)
-                    } else {
-                        IconButton(
-                            "Reset Filters",
-                            systemImage: "line.3.horizontal.decrease.circle"
-                        ) {
-                            model.search = ""
-                            model.sourceFilter = .all
-                            scope = .all
-                        }
-                    }
+                LibraryEmptyState(
+                    model: model, annotations: false,
+                    hasImportedRecords: !model.books.isEmpty
+                ) {
+                    model.search = ""
+                    model.sourceFilter = .all
+                    scope = .all
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
             } else {
                 Table(
                     rows, selection: $model.selectedBookID,

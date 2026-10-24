@@ -24,18 +24,34 @@ func visit(_ element: AXUIElement, depth: Int = 0, action: (AXUIElement, Int) ->
     for child in children(element) { visit(child, depth: depth + 1, action: action) }
 }
 if args.count > 2 {
-    NSRunningApplication(processIdentifier: pid)?.activate(options: [])
-    if let window = (attr(app, kAXWindowsAttribute) as? [AXUIElement])?.first(where: {
+    let command = args[2]
+    if command != "windows" { NSRunningApplication(processIdentifier: pid)?.activate(options: []) }
+    if command != "windows", let window = (attr(app, kAXWindowsAttribute) as? [AXUIElement])?.first(where: {
            !string($0, kAXTitleAttribute).hasSuffix("Inspector")
        }) {
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
     }
     Thread.sleep(forTimeInterval: 0.2)
-    let command = args[2]
-    if command == "windowIDs" {
+    if command == "windows" {
+        for window in (attr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? [] {
+            var point = CGPoint.zero
+            var size = CGSize.zero
+            if let p = attr(window, kAXPositionAttribute), let z = attr(window, kAXSizeAttribute) {
+                AXValueGetValue(unsafeBitCast(p, to: AXValue.self), .cgPoint, &point)
+                AXValueGetValue(unsafeBitCast(z, to: AXValue.self), .cgSize, &size)
+                print("WINDOW", string(window, kAXTitleAttribute), "FRAME", point.x, point.y, size.width, size.height)
+            }
+        }
+    } else if command == "closeWindow", args.count > 3 {
+        if let window = (attr(app, kAXWindowsAttribute) as? [AXUIElement])?.first(where: { string($0, kAXTitleAttribute) == args[3] }),
+            let button = attr(window, kAXCloseButtonAttribute) {
+            print("CLOSE", AXUIElementPerformAction(unsafeBitCast(button, to: AXUIElement.self), kAXPressAction as CFString).rawValue)
+        }
+    } else if command == "windowIDs" || command == "allWindowIDs" {
         for window in CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? [] {
             if window[kCGWindowOwnerPID as String] as? Int32 == pid,
-               window[kCGWindowLayer as String] as? Int == 0 {
+               (window[kCGWindowLayer as String] as? Int == 0
+                || (command == "allWindowIDs" && window[kCGWindowLayer as String] as? Int == 3)) {
                 print("WINDOW_ID", window[kCGWindowNumber as String] ?? "")
             }
         }
@@ -71,7 +87,23 @@ if args.count > 2 {
         }
         if let found {
             print("TARGET", string(found, kAXRoleAttribute), string(found, kAXTitleAttribute), "enabled", string(found, kAXEnabledAttribute))
-            if command == "help" {
+            if command == "frame" {
+                if let p = attr(found, kAXPositionAttribute), let z = attr(found, kAXSizeAttribute) {
+                    var point = CGPoint.zero
+                    var size = CGSize.zero
+                    AXValueGetValue(unsafeBitCast(p, to: AXValue.self), .cgPoint, &point)
+                    AXValueGetValue(unsafeBitCast(z, to: AXValue.self), .cgSize, &size)
+                    print("FRAME", point.x, point.y, size.width, size.height)
+                }
+                if let window = (attr(app, kAXWindowsAttribute) as? [AXUIElement])?.first,
+                   let p = attr(window, kAXPositionAttribute), let z = attr(window, kAXSizeAttribute) {
+                    var point = CGPoint.zero
+                    var size = CGSize.zero
+                    AXValueGetValue(unsafeBitCast(p, to: AXValue.self), .cgPoint, &point)
+                    AXValueGetValue(unsafeBitCast(z, to: AXValue.self), .cgSize, &size)
+                    print("WINDOW_FRAME", point.x, point.y, size.width, size.height)
+                }
+            } else if command == "help" {
                 print("HELP", string(found, kAXHelpAttribute))
             } else if command == "select" {
                 print("select", AXUIElementSetAttributeValue(found, kAXSelectedAttribute as CFString, kCFBooleanTrue).rawValue)

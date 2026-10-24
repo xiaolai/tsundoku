@@ -66,16 +66,19 @@ public struct HighlightsView: View {
         let ids = snapshot.map(\.id)
         let current = snapshot.first { selection.contains($0.id) }
         VStack(spacing: 0) {
-            scopeBar(count: snapshot.count)
+            if !model.annotations.isEmpty {
+                scopeBar(count: snapshot.count)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if snapshot.isEmpty {
-                emptyState
+                emptyState.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if presentation == "list" {
                 annotationTable(snapshot)
             } else {
                 cardGrid(snapshot)
             }
         }
-        .frame(minWidth: 320, minHeight: 0)
+        .frame(minWidth: 320, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
         .background {
             InspectorPanel(
                 isPresented: $showInspector, title: "Annotation Inspector"
@@ -390,25 +393,10 @@ public struct HighlightsView: View {
     }
 
     private var emptyState: some View {
-        ContentUnavailableView {
-            Label(
-                model.annotations.isEmpty
-                    ? "No Annotations Imported" : "No Matching Annotations",
-                systemImage: "highlighter")
-        } description: {
-            Text(
-                model.annotations.isEmpty
-                    ? "Import the local Kindle or Apple Books library. Only records available on this Mac can be archived."
-                    : "Try a different source, kind, provenance or search. Some saved highlights contain only a location."
-            )
-        } actions: {
-            if model.annotations.isEmpty {
-                Button("Import Library") { model.importLibrary() }.disabled(
-                    model.isImporting)
-            } else {
-                Button("Reset Filters", action: resetFilters)
-            }
-        }
+        LibraryEmptyState(
+            model: model, annotations: true,
+            hasImportedRecords: !model.annotations.isEmpty,
+            resetFilters: resetFilters)
     }
 
     private func resetFilters() {

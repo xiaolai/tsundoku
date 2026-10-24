@@ -16,7 +16,7 @@ enum TsundokuMain {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSWindowDelegate {
     private let settings = CompanionSettingsStore()
     private let permissions = PermissionsModel()
     private var companion: CompanionController!
@@ -31,10 +31,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var hotKeyTestArmed = false
     private var appliedHotKey: CompanionHotKey?
     private var appliedLaunchAtLogin: Bool?
+    private var openLibraryAfterSetup = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = CommandLine.arguments
         startDiagnostics(arguments)
+        permissions.onLibraryAccessReady = { [weak self] in
+            guard let self else { return }
+            if self.onboardingWindow?.isVisible == true { self.openLibraryAfterSetup = true }
+            self.ensureAppModel().requestLibraryImport()
+        }
+        permissions.onRelaunchRequested = { [weak self] in
+            guard self?.appModel?.capturePhase != .running else {
+                throw NSError(domain: "Tsundoku", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Finish or stop the current capture first"])
+            }
+            guard self?.appModel?.isImporting != true else {
+                throw NSError(domain: "Tsundoku", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Wait for the current library import to finish"])
+            }
+            try ApplicationRelaunch.schedule(appURL: Bundle.main.bundleURL,
+                processID: ProcessInfo.processInfo.processIdentifier,
+                arguments: CommandLine.arguments.dropFirst().filter { $0 != "--show-onboarding" })
+            NSApp.terminate(nil)
+        }
         applyAppearance(arguments)
         NSApp.setActivationPolicy(.accessory)
         buildMainMenu()
@@ -83,9 +103,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             watcher.start()
         }
 
-        if arguments.contains("--show-onboarding"), permissions.missing,
-            !arguments.contains("--no-onboarding")
+        if (arguments.contains("--show-onboarding") || permissions.librarySetupPending),
+            permissions.setupIncomplete, !arguments.contains("--no-onboarding")
         {
+            if permissions.librarySetupPending { openLibraryAfterSetup = true }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                 [weak self] in
                 self?.showOnboarding()
@@ -97,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        permissions.prepareForTermination()
         companion?.writeState()
         // Stopping the watcher emits a nil snapshot, which would overwrite the
         // state this run is meant to leave behind as evidence.
@@ -128,7 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        permissions.refresh()
+        permissions.applicationBecameActive()
         refreshLoginItemStatus()
         companion?.writeState()
     }
@@ -149,7 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private func ensureAppModel() -> AppModel {
         if let appModel { return appModel }
-        let model = AppModel()
+        let model = AppModel(deferReaderRecovery: true)
         model.companionSettings = settings
         model.permissions = permissions
         model.openCompanion = { [weak self, weak model] in
@@ -350,13 +372,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             onOpenLoginItemSettings: { LoginItem.openSettings() },
             onClose: { [weak self] in self?.closeOnboarding() })
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 620),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered, defer: false)
         window.title = "Tsundoku"
         window.contentView = NSHostingView(rootView: view)
         window.center()
         window.isReleasedWhenClosed = false
+        window.delegate = self
         onboardingWindow = window
         TsundokuDiagnostics.shared.event(
             "onboarding_shown",
@@ -372,7 +395,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === onboardingWindow else { return }
+        openLibraryAfterSetup = false
+        permissions.cancelLibrarySetup()
+        onboardingWindow = nil
+    }
+
     private func closeOnboarding() {
+        let showLibrary = openLibraryAfterSetup
+        openLibraryAfterSetup = false
         onboardingWindow?.close()
         onboardingWindow = nil
         permissions.refresh()
@@ -382,6 +414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 "accessibility": permissions.accessibility,
                 "screen_recording": permissions.screenRecording,
             ])
+        if showLibrary { openLibrary() }
     }
 
     @objc private func spaceChanged() {

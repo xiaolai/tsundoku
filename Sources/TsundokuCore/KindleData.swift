@@ -56,6 +56,16 @@ public struct KindlePaths: Sendable {
     public var exists: Bool {
         FileManager.default.fileExists(atPath: bookData.path)
     }
+
+    /// Unlike fileExists, permission denial must not look like an absent library.
+    public func validateAccess() throws -> Bool {
+        do { return try bookData.checkResourceIsReachable() }
+        catch let error as NSError where error.domain == NSCocoaErrorDomain
+            && (error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError) {
+            return false
+        }
+    }
+
 }
 
 public struct KindleSnapshot: Sendable {

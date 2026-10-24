@@ -37,6 +37,19 @@ public struct BooksPaths: Sendable {
         bookLibrary != nil && annotationDatabase != nil
     }
 
+    public func validateAccess() throws -> Bool {
+        for name in ["BKLibrary", "AEAnnotation"] {
+            do {
+                _ = try FileManager.default.contentsOfDirectory(
+                    at: documents.appendingPathComponent(name), includingPropertiesForKeys: nil)
+            } catch let error as NSError where error.domain == NSCocoaErrorDomain
+                && (error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError) {
+                return false
+            }
+        }
+        return exists
+    }
+
     private func newest(in directory: URL, prefix: String) -> URL? {
         let manager = FileManager.default
         guard
@@ -73,25 +86,34 @@ public struct BooksSnapshot: Sendable {
     public let annotationDatabase: URL
 
     public static func capture(_ paths: BooksPaths) throws -> BooksSnapshot {
+        try capture(paths, temporaryDirectory: FileManager.default.temporaryDirectory)
+    }
+
+    static func capture(_ paths: BooksPaths, temporaryDirectory: URL) throws -> BooksSnapshot {
         guard let bookLibrary = paths.bookLibrary,
             let annotationDatabase = paths.annotationDatabase
         else {
             throw BooksReaderError.storeNotFound
         }
         let manager = FileManager.default
-        let directory = manager.temporaryDirectory.appendingPathComponent(
+        let directory = temporaryDirectory.appendingPathComponent(
             "tsundoku-books-\(UUID().uuidString)")
         try manager.createDirectory(
             at: directory, withIntermediateDirectories: true)
         let libraryCopy = directory.appendingPathComponent("BKLibrary.sqlite")
         let annotationCopy = directory.appendingPathComponent(
             "AEAnnotation.sqlite")
-        try SQLiteSnapshot.copy(bookLibrary, to: libraryCopy)
-        try SQLiteSnapshot.copy(annotationDatabase, to: annotationCopy)
-        return BooksSnapshot(
-            directory: directory,
-            bookLibrary: libraryCopy,
-            annotationDatabase: annotationCopy)
+        do {
+            try SQLiteSnapshot.copy(bookLibrary, to: libraryCopy)
+            try SQLiteSnapshot.copy(annotationDatabase, to: annotationCopy)
+            return BooksSnapshot(
+                directory: directory,
+                bookLibrary: libraryCopy,
+                annotationDatabase: annotationCopy)
+        } catch {
+            try? manager.removeItem(at: directory)
+            throw error
+        }
     }
 
     public func cleanup() {

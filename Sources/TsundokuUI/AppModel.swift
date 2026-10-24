@@ -129,9 +129,15 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var permissionAccessibility = AXIsProcessTrusted()
     @Published public private(set) var permissionScreen = CGPreflightScreenCaptureAccess()
     @Published public private(set) var permissionCheckResult: String?
+    @Published public private(set) var permissionScreenStatus = "Not verified"
+    @Published public private(set) var permissionChecking = false
+    @Published public private(set) var permissionCheckDetail: String?
     @Published public var livePage: LivePage?
     @Published public var liveError: String?
     @Published public var importError: String?
+    @Published public var importFailures: [LibraryImportFailure] = []
+    @Published public var showImportReport = false
+    @Published public var showLibraryAccessGuide = false
     @Published public var trackedBookID: String?
     @Published public var capturePhase: CapturePhase = .idle
     @Published public var captureProgress: Double = 0
@@ -157,6 +163,13 @@ public final class AppModel: ObservableObject {
     private var noticeTask: Task<Void, Never>?
     private var pendingBookID: String?
     private var hasImported = false
+    private var importRequestedAfterCurrentRun = false
+    private var readerRecoveryDeferred = false
+    @Published public private(set) var hasCompletedImport = false
+    @Published public private(set) var lastImportResult: String?
+    public var emptyLibraryMessage: String {
+        lastImportResult ?? "Import your local Kindle or Apple Books library."
+    }
     private var pollGeneration = 0
     private var reloadGeneration = 0
     private var permissionCancellables: Set<AnyCancellable> = []
@@ -176,11 +189,31 @@ public final class AppModel: ObservableObject {
         didSet { observePermissions() }
     }
 
-    public init() {
+    private let kindleImportPaths: KindlePaths
+    private let booksImportPaths: BooksPaths
+
+    public init(
+        archiveURL: URL? = nil, kindlePaths: KindlePaths? = nil,
+        booksPaths: BooksPaths? = nil, recoverReaderSettings: Bool = true,
+        deferReaderRecovery: Bool = false
+    ) {
+        let arguments = CommandLine.arguments
+        func launchPath(_ option: String) -> URL? {
+            guard let index = arguments.firstIndex(of: option),
+                arguments.indices.contains(index + 1) else { return nil }
+            return URL(fileURLWithPath: arguments[index + 1])
+        }
+        kindleImportPaths = kindlePaths
+            ?? launchPath("--kindle-library-path").map { KindlePaths(container: $0) }
+            ?? .standard()
+        booksImportPaths = booksPaths
+            ?? launchPath("--books-data-path").map { BooksPaths(container: $0) }
+            ?? .standard()
         do {
-            let arguments = CommandLine.arguments
             let archive: Archive
-            if let index = arguments.firstIndex(of: "--archive-path"), arguments.indices.contains(index + 1) {
+            if let archiveURL {
+                archive = try Archive(path: archiveURL)
+            } else if let index = arguments.firstIndex(of: "--archive-path"), arguments.indices.contains(index + 1) {
                 archive = try Archive(path: URL(fileURLWithPath: arguments[index + 1]))
             } else {
                 archive = try Archive.standard()
@@ -232,7 +265,8 @@ public final class AppModel: ObservableObject {
         {
             settings.language = CommandLine.arguments[index + 1]
         }
-        if !CommandLine.arguments.contains("--shell-only") { recoverSettingsIfNeeded() }
+        readerRecoveryDeferred = recoverReaderSettings && deferReaderRecovery
+        if recoverReaderSettings && !deferReaderRecovery && !arguments.contains("--shell-only") { recoverSettingsIfNeeded() }
     }
 
     /// A crash between turning Popular Highlights off and restoring it leaves
@@ -277,9 +311,13 @@ public final class AppModel: ObservableObject {
     }
 
     /// Called when the artifacts window is opened on demand. Nothing here runs
-    /// at login: the shell constructs this model lazily and calls `activate`
-    /// only for a window the user asked for.
+    /// at login. A grant/import action can also create the archive model;
+    /// reader recovery stays deferred until a library window is requested.
     public func activate(importLibrary shouldImport: Bool) {
+        if readerRecoveryDeferred {
+            readerRecoveryDeferred = false
+            if !CommandLine.arguments.contains("--shell-only") { recoverSettingsIfNeeded() }
+        }
         if shouldImport, !hasImported {
             hasImported = true
             importLibrary(announce: false)
@@ -478,11 +516,21 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// A grant may arrive while a different source is still importing. Coalesce
+    /// those requests so newly readable sources are not silently skipped.
+    public func requestLibraryImport() {
+        if isImporting { importRequestedAfterCurrentRun = true }
+        else { importLibrary() }
+    }
+
     public func importLibrary(announce: Bool = true) {
         guard !CommandLine.arguments.contains("--no-import") else { return }
         guard !isImporting, let archive else { return }
+        hasImported = true
         TsundokuDiagnostics.shared.event("library_import_started")
         isImporting = true
+        importError = nil
+        importFailures = []
         status = "Reading local stores…"
         Task {
             var totalBooks = 0
@@ -490,15 +538,15 @@ public final class AppModel: ObservableObject {
             var totalUser = 0
             var lastImportDate: Date?
             var importedSources: [String] = []
-            var failures: [String] = []
+            var failures: [LibraryImportFailure] = []
 
             do {
-                let paths = KindlePaths.standard()
-                if paths.exists {
-                    self.sourceHealth[.kindle] = "Importing…"
-                    let data = try await Task.detached {
-                        try KindleReader.readAll(paths)
-                    }.value
+                let paths = kindleImportPaths
+                self.sourceHealth[.kindle] = "Importing…"
+                if let data = try await Task.detached(operation: { () throws -> (books: [Book], annotations: [Annotation])? in
+                    guard try paths.validateAccess() else { return nil }
+                    return try KindleReader.readAll(paths)
+                }).value {
                     let imported = try await Task.detached {
                         try archive.importAll(
                             books: data.books, annotations: data.annotations)
@@ -509,23 +557,23 @@ public final class AppModel: ObservableObject {
                     lastImportDate = imported.importedAt
                     importedSources.append("Kindle")
                     self.sourceLastImport[.kindle] = imported.importedAt
-                    try archive.setMeta("last_import_source_Kindle", ISO8601DateFormatter().string(from: imported.importedAt))
+                    try? archive.setMeta("last_import_source_Kindle", ISO8601DateFormatter().string(from: imported.importedAt))
                     self.sourceHealth[.kindle] = "Imported \(imported.books.formatted()) books · \(TsundokuFormat.relative(imported.importedAt))"
                 } else {
                     self.sourceHealth[.kindle] = "No local store found; showing any archived records."
                 }
             } catch {
-                failures.append("Kindle: \(error)")
+                failures.append(LibraryImportFailure(source: .kindle, error: error))
                 self.sourceHealth[.kindle] = "Import failed: \(error)"
             }
 
-            let booksPaths = BooksPaths.standard()
-            if booksPaths.exists {
+            let booksPaths = booksImportPaths
+            do {
                 self.sourceHealth[.appleBooks] = "Importing…"
-                do {
-                    let data = try await Task.detached {
-                        try BooksReader.readAll(booksPaths)
-                    }.value
+                if let data = try await Task.detached(operation: { () throws -> (books: [Book], annotations: [Annotation])? in
+                    guard try booksPaths.validateAccess() else { return nil }
+                    return try BooksReader.readAll(booksPaths)
+                }).value {
                     let imported = try await Task.detached {
                         try archive.importAll(
                             books: data.books,
@@ -539,20 +587,26 @@ public final class AppModel: ObservableObject {
                         imported.importedAt)
                     importedSources.append("Apple Books")
                     self.sourceLastImport[.appleBooks] = imported.importedAt
-                    try archive.setMeta("last_import_source_Apple Books", ISO8601DateFormatter().string(from: imported.importedAt))
+                    try? archive.setMeta("last_import_source_Apple Books", ISO8601DateFormatter().string(from: imported.importedAt))
                     self.sourceHealth[.appleBooks] = "Imported \(imported.books.formatted()) books · \(TsundokuFormat.relative(imported.importedAt))"
-                } catch {
-                    failures.append("Apple Books: \(error)")
-                    self.sourceHealth[.appleBooks] = "Import failed: \(error)"
+                } else {
+                    self.sourceHealth[.appleBooks] = "No local store found."
                 }
-            } else {
-                self.sourceHealth[.appleBooks] = "No local store found; showing any archived records."
+            } catch {
+                failures.append(LibraryImportFailure(source: .appleBooks, error: error))
+                self.sourceHealth[.appleBooks] = "Import failed: \(error)"
             }
 
             self.isImporting = false
+            self.hasCompletedImport = true
             self.lastImport = lastImportDate ?? self.lastImport
-            self.importError =
-                failures.isEmpty ? nil : failures.joined(separator: "\n")
+            self.importFailures = failures
+            self.importError = failures.isEmpty ? nil : failures.map { "\($0.source.displayName): \($0.detail)" }.joined(separator: "\n")
+            TsundokuDiagnostics.shared.event("library_import_finished", [
+                "books": totalBooks, "annotations": totalAnnotations,
+                "failed_sources": failures.map { $0.source.rawValue },
+                "access_denied_sources": failures.filter(\.accessDenied).map { $0.source.rawValue },
+            ])
             if totalBooks > 0 || totalAnnotations > 0 {
                 self.status =
                     "\(totalBooks) books · \(totalAnnotations) annotations "
@@ -580,16 +634,15 @@ public final class AppModel: ObservableObject {
                     "No local Kindle or Apple Books stores were found.",
                     enabled: announce)
             } else {
-                self.status =
-                    "Showing the last archive. Some local stores could not "
-                    + "be read."
-                self.post(
-                    "Could not read "
-                        + failures.joined(separator: "; ")
-                        + ". The last archive is still shown.",
-                    seconds: 12)
+                self.status = failures.first?.summary ?? "Library import failed."
+                self.post(self.status, seconds: 12)
             }
+            self.lastImportResult = self.status
             self.reloadFromArchive()
+            if self.importRequestedAfterCurrentRun {
+                self.importRequestedAfterCurrentRun = false
+                self.importLibrary(announce: false)
+            }
         }
     }
 
@@ -607,38 +660,41 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    public func requestLibraryAccess() {
+        if permissions == nil { permissions = PermissionsModel() }
+        showImportReport = false
+        showLibraryAccessGuide = true
+        permissions?.requestLibraryAccess()
+    }
+
     public func refreshPermissions() {
-        if let permissions {
-            permissions.refresh()
-            permissionAccessibility = permissions.accessibility
-            permissionScreen = permissions.screenRecording
-            permissionCheckResult = permissions.checkResult
-            return
-        }
-        permissionAccessibility = AXIsProcessTrusted()
-        permissionScreen = CGPreflightScreenCaptureAccess()
-        let result = permissionsNeeded
-            ? "Access not granted to this running copy." : "Both permissions granted."
-        permissionCheckResult = "Checked \(Date().formatted(date: .omitted, time: .standard)). \(result)"
+        if permissions == nil { permissions = PermissionsModel() }
+        permissions?.refresh()
+    }
+
+    public func verifyPermissions(includeLibrary: Bool = false) async {
+        if permissions == nil { permissions = PermissionsModel() }
+        await permissions?.verifyAccess()
+        if includeLibrary { await permissions?.verifyLibraryAccess() }
+    }
+
+    private func applyPermissions(_ snapshot: PermissionSnapshot) {
+        permissionAccessibility = snapshot.accessibility
+        permissionScreen = snapshot.screenRecording
+        permissionScreenStatus = snapshot.screenStatus
+        permissionCheckResult = snapshot.checkResult
+        permissionChecking = snapshot.isChecking
+        permissionCheckDetail = snapshot.detail
     }
 
     private func observePermissions() {
         permissionCancellables.removeAll()
         guard let permissions else { return }
-        permissionAccessibility = permissions.accessibility
-        permissionScreen = permissions.screenRecording
-        permissions.$accessibility
-            .receive(on: RunLoop.main)
-            .sink { [weak self] value in
-                self?.permissionAccessibility = value
-            }
-            .store(in: &permissionCancellables)
-        permissions.$screenRecording
-            .receive(on: RunLoop.main)
-            .sink { [weak self] value in
-                self?.permissionScreen = value
-            }
-            .store(in: &permissionCancellables)
+        // The model emits on MainActor. Keep one atomic snapshot and avoid
+        // deferred per-field deliveries overwriting a newer explicit check.
+        permissions.$snapshot.sink { [weak self] snapshot in
+            self?.applyPermissions(snapshot)
+        }.store(in: &permissionCancellables)
     }
 
     /// Read Kindle's Popular Highlights state for the Exports pane. It opens

@@ -126,71 +126,6 @@ public struct CompanionPanelView: View {
 
 // MARK: - Onboarding
 
-@MainActor
-public final class PermissionsModel: ObservableObject {
-    @Published public private(set) var accessibility: Bool
-    @Published public private(set) var screenRecording: Bool
-    @Published public private(set) var lastChecked: Date?
-    private let accessibilityCheck: () -> Bool
-    private let screenRecordingCheck: () -> Bool
-
-    public var missing: Bool { !(accessibility && screenRecording) }
-
-    public var checkResult: String? {
-        guard let lastChecked else { return nil }
-        let result = missing ? "Access not granted to this running copy." : "Both permissions granted."
-        return "Checked \(lastChecked.formatted(date: .omitted, time: .standard)). \(result)"
-    }
-
-    public init(
-        accessibilityCheck: @escaping () -> Bool = { AXIsProcessTrusted() },
-        screenRecordingCheck: @escaping () -> Bool = { CGPreflightScreenCaptureAccess() }
-    ) {
-        self.accessibilityCheck = accessibilityCheck
-        self.screenRecordingCheck = screenRecordingCheck
-        accessibility = accessibilityCheck()
-        screenRecording = screenRecordingCheck()
-    }
-
-    public func refresh() {
-        accessibility = accessibilityCheck()
-        screenRecording = screenRecordingCheck()
-        lastChecked = Date()
-    }
-
-    public func requestAccessibility() {
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
-        open(
-            "x-apple.systempreferences:com.apple.preference.security?"
-                + "Privacy_Accessibility")
-    }
-
-    public func requestScreenRecording() {
-        _ = CGRequestScreenCaptureAccess()
-        open(
-            "x-apple.systempreferences:com.apple.preference.security?"
-                + "Privacy_ScreenCapture")
-    }
-
-    public func openAccessibilitySettings() {
-        open(
-            "x-apple.systempreferences:com.apple.preference.security?"
-                + "Privacy_Accessibility")
-    }
-
-    public func openScreenSettings() {
-        open(
-            "x-apple.systempreferences:com.apple.preference.security?"
-                + "Privacy_ScreenCapture")
-    }
-
-    private func open(_ string: String) {
-        guard let url = URL(string: string) else { return }
-        NSWorkspace.shared.open(url)
-    }
-}
-
 public struct CompanionOnboardingView: View {
     @ObservedObject var permissions: PermissionsModel
     @ObservedObject var settings: CompanionSettingsStore
@@ -215,15 +150,19 @@ public struct CompanionOnboardingView: View {
                 Image(systemName: "eyeglasses")
                     .font(.system(size: 26, weight: .medium))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Reading Companion")
+                    Text("Set Up Tsundoku")
                         .font(.headline)
                     Text(
-                        "Open a book in Kindle or Apple Books to begin."
+                        "Allow library imports and live reader actions."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
             }
+
+            Divider()
+
+            LibraryAccessRow(permissions: permissions, resumeSetup: true)
 
             Divider()
 
@@ -240,6 +179,7 @@ public struct CompanionOnboardingView: View {
                 detail:
                     "Capture PDFs and read pages with OCR.",
                 granted: permissions.screenRecording,
+                status: permissions.snapshot.screenStatus,
                 grant: permissions.requestScreenRecording,
                 openSettings: permissions.openScreenSettings)
 
@@ -265,18 +205,22 @@ public struct CompanionOnboardingView: View {
             Spacer(minLength: 0)
 
             HStack {
-                IconButton("Re-check", systemImage: "arrow.clockwise") {
-                    permissions.refresh()
+                IconButton("Re-check", systemImage: "arrow.clockwise", tooltip: "Check reader access. macOS may ask for authorization.") {
+                    Task {
+                        await permissions.verifyAccess()
+                        await permissions.verifyLibraryAccess()
+                    }
                 }
+                .disabled(permissions.isChecking || permissions.libraryChecking)
                 Spacer()
-                Button(permissions.missing ? "Continue Anyway" : "Done") {
+                Button(permissions.setupIncomplete ? "Continue Anyway" : "Done") {
                     onClose()
                 }
                 .keyboardShortcut(.defaultAction)
             }
         }
         .padding(22)
-        .frame(width: 520, height: 520)
+        .frame(width: 560, height: 620)
         .onReceive(
             NotificationCenter.default.publisher(
                 for: NSApplication.didBecomeActiveNotification)
@@ -286,7 +230,7 @@ public struct CompanionOnboardingView: View {
     }
 
     private func permissionRow(
-        title: String, detail: String, granted: Bool,
+        title: String, detail: String, granted: Bool, status: String? = nil,
         grant: @escaping () -> Void,
         openSettings: @escaping () -> Void
     ) -> some View {
@@ -294,9 +238,9 @@ public struct CompanionOnboardingView: View {
             HStack {
                 Text(title).font(.subheadline.weight(.semibold))
                 Spacer()
-                Text(granted ? "Granted" : "Needed")
+                Text(status ?? (granted ? "Available" : "Unavailable"))
                     .font(.caption)
-                    .foregroundStyle(granted ? .green : .orange)
+                    .foregroundStyle(granted && status != "Check failed" && status != "Checking…" ? .green : .orange)
                 if granted {
                     IconButton(
                         "Settings…", systemImage: "gearshape",

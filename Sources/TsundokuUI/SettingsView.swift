@@ -106,29 +106,39 @@ public struct SettingsView: View {
             }
             if pane == nil || pane == .companion {
                 Section("Permissions") {
+                    if let permissions = model.permissions {
+                        LibraryAccessRow(permissions: permissions)
+                    }
                     permissionRow(
                         "Accessibility",
                         detail: "Read the page and turn pages.",
                         granted: model.permissionAccessibility,
-                        action: model.openAccessibilitySettings)
+                        action: model.permissionAccessibility ? model.openAccessibilitySettings : model.requestAccessibility)
                     permissionRow(
                         "Screen Recording",
                         detail: "Capture the page for PDF export.",
                         granted: model.permissionScreen,
-                        action: model.openScreenSettings)
-                    IconButton("Re-check", systemImage: "arrow.clockwise") {
-                        model.refreshPermissions()
+                        status: model.permissionScreenStatus,
+                        action: model.permissionScreen ? model.openScreenSettings : model.requestScreenRecording)
+                    IconButton("Re-check", systemImage: "arrow.clockwise", tooltip: "Check reader access. macOS may ask for authorization.") {
+                        Task { await model.verifyPermissions(includeLibrary: true) }
                     }
                     .controlSize(.small)
+                    .disabled(model.permissionChecking || model.permissions?.libraryChecking == true)
                     if let result = model.permissionCheckResult {
                         Text(result)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("permission-check-result")
                         if model.permissionsNeeded {
-                            Text("Already enabled? Quit and reopen Tsundoku. A differently signed build needs its own grant.")
+                            Text("These checks apply to the running app. An enabled switch may still refer to an older build.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                        }
+                    }
+                    if let detail = model.permissionCheckDetail {
+                        DisclosureGroup("Check Details") {
+                            Text(detail).font(.caption).textSelection(.enabled)
                         }
                     }
                 }
@@ -136,6 +146,9 @@ public struct SettingsView: View {
             }
             if pane == nil || pane == .data {
                 Section("Library Data") {
+                    if pane == .data, let permissions = model.permissions {
+                        LibraryAccessRow(permissions: permissions)
+                    }
                     LabeledContent("Archive") {
                         Text(archiveSummary)
                             .foregroundStyle(.secondary)
@@ -244,13 +257,13 @@ public struct SettingsView: View {
     }
 
     private func permissionRow(
-        _ title: String, detail: String, granted: Bool,
+        _ title: String, detail: String, granted: Bool, status: String? = nil,
         action: @escaping () -> Void
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             LabeledContent(title) {
                 HStack(spacing: 8) {
-                    Text(granted ? "Granted" : "Needed")
+                    Text(status ?? (granted ? "Available" : "Unavailable"))
                         .foregroundStyle(.secondary)
                     IconButton("Open Settings", systemImage: "gearshape") {
                         action()
