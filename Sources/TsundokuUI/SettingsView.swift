@@ -3,151 +3,109 @@ import Security
 import SwiftUI
 import TsundokuCore
 
-public enum SettingsPane: String, CaseIterable, Identifiable {
-    case companion = "Companion"
-    case ai = "AI Provider"
-    case data = "Library Data"
-    case about = "About"
-    public var id: String { rawValue }
-}
-
 public struct SettingsView: View {
-    let pane: SettingsPane?
+    let pane: SettingsPane
     @ObservedObject var model: AppModel
-    @State private var apiKey = Keychain.get(account: "http.apiKey") ?? ""
-    @State private var testStatus = ""
-    @State private var testing = false
-    @State private var testGeneration = 0
+    @ObservedObject var navigation: SettingsNavigation
+    @ObservedObject var providerState: ProviderSettingsState
 
-    public init(model: AppModel, pane: SettingsPane? = nil) {
-        self.model = model
-        self.pane = pane
+    public init(model: AppModel, pane: SettingsPane, navigation: SettingsNavigation,
+        providerState: ProviderSettingsState) {
+        self.model = model; self.pane = pane; self.navigation = navigation; self.providerState = providerState
     }
 
     public var body: some View {
+        Group {
+            if pane == .access, let permissions = model.permissions {
+                AccessSettingsView(model: model, permissions: permissions, navigation: navigation)
+            } else { form }
+        }
+        .accessibilityIdentifier("settings-pane-\(pane.rawValue)")
+    }
+
+    private var form: some View {
         Form {
-            if pane == nil || pane == .companion {
+            if pane == .companion {
                 if let companion = model.companionSettings {
                     CompanionSettingsSection(store: companion)
                 }
 
             }
-            if pane == nil || pane == .ai {
+            if pane == .ai {
                 Section("Reading Companion") {
                     Picker("Provider", selection: $model.settings.provider) {
                         ForEach(AIProviderKind.allCases, id: \.self) { kind in
                             Text(kind.displayName).tag(kind)
                         }
                     }
-                    .disabled(testing)
+                    .disabled(providerState.testing)
                     .help(providerNote)
 
                     TextField(
                         "Model", text: $model.settings.model,
                         prompt: Text("Provider default")
                     )
-                    .disabled(testing)
+                    .disabled(providerState.testing)
                     if model.settings.provider == .http {
                         TextField("Endpoint", text: $model.settings.endpoint)
-                            .disabled(testing)
-                        SecureField("API Key", text: $apiKey)
-                            .disabled(testing)
-                        IconButton("Save Key to Keychain", systemImage: "key") {
-                            let status = Keychain.set(
-                                apiKey, account: "http.apiKey")
-                            testStatus =
-                                status == errSecSuccess
-                                ? "Key saved to the login Keychain."
-                                : "Could not save the key (OSStatus \(status))."
+                            .disabled(providerState.testing)
+                        SecureField("API Key", text: $providerState.draftKey)
+                            .accessibilityIdentifier("provider-api-key")
+                            .disabled(providerState.testing)
+                            .onSubmit { providerState.saveKey() }
+                        HStack {
+                            Text(providerState.keyStatus.isEmpty && providerState.hasUnsavedKey ? "Unsaved key" : providerState.keyStatus)
+                                .font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Save Key", action: providerState.saveKey)
+                                .disabled(!providerState.hasUnsavedKey || providerState.testing)
                         }
-                        .controlSize(.small)
-                        .disabled(testing)
+
                     }
                     TextField(
                         "Answer Language", text: $model.settings.language
                     )
-                    .disabled(testing)
+                    .disabled(providerState.testing)
                     Toggle(
                         "Record Pages While Tracking",
                         isOn: $model.settings.sessionLogging
                     )
-                    .disabled(testing)
+                    .disabled(providerState.testing)
 
-                    LabeledContent("Connection") {
-                        HStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                            Text("Connection")
+                            Spacer(minLength: 0)
                             IconButton("Test Provider", systemImage: "network")
-                            { test() }
+                            { providerState.test(settings: model.settings) }
                             .controlSize(.small)
-                            .disabled(testing)
-                            if testing {
+                            .disabled(providerState.testing || (model.settings.provider == .http && providerState.hasUnsavedKey))
+                            if providerState.testing {
                                 ProgressView().controlSize(.small)
                             }
-                            Text(testStatus)
+                            Text(providerState.testStatus)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(2)
-                            Spacer(minLength: 0)
-                        }
                     }
-                    .onChange(of: model.settings.provider) { _, _ in
-                        testStatus = ""
-                        testGeneration += 1
+                    .onChange(of: model.settings.provider) { _, provider in
+                        if provider == .http { providerState.loadKeyIfNeeded() }
+                        providerState.invalidateTest()
                     }
                     .onChange(of: model.settings.model) { _, _ in
-                        testStatus = ""
-                        testGeneration += 1
+                        providerState.invalidateTest()
                     }
                     .onChange(of: model.settings.endpoint) { _, _ in
-                        testStatus = ""
-                        testGeneration += 1
+                        providerState.invalidateTest()
                     }
                 }
 
             }
-            if pane == nil || pane == .companion {
-                Section("Permissions") {
-                    if let permissions = model.permissions {
-                        LibraryAccessRow(permissions: permissions)
-                    }
-                    permissionRow(
-                        "Accessibility",
-                        detail: "Read the page and turn pages.",
-                        granted: model.permissionAccessibility,
-                        action: model.permissionAccessibility ? model.openAccessibilitySettings : model.requestAccessibility)
-                    permissionRow(
-                        "Screen Recording",
-                        detail: "Capture the page for PDF export.",
-                        granted: model.permissionScreen,
-                        status: model.permissionScreenStatus,
-                        action: model.permissionScreen ? model.openScreenSettings : model.requestScreenRecording)
-                    IconButton("Re-check", systemImage: "arrow.clockwise", tooltip: "Check reader access. macOS may ask for authorization.") {
-                        Task { await model.verifyPermissions(includeLibrary: true) }
-                    }
-                    .controlSize(.small)
-                    .disabled(model.permissionChecking || model.permissions?.libraryChecking == true)
-                    if let result = model.permissionCheckResult {
-                        Text(result)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("permission-check-result")
-                        if model.permissionsNeeded {
-                            Text("These checks apply to the running app. An enabled switch may still refer to an older build.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    if let detail = model.permissionCheckDetail {
-                        DisclosureGroup("Check Details") {
-                            Text(detail).font(.caption).textSelection(.enabled)
-                        }
-                    }
-                }
-
-            }
-            if pane == nil || pane == .data {
+            if pane == .data {
                 Section("Library Data") {
-                    if pane == .data, let permissions = model.permissions {
-                        LibraryAccessRow(permissions: permissions)
+                    LabeledContent("Access") {
+                        IconButton("Review Library Access", systemImage: "lock.shield") {
+                            model.openAccess(focus: .library)
+                        }
                     }
                     LabeledContent("Archive") {
                         Text(archiveSummary)
@@ -204,7 +162,7 @@ public struct SettingsView: View {
                 }
 
             }
-            if pane == nil || pane == .about {
+            if pane == .about {
                 Section("About") {
                     LabeledContent("Tsundoku") {
                         Text(version)
@@ -220,6 +178,7 @@ public struct SettingsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+        .task { if pane == .ai && model.settings.provider == .http { providerState.loadKeyIfNeeded() } }
     }
 
     private var providerNote: String {
@@ -256,51 +215,4 @@ public struct SettingsView: View {
         }
     }
 
-    private func permissionRow(
-        _ title: String, detail: String, granted: Bool, status: String? = nil,
-        action: @escaping () -> Void
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            LabeledContent(title) {
-                HStack(spacing: 8) {
-                    Text(status ?? (granted ? "Available" : "Unavailable"))
-                        .foregroundStyle(.secondary)
-                    IconButton("Open Settings", systemImage: "gearshape") {
-                        action()
-                    }
-                    .controlSize(.small)
-                }
-            }.help(detail)
-        }
-    }
-
-    private func test() {
-        testing = true
-        testStatus = ""
-        testGeneration += 1
-        let generation = testGeneration
-        let settings = model.settings
-        Task {
-            let request = AIRequest(
-                action: .explain,
-                pageText: "The quick brown fox jumps over the lazy dog.",
-                bookTitle: "Tsundoku test", language: settings.language)
-            do {
-                let answer = try await AIService.answer(
-                    for: request, settings: settings)
-                if generation == testGeneration {
-                    testStatus =
-                        "OK · \(answer.provider) · "
-                        + "\(answer.text.count) characters"
-                }
-            } catch {
-                if generation == testGeneration {
-                    testStatus = "\(error)"
-                }
-            }
-            if generation == testGeneration {
-                testing = false
-            }
-        }
-    }
 }

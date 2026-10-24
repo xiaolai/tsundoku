@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon
 import SwiftUI
 import TsundokuCore
 import TsundokuUI
@@ -16,7 +17,7 @@ enum TsundokuMain {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let settings = CompanionSettingsStore()
     private let permissions = PermissionsModel()
     private var companion: CompanionController!
@@ -24,21 +25,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private let hotKey = GlobalHotKey()
     private var statusItem: StatusItemController!
     private var artifacts: ArtifactsWindowController!
-    private var onboardingWindow: NSWindow?
-    private var settingsWindow: NSWindow?
+    private let settingsNavigation = SettingsNavigation()
+    private var settingsWindow: SettingsWindowController?
     private var appModel: AppModel?
     private var loginStatus = ""
     private var hotKeyTestArmed = false
     private var appliedHotKey: CompanionHotKey?
     private var appliedLaunchAtLogin: Bool?
-    private var openLibraryAfterSetup = false
+    private var hotKeyTestTimeout: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = CommandLine.arguments
         startDiagnostics(arguments)
         permissions.onLibraryAccessReady = { [weak self] in
             guard let self else { return }
-            if self.onboardingWindow?.isVisible == true { self.openLibraryAfterSetup = true }
             self.ensureAppModel().requestLibraryImport()
         }
         permissions.onRelaunchRequested = { [weak self] in
@@ -50,11 +50,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 throw NSError(domain: "Tsundoku", code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "Wait for the current library import to finish"])
             }
+            if self?.permissions.accessResumeIntent == .capture { self?.ensureAppModel().persistCaptureAccessForRelaunch() }
             try ApplicationRelaunch.schedule(appURL: Bundle.main.bundleURL,
                 processID: ProcessInfo.processInfo.processIdentifier,
-                arguments: CommandLine.arguments.dropFirst().filter { $0 != "--show-onboarding" })
+                arguments: SettingsLaunchPolicy.relaunchArguments(Array(CommandLine.arguments.dropFirst())))
             NSApp.terminate(nil)
         }
+        permissions.onRelaunchFailed = { [weak self] in self?.appModel?.discardCaptureAccessRelaunch() }
         applyAppearance(arguments)
         NSApp.setActivationPolicy(.accessory)
         buildMainMenu()
@@ -103,13 +105,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             watcher.start()
         }
 
-        if (arguments.contains("--show-onboarding") || permissions.librarySetupPending),
-            permissions.setupIncomplete, !arguments.contains("--no-onboarding")
-        {
-            if permissions.librarySetupPending { openLibraryAfterSetup = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                [weak self] in
-                self?.showOnboarding()
+        settings.onTestShortcut = { [weak self] in self?.armHotKeyTest() }
+        settingsNavigation.onCancelSetup = { [weak self] intent in self?.ensureAppModel().cancelAccessTask(intent: intent) }
+        settingsNavigation.onIntentReplaced = { [weak self] previous in
+            if previous == .capture { self?.appModel?.cancelAccessTask(intent: .capture) }
+        }
+        settingsNavigation.onReturnToTask = { [weak self] intent, close in
+            guard let self else { return }
+            if close { self.settingsWindow?.close() }
+            switch intent {
+            case .library:
+                self.artifacts.show(importLibrary: false)
+            case .capture:
+                self.ensureAppModel().returnToCapture()
+                self.artifacts.show(importLibrary: false)
+            case .companion:
+                if self.watcher.focusReader() {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.companion.showPanel() }
+                } else {
+                    self.ensureAppModel().post("Open a book in Kindle or Apple Books, then use the companion shortcut.")
+                    self.artifacts.show(importLibrary: false)
+                }
+            }
+        }
+        let resumeFocus = permissions.accessResumeFocus ?? .library
+        let resumeIntent = permissions.accessResumeIntent ?? .library
+        let resumeAccess = permissions.consumeAccessResume()
+        if (arguments.contains("--show-onboarding") || resumeAccess), !arguments.contains("--no-onboarding") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                self?.openSettings(SettingsRoute(pane: .access, focus: resumeFocus,
+                    intent: resumeIntent))
+            }
+        } else if SettingsLaunchPolicy.shouldPresentLibrary(
+            firstUse: !UserDefaults.standard.bool(forKey: "app.hasPresentedLibrary"), arguments: arguments,
+            isLoginLaunch: NSAppleEventManager.shared().currentAppleEvent?.paramDescriptor(forKeyword: keyAELaunchedAsLogInItem) != nil) {
+            UserDefaults.standard.set(true, forKey: "app.hasPresentedLibrary")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                self?.openLibrary(importLibrary: false)
             }
         }
 
@@ -119,6 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     func applicationWillTerminate(_ notification: Notification) {
         permissions.prepareForTermination()
+        settingsWindow?.prepareForTermination()
         companion?.writeState()
         // Stopping the watcher emits a nil snapshot, which would overwrite the
         // state this run is meant to leave behind as evidence.
@@ -126,6 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         watcher.onFullScreenChange = nil
         watcher.stop()
         companion?.stop()
+        hotKeyTestTimeout?.cancel()
         hotKey.uninstall()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         TsundokuDiagnostics.shared.event("terminate")
@@ -177,7 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         model.openCompanion = { [weak self, weak model] in
             guard let self, let model else { return }
             if !self.permissions.accessibility {
-                self.showOnboarding()
+                self.openSettings(SettingsRoute(pane: .access, focus: .accessibility, intent: .companion))
                 return
             }
             guard self.companion.canShowPanel else {
@@ -188,7 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             }
             self.companion.showPanel()
         }
-        model.openSettingsWindow = { [weak self] in self?.openSettings() }
+        model.openSettingsWindow = { [weak self] route in self?.openSettings(route) }
         model.openSavedNotesWindow = { [weak self] in
             guard let self else { return }
             self.artifacts.show(section: .highlights, importLibrary: false)
@@ -215,15 +249,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         statusItem.onOpenSettings = { [weak self] in
             self?.openSettings()
         }
-        statusItem.onOpenOnboarding = { [weak self] in
-            self?.showOnboarding()
-        }
         statusItem.onToggleLaunchAtLogin = { [weak self] in
             guard let self else { return }
             self.settings.settings.launchAtLogin.toggle()
         }
         statusItem.onTestShortcut = { [weak self] in
-            self?.armHotKeyTest()
+            self?.settings.testShortcut()
         }
         statusItem.onQuit = {
             NSApp.terminate(nil)
@@ -239,29 +270,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             if self.permissions.accessibility {
                 self.companion.togglePanel()
             } else {
-                self.showOnboarding()
+                self.openSettings(SettingsRoute(pane: .access, focus: .accessibility, intent: .companion))
             }
             guard wasArmed else { return }
             self.hotKeyTestArmed = false
-            self.settings.hotKeyTestNote = "The shortcut reached Tsundoku."
+            self.hotKeyTestTimeout?.cancel()
+            self.settings.hotKeyTestNote = "Shortcut received. If another app also reacts, choose a different shortcut."
+            self.statusItem.showShortcutFeedback("Shortcut received", success: true)
             TsundokuDiagnostics.shared.event("hotkey_test_fired")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.showHotKeyTestResult()
-            }
         }
-    }
-
-    private func showHotKeyTestResult() {
-        let alert = NSAlert()
-        alert.messageText = "Shortcut received"
-        alert.informativeText =
-            "Tsundoku received \(settings.settings.hotKey.displayName) and "
-            + (companion.isPanelOpen
-                ? "opened the companion."
-                : "ran the action, but no reader was available.")
-            + "\n\nIf another app also reacts, choose a different shortcut."
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
     }
 
     private func applySettings(
@@ -305,33 +322,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     private func armHotKeyTest() {
-        let alert = NSAlert()
-        alert.messageText = "Test \(settings.settings.hotKey.displayName)"
-        alert.informativeText =
-            "Switch to another app, then press the shortcut to test it."
-        alert.addButton(withTitle: "I'm Ready")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        hotKeyTestTimeout?.cancel()
+        guard hotKey.isRegistered else {
+            settings.hotKeyTestNote = "The shortcut is not registered. Choose another shortcut and try again."
+            statusItem.showShortcutFeedback("Shortcut unavailable", success: false)
+            return
+        }
         hotKeyTestArmed = true
-        settings.hotKeyTestNote =
-            "Press \(settings.settings.hotKey.displayName) now while "
-            + "another app is frontmost."
-        TsundokuDiagnostics.shared.event(
-            "hotkey_test_armed",
-            ["shortcut": settings.settings.hotKey.displayName])
+        settings.hotKeyTestNote = "Switch to another app and press \(settings.settings.hotKey.displayName)."
+        statusItem.showShortcutFeedback("Press \(settings.settings.hotKey.displayName) to test", success: nil)
+        TsundokuDiagnostics.shared.event("hotkey_test_armed")
+        hotKeyTestTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            guard !Task.isCancelled, let self, self.hotKeyTestArmed else { return }
+            self.hotKeyTestArmed = false
+            self.settings.hotKeyTestNote = "No shortcut received. Check for a conflicting shortcut and try again."
+            self.statusItem.showShortcutFeedback("No shortcut received", success: false)
+        }
     }
 
     // MARK: - Windows
 
-    private func openLibrary(useRequestedSection: Bool = false) {
-        // The launch argument applies once, on the launch open. The Library
-        // menu action and reopen events must always show the library.
-        let section =
-            useRequestedSection ? (requestedSection ?? .library) : .library
-        artifacts.show(section: section, importLibrary: !CommandLine.arguments.contains("--no-import"))
-        if let model = artifacts.modelIfCreated() {
-            if !CommandLine.arguments.contains("--shell-only") { model.startLivePolling() }
-        }
+    private func openLibrary(useRequestedSection: Bool = false, importLibrary: Bool = true) {
+        let section = useRequestedSection ? requestedSection : nil
+        artifacts.show(section: section,
+            importLibrary: importLibrary && !CommandLine.arguments.contains("--no-import"))
+        if let model = artifacts.modelIfCreated(), !CommandLine.arguments.contains("--shell-only") { model.startLivePolling() }
+    }
+
+    private var requestsLegacySettings: Bool {
+        let args = CommandLine.arguments
+        guard let index = args.firstIndex(of: "--section"), args.indices.contains(index + 1) else { return false }
+        return args[index + 1] == "settings"
     }
 
     private var requestedSection: AppModel.Section? {
@@ -346,75 +368,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         return nil
     }
 
-    private func openSettings() {
+    /// Explicit synthetic mode for native UI gates. Never reads or writes the
+    /// real Keychain and never connects to a provider. Normal launches use the
+    /// production state object.
+    private func providerStateForTesting() -> ProviderSettingsState? {
+        let arguments = CommandLine.arguments
+        guard arguments.contains("--settings-fixture"), arguments.contains("--no-system-integrations") else { return nil }
+        var saves = 0
+        return ProviderSettingsState(loadKey: { "fixture-key" }, saveKey: { _ in
+            saves += 1
+            return saves == 1 ? -1 : 0
+        }, connectionTest: { _ in "Connected · Fixture" })
+    }
+
+    private func openSettings(_ route: SettingsRoute? = nil) {
+        settingsNavigation.open(route, wasVisible: settingsWindow?.isVisible == true)
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 720),
-                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            window.title = "Tsundoku Settings"
-            window.identifier = NSUserInterfaceItemIdentifier("TsundokuSettings")
-            window.contentView = NSHostingView(rootView: SettingsWindowView(model: ensureAppModel()))
-            window.isReleasedWhenClosed = false
-            window.center()
-            settingsWindow = window
+            settingsWindow = SettingsWindowController(model: ensureAppModel(), navigation: settingsNavigation, providerState: providerStateForTesting())
         }
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    private func showOnboarding() {
-        permissions.refresh()
-        if let onboardingWindow {
-            onboard(onboardingWindow)
-            return
-        }
-        let view = CompanionOnboardingView(
-            permissions: permissions, settings: settings,
-            onOpenLoginItemSettings: { LoginItem.openSettings() },
-            onClose: { [weak self] in self?.closeOnboarding() })
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 620),
-            styleMask: [.titled, .closable, .miniaturizable],
-            backing: .buffered, defer: false)
-        window.title = "Tsundoku"
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        onboardingWindow = window
-        TsundokuDiagnostics.shared.event(
-            "onboarding_shown",
-            [
-                "accessibility": permissions.accessibility,
-                "screen_recording": permissions.screenRecording,
-            ])
-        onboard(window)
-    }
-
-    private func onboard(_ window: NSWindow) {
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow, window === onboardingWindow else { return }
-        openLibraryAfterSetup = false
-        permissions.cancelLibrarySetup()
-        onboardingWindow = nil
-    }
-
-    private func closeOnboarding() {
-        let showLibrary = openLibraryAfterSetup
-        openLibraryAfterSetup = false
-        onboardingWindow?.close()
-        onboardingWindow = nil
-        permissions.refresh()
-        TsundokuDiagnostics.shared.event(
-            "onboarding_closed",
-            [
-                "accessibility": permissions.accessibility,
-                "screen_recording": permissions.screenRecording,
-            ])
-        if showLibrary { openLibrary() }
+        settingsWindow?.present()
+        TsundokuDiagnostics.shared.event("settings_shown", ["pane": settingsNavigation.selectedPane.rawValue])
     }
 
     @objc private func spaceChanged() {
@@ -464,10 +437,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             [weak self] in
             guard let self else { return }
-            if arguments.contains("--open-library") {
+            if arguments.contains("--open-library"), !self.requestsLegacySettings {
                 self.openLibrary(useRequestedSection: true)
-            } else if arguments.contains("--open-settings") {
-                self.openSettings()
+            } else if arguments.contains("--open-settings") || self.requestsLegacySettings {
+                let index = arguments.firstIndex(of: "--settings-pane")
+                let pane = index.flatMap { arguments.indices.contains($0 + 1) ? SettingsPane(rawValue: arguments[$0 + 1]) : nil }
+                self.openSettings(pane.map { SettingsRoute(pane: $0) })
             }
             if arguments.contains("--show-companion")
                 || arguments.contains("--demo-panel")
@@ -566,7 +541,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             "launch_at_login": settings.settings.launchAtLogin,
             "artifacts_window_visible": artifacts?.isVisible ?? false,
             "app_model_created": appModel != nil,
-            "onboarding_visible": onboardingWindow?.isVisible ?? false,
+            "settings_visible": settingsWindow?.isVisible ?? false,
+            "settings_pane": settingsNavigation.selectedPane.rawValue,
             "diagnostics_dropped_events":
                 TsundokuDiagnostics.shared.droppedEventCount,
             "diagnostics_last_error":

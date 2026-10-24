@@ -113,6 +113,8 @@ struct LibraryAccessSetupTests {
         #expect(probes == 1)
         #expect(imports == 1)
         #expect(model.libraryStatus == .available)
+        #expect(model.librarySetupPending, "A read probe alone does not commit the import")
+        model.completeLibrarySetup(importedSources: [.appleBooks])
         #expect(!model.librarySetupPending)
     }
 
@@ -127,10 +129,10 @@ struct LibraryAccessSetupTests {
         #expect(imports == 0, "Checking access alone must not import")
         model.importReadableLibrary()
         #expect(imports == 1, "An explicit import action is available after checking")
-        #expect(!model.setupIncomplete)
+        #expect(model.libraryReady)
     }
 
-    @Test func partialSetupImportsReadableSourcesOnceAndKeepsRecoveryPending() async {
+    @Test func partialSetupFinishesOnlyAfterAReadableSourceIsImported() async {
         var imports = 0
         let denied = LibraryImportFailure(source: .kindle, error: SQLiteError(code: 23, message: "denied"))
         let model = PermissionsModel(accessibilityCheck: { true }, screenRecordingCheck: { true },
@@ -145,6 +147,12 @@ struct LibraryAccessSetupTests {
         #expect(model.librarySetupPending)
         #expect(imports == 1)
         #expect(model.readableLibrarySources == [.appleBooks])
+        model.completeLibrarySetup(importedSources: [.appleBooks], failures: [denied])
+        #expect(model.librarySetupPending, "Continue waiting while the person is still granting access")
+        #expect(!model.consumeAccessResume(), "Partial access does not arm a setup window on normal launch")
+        model.cancelLibrarySetup() // Only an explicit Cancel stops waiting for the blocked source.
+        #expect(!model.librarySetupPending)
+        #expect(model.libraryStatus == .blocked, "The other source's warning remains visible")
     }
 
     @Test func pendingSetupExpiresButLegacyIntentIsMigrated() {
@@ -158,18 +166,18 @@ struct LibraryAccessSetupTests {
         #expect(!model.librarySetupPending)
     }
 
-    @Test func onlyTheCurrentGuideCanCancelSetup() async {
+    @Test func closingOrSwitchingSettingsDoesNotCancelSetup() async {
         let model = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
             libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: defaults())
-        let first = UUID(), second = UUID()
+        let navigation = SettingsNavigation(defaults: defaults())
+        navigation.onCancelSetup = { _ in model.cancelLibrarySetup() }
         model.requestLibraryAccess()
         await waitForRegistration(model)
-        model.claimLibraryGuide(first)
-        model.claimLibraryGuide(second)
-        model.dismissLibraryGuide(first)
+        navigation.open(SettingsRoute(pane: .access, intent: .library), wasVisible: false)
+        navigation.select(.ai)
+        navigation.windowClosed()
         #expect(model.librarySetupPending)
-        #expect(model.activeLibraryGuideID == second)
-        model.dismissLibraryGuide(second)
+        navigation.cancelIntent()
         #expect(!model.librarySetupPending)
     }
 
@@ -186,7 +194,8 @@ struct LibraryAccessSetupTests {
         failed.requestRelaunch()
         #expect(!failed.relaunchPending)
         #expect(failed.librarySettingsError?.contains("Could not reopen") == true)
-        #expect(failed.librarySetupPending)
+        #expect(!failed.librarySetupPending)
+        #expect(!failed.consumeAccessResume())
     }
 
     @Test func cancelledOldRequestCannotCompleteNewRequest() async throws {
@@ -221,7 +230,7 @@ struct LibraryAccessSetupTests {
         await waitForRegistration(model)
         await model.verifyLibraryAccess()
         #expect(model.libraryStatus == .blocked)
-        #expect(model.setupIncomplete)
+        #expect(!model.libraryReady)
         #expect(model.librarySetupPending)
         #expect(imports == 0)
         model.cancelLibrarySetup()
@@ -251,7 +260,8 @@ struct LibraryAccessSetupTests {
         await model.verifyLibraryAccess()
         #expect(model.libraryStatus == .notFound)
         #expect(!model.librarySetupPending)
-        #expect(!model.setupIncomplete)
+        #expect(!model.libraryReady)
+        #expect(model.libraryInstruction == nil)
     }
     @Test func quitAndReopenResumesVerificationAndImport() async {
         let store = defaults()
@@ -270,6 +280,7 @@ struct LibraryAccessSetupTests {
         resumed.resumeLibrarySetupIfNeeded()
         for _ in 0..<100 where imports == 0 { await Task.yield() }
         #expect(imports == 1)
+        resumed.completeLibrarySetup(importedSources: [.kindle])
         #expect(!resumed.librarySetupPending)
     }
 
@@ -289,6 +300,29 @@ struct LibraryAccessSetupTests {
         pending.resume(returning: LibraryAccessResult(readableSources: [.kindle], failures: []))
         await task.value
         #expect(imports == 0)
+        #expect(!model.librarySetupPending)
+    }
+
+    @Test func partialImportKeepsWaitingForTheSourceBeingGranted() async {
+        var granted = false
+        var imports = 0
+        let denied = LibraryImportFailure(source: .kindle, error: SQLiteError(code: 23, message: "denied"))
+        let model = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
+            libraryAccessCheck: { LibraryAccessResult(readableSources: granted ? [.appleBooks, .kindle] : [.appleBooks], failures: granted ? [] : [denied]) },
+            libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: defaults())
+        model.onLibraryAccessReady = { imports += 1 }
+        model.requestLibraryAccess()
+        await waitForRegistration(model)
+        await model.verifyLibraryAccess()
+        model.completeLibrarySetup(importedSources: [.appleBooks], failures: [denied])
+        #expect(model.librarySetupPending)
+        #expect(!model.consumeAccessResume())
+        await model.verifyLibraryAccess()
+        #expect(imports == 1, "Already imported sources are not repeated on activation")
+        granted = true
+        await model.verifyLibraryAccess()
+        #expect(imports == 2, "Late approval imports the newly readable source")
+        model.completeLibrarySetup(importedSources: [.appleBooks, .kindle])
         #expect(!model.librarySetupPending)
     }
 

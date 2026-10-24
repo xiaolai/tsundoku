@@ -8,12 +8,13 @@ final class StatusItemController: NSObject {
     private let showItem = NSMenuItem()
     private let hideItem = NSMenuItem()
     private let launchItem = NSMenuItem()
+    private let shortcutFeedback = NSMenuItem()
+    private var feedbackTask: Task<Void, Never>?
 
     var onShowCompanion: (() -> Void)?
     var onHideCompanion: (() -> Void)?
     var onOpenLibrary: (() -> Void)?
     var onOpenSettings: (() -> Void)?
-    var onOpenOnboarding: (() -> Void)?
     var onToggleLaunchAtLogin: (() -> Void)?
     var onTestShortcut: (() -> Void)?
     var onQuit: (() -> Void)?
@@ -53,10 +54,6 @@ final class StatusItemController: NSObject {
             item("Library…", #selector(openLibrary), key: "o"))
         menu.addItem(
             item("Settings…", #selector(openSettings), key: ","))
-        menu.addItem(
-            item(
-                "Permissions & Onboarding…", #selector(openOnboarding),
-                key: ""))
         menu.addItem(.separator())
 
         launchItem.title = "Start at Login"
@@ -66,6 +63,9 @@ final class StatusItemController: NSObject {
 
         menu.addItem(
             item("Test Shortcut…", #selector(testShortcut), key: ""))
+        shortcutFeedback.isEnabled = false
+        shortcutFeedback.isHidden = true
+        menu.addItem(shortcutFeedback)
         menu.addItem(.separator())
         menu.addItem(item("Quit Tsundoku", #selector(quit), key: "q"))
     }
@@ -91,11 +91,28 @@ final class StatusItemController: NSObject {
         launchItem.state = enabled ? .on : .off
     }
 
+    func showShortcutFeedback(_ text: String, success: Bool?) {
+        feedbackTask?.cancel()
+        shortcutFeedback.title = text; shortcutFeedback.isHidden = false
+        statusItem.button?.toolTip = text
+        statusItem.button?.setAccessibilityValue(text)
+        if let success {
+            statusItem.button?.image = NSImage(systemSymbolName: success ? "checkmark.circle" : "exclamationmark.circle",
+                accessibilityDescription: text)
+            feedbackTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled, let self else { return }
+                self.statusItem.button?.image = NSImage(systemSymbolName: "eyeglasses", accessibilityDescription: "Tsundoku")
+                self.statusItem.button?.image?.isTemplate = true
+                self.statusItem.button?.toolTip = "Tsundoku"
+            }
+        }
+    }
+
     @objc private func showCompanion() { onShowCompanion?() }
     @objc private func hideCompanion() { onHideCompanion?() }
     @objc private func openLibrary() { onOpenLibrary?() }
     @objc private func openSettings() { onOpenSettings?() }
-    @objc private func openOnboarding() { onOpenOnboarding?() }
     @objc private func toggleLaunchAtLogin() { onToggleLaunchAtLogin?() }
     @objc private func testShortcut() { onTestShortcut?() }
     @objc private func quit() { onQuit?() }

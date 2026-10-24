@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TsundokuCore
 
 enum LibraryAppLocation {
     static func requiresInstallation(_ url: URL) -> Bool {
@@ -7,177 +8,214 @@ enum LibraryAppLocation {
     }
 }
 
-struct LibraryAccessRequestButton: View {
+/// All setup help lives inside the one Settings window. This view has no
+/// window presenter and never cancels pending work when it disappears.
+struct AccessSettingsView: View {
+    @ObservedObject var model: AppModel
     @ObservedObject var permissions: PermissionsModel
-    var title = "Grant Full Disk Access…"
-    var resumeSetup = false
-    @State private var showGuide = false
-
-    var body: some View {
-        Button(title) {
-            showGuide = true
-            permissions.requestLibraryAccess()
-        }
-        .disabled(permissions.libraryChecking || permissions.libraryRegistrationInProgress)
-        .background {
-            LibraryAccessGuidePresenter(permissions: permissions, isPresented: $showGuide)
-                .frame(width: 0, height: 0)
-        }
-        .onAppear {
-            if resumeSetup && permissions.librarySetupPending { showGuide = true }
-        }
-    }
-}
-
-struct LibraryAccessGuidePresenter: View {
-    @ObservedObject var permissions: PermissionsModel
-    @Binding var isPresented: Bool
-    @State private var guideID = UUID()
-
-    var body: some View {
-        InspectorPanel(isPresented: $isPresented, title: "Library Access",
-            initialSize: NSSize(width: 540, height: 540), keepsVisibleWhenInactive: true) {
-            LibraryAccessGuideView(permissions: permissions, onClose: { isPresented = false })
-        }
-        .onChange(of: isPresented) { _, presented in
-            if presented { permissions.claimLibraryGuide(guideID) }
-            else { permissions.dismissLibraryGuide(guideID) }
-        }
-        .onAppear {
-            if isPresented { permissions.claimLibraryGuide(guideID) }
-        }
-        .onChange(of: permissions.activeLibraryGuideID) { _, active in
-            if isPresented && active != guideID { isPresented = false }
-        }
-        .onDisappear { permissions.dismissLibraryGuide(guideID) }
-    }
-}
-
-struct LibraryAccessRow: View {
-    @ObservedObject var permissions: PermissionsModel
-    var resumeSetup = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Library Access").font(.subheadline.weight(.semibold))
-                Spacer()
-                Text(permissions.libraryChecking ? "Checking…" : permissions.libraryStatus.title)
-                    .font(.caption).foregroundStyle(.secondary)
-                IconButton("Re-check Library Access", systemImage: "arrow.clockwise") {
-                    Task { await permissions.verifyLibraryAccess() }
-                }.disabled(permissions.libraryChecking || permissions.libraryRegistrationInProgress)
-            }
-            HStack {
-                Text("Read Kindle and Apple Books libraries.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                if !permissions.readableLibrarySources.isEmpty {
-                    IconButton("Import Library", systemImage: "square.and.arrow.down", action: permissions.importReadableLibrary)
-                }
-                LibraryAccessRequestButton(permissions: permissions,
-                    title: permissions.libraryStatus == .available ? "Full Disk Access…" : "Grant Full Disk Access…",
-                    resumeSetup: resumeSetup)
-                    .controlSize(.small)
-            }
-        }
-    }
-}
-
-struct LibraryAccessGuideView: View {
-    @ObservedObject var permissions: PermissionsModel
-    let onClose: () -> Void
+    @ObservedObject var navigation: SettingsNavigation
     private var appURL: URL { Bundle.main.bundleURL }
     private var needsInstallation: Bool { LibraryAppLocation.requiresInstallation(appURL) }
+    private var blocked: Bool { permissions.libraryFailures.contains(where: \.accessDenied) }
+    private var libraryTitle: String {
+        permissions.libraryReady && !permissions.libraryFailures.isEmpty ? "Partially readable" : permissions.libraryStatus.title
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Grant Library Access").font(.title2.bold())
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    if needsInstallation {
-                        Label("Install Tsundoku in Applications first.", systemImage: "externaldrive.badge.exclamationmark")
-                        Text("This copy is running from a disk image or a temporary location. Quit, move Tsundoku to Applications, then reopen that copy before granting access.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Button("Show Applications in Finder") {
-                            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications", isDirectory: true))
-                        }
-                    } else {
-                        Text("In Full Disk Access, turn on Tsundoku.")
-                    }
-                    DisclosureGroup("App Not Listed?") {
-                        HStack(spacing: 12) {
-                            Image(nsImage: NSWorkspace.shared.icon(forFile: appURL.path))
-                                .resizable().frame(width: 40, height: 40)
+        ScrollViewReader { scroll in
+            Form {
+                if navigation.intent != nil || permissions.librarySetupPending {
+                    Section {
+                        HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Tsundoku").font(.headline)
-                                Text("Drag into the Full Disk Access list, or use its + button.")
-                                    .font(.caption).foregroundStyle(.secondary)
+                                Text(taskTitle).font(.headline)
+                                if model.isImporting { ProgressView("Importing library…").controlSize(.small) }
+                            }
+                            Spacer()
+                            IconButton("Cancel Setup", systemImage: "xmark", action: navigation.cancelIntent)
+                                .disabled(permissions.relaunchPending || (model.isImporting && navigation.intent == .library))
+                        }
+                        if navigation.intent != nil {
+                            Button(returnTitle, action: navigation.returnToTask)
+                                .disabled(!canReturn)
+                        }
+                    }
+                }
+
+                Section("Library Imports") {
+                    HStack {
+                        Text(permissions.libraryChecking ? "Checking…" : libraryTitle)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("library-access-status")
+                        Spacer()
+                        IconButton("Re-check Library Access", systemImage: "arrow.clockwise") {
+                            Task { await permissions.verifyLibraryAccess() }
+                        }.disabled(permissions.libraryChecking || permissions.libraryRegistrationInProgress)
+                        if permissions.libraryReady && !blocked {
+                            IconButton("Manage Full Disk Access", systemImage: "gearshape", action: permissions.openLibrarySettings)
+                        }
+                        if permissions.libraryReady {
+                            IconButton("Import Library", systemImage: "square.and.arrow.down") { model.requestLibraryImport() }
+                                .disabled(model.isImporting || permissions.libraryRegistrationInProgress)
+                        }
+                    }
+                    ForEach(BookSource.allCases, id: \.self) { source in
+                        LabeledContent(source.displayName) {
+                            Text(sourceStatus(source)).foregroundStyle(.secondary)
+                        }
+                    }
+                    if permissions.libraryRegistrationInProgress {
+                        ProgressView("Opening Full Disk Access…")
+                    } else if blocked || (!permissions.libraryReady && (permissions.librarySetupPending || permissions.libraryStatus == .notChecked)) {
+                        Button("Request Full Disk Access…", action: model.requestLibraryAccess)
+                            .disabled(permissions.libraryChecking || needsInstallation)
+                    }
+                    if let instruction = permissions.libraryInstruction {
+                        Text(instruction).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if needsInstallation {
+                        Label("Install Tsundoku in Applications before requesting access.", systemImage: "externaldrive")
+                            .font(.caption)
+                        Button("Show Applications") { NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications")) }
+                    } else if blocked || (!permissions.libraryReady && permissions.librarySetupPending) {
+                        DisclosureGroup("App Not Listed?") {
+                            HStack(spacing: 12) {
+                                Image(nsImage: NSWorkspace.shared.icon(forFile: appURL.path)).resizable().frame(width: 36, height: 36)
+                                Text("Drag Tsundoku into the Full Disk Access list.").font(.caption)
+                            }
+                            .onDrag { NSItemProvider(object: appURL as NSURL) }
+                            IconButton("Show Tsundoku in Finder", systemImage: "folder") {
+                                NSWorkspace.shared.activateFileViewerSelecting([appURL])
                             }
                         }
-                        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
-                        .onDrag { needsInstallation ? NSItemProvider() : NSItemProvider(object: appURL as NSURL) }
-                        .opacity(needsInstallation ? 0.5 : 1)
-                        .accessibilityLabel("Tsundoku app. Drag into Full Disk Access.")
-                        Text("If an older Tsundoku entry stays blocked, remove it and add this copy.")
-                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    Text("Return here after enabling access. Your library will be checked and imported automatically. If access stays blocked, quit and reopen Tsundoku below; setup will resume.")
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack {
-                        Button("Open Full Disk Access…", action: permissions.requestLibraryAccess)
-                            .disabled(needsInstallation || permissions.libraryRegistrationInProgress || permissions.libraryChecking)
-                        IconButton("Show Tsundoku in Finder", systemImage: "folder") {
-                            NSWorkspace.shared.activateFileViewerSelecting([appURL])
-                        }
-                        IconButton("Copy App Location", systemImage: "doc.on.doc") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(appURL.path, forType: .string)
-                        }
+                    if permissions.libraryStatus == .notFound {
+                        Text("Download a book in Kindle or Apple Books, then import again.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     if let error = permissions.librarySettingsError {
                         Text(error).font(.caption).foregroundStyle(.secondary)
                     }
-                    Spacer(minLength: 0)
-                    if permissions.libraryRegistrationInProgress {
-                        ProgressView("Preparing Full Disk Access…")
-                    } else if permissions.libraryChecking {
-                        ProgressView("Verifying library access…")
-                    } else {
-                        Label(permissions.libraryStatus.title,
-                            systemImage: permissions.libraryStatus == .available ? "checkmark.circle" : "info.circle")
-                        if permissions.libraryStatus == .notFound {
-                            Text("Open Kindle or Apple Books and download a book before importing.")
-                                .font(.caption).foregroundStyle(.secondary)
+                    if model.hasCompletedImport {
+                        Text(model.lastImportResult ?? model.status).font(.caption).foregroundStyle(.secondary)
+                        if model.importError != nil {
+                            Button("Retry Import") { model.requestLibraryImport() }.disabled(permissions.relaunchPending || (model.isImporting && navigation.intent == .library))
                         }
                     }
                     if !permissions.libraryFailures.isEmpty {
-                        DisclosureGroup("Check Details") {
+                        DisclosureGroup("Access Details") {
                             ForEach(permissions.libraryFailures) { failure in
-                                Text("\(failure.source.displayName): \(failure.detail)")
-                                    .font(.caption).textSelection(.enabled)
+                                Text("\(failure.source.displayName): \(failure.detail)").font(.caption).textSelection(.enabled)
                             }
                         }
                     }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if permissions.libraryStatus == .blocked && !needsInstallation {
-                Button("Quit and Reopen Tsundoku", action: permissions.requestRelaunch)
-                    .help("Restart this copy and resume library setup.")
-                    .disabled(permissions.relaunchPending)
-            }
-            HStack {
-                Button("Re-check Library Access") {
-                    Task { await permissions.verifyLibraryAccess() }
-                }.disabled(permissions.libraryChecking || permissions.libraryRegistrationInProgress)
-                Spacer()
-                if permissions.libraryStatus == .available {
-                    Button("Done", action: onClose).keyboardShortcut(.defaultAction)
-                } else {
-                    Button("Later", action: onClose).keyboardShortcut(.cancelAction)
+                    if permissions.libraryStatus == .blocked && !needsInstallation {
+                        Button("Quit and Reopen Tsundoku") { permissions.requestRelaunch() }
+                            .disabled(permissions.relaunchPending || model.isImporting || model.capturePhase == .running)
+                    }
+                }.id(AccessFocus.library)
+
+                Section {
+                    permissionRow("Accessibility", detail: "Read and turn pages in the reading companion.",
+                        granted: permissions.companionReady, status: permissions.accessibility ? "Available" : "Not enabled",
+                        request: permissions.requestAccessibility, manage: permissions.openAccessibilitySettings)
+                        .id(AccessFocus.accessibility)
+                    permissionRow("Screen Recording", detail: "Capture pages for searchable PDFs and OCR.",
+                        granted: permissions.screenRecording, status: permissions.snapshot.screenStatus,
+                        request: permissions.requestScreenRecording, manage: permissions.openScreenSettings)
+                        .id(AccessFocus.screenRecording)
+                    if permissions.screenRecording {
+                        HStack {
+                            Text(permissions.isChecking ? "Verifying…" : "Verify screen access").font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            IconButton("Verify Screen Recording", systemImage: "checkmark.shield", tooltip: "Verify screen access. macOS may ask for authorization.") {
+                                Task { await permissions.verifyAccess() }
+                            }.disabled(permissions.isChecking)
+                        }
+                    }
+                    if permissions.readerAccessRequested, let focus = permissions.relaunchFocus(for: navigation.intent) {
+                        Button("Quit and Reopen Tsundoku") {
+                            permissions.requestRelaunch(focus: focus, intent: navigation.intent)
+                        }.disabled(permissions.relaunchPending || model.isImporting || model.capturePhase == .running)
+                    }
+                    if let error = permissions.relaunchError, permissions.relaunchErrorFocus != .library {
+                        Text(error).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let detail = permissions.snapshot.detail {
+                        DisclosureGroup("Check Details") { Text(detail).font(.caption).textSelection(.enabled) }
+                    }
+                } header: {
+                    HStack {
+                        Text("Live Reader and Capture")
+                        Spacer()
+                        IconButton("Re-check Reader Access", systemImage: "arrow.clockwise", action: { permissions.refresh() })
+                    }
+                } footer: {
+                    Text("Optional for library imports.")
                 }
             }
-        }.padding(24).frame(width: 540, height: 540)
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+            .task {
+                permissions.refresh()
+                if navigation.intent != .companion && navigation.intent != .capture {
+                    await permissions.verifyLibraryAccess()
+                }
+                if permissions.librarySetupPending && navigation.intent == nil {
+                    navigation.open(SettingsRoute(pane: .access, focus: .library, intent: .library), wasVisible: true)
+                }
+                if let focus = navigation.focus { scroll.scrollTo(focus, anchor: .center) }
+            }
+            .onChange(of: navigation.focus) { _, focus in
+                if let focus { scroll.scrollTo(focus, anchor: .center) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                if permissions.librarySetupPending || navigation.intent == .library {
+                    Task { await permissions.verifyLibraryAccess() }
+                }
+            }
+        }
+    }
+
+    private func sourceStatus(_ source: BookSource) -> String {
+        if permissions.readableLibrarySources.contains(source) { return "Readable" }
+        if let failure = permissions.libraryFailures.first(where: { $0.source == source }) {
+            return failure.accessDenied ? "Access blocked" : "Read failed"
+        }
+        return permissions.libraryStatus == .notChecked ? "Not checked" : "No local library"
+    }
+    private var taskTitle: String {
+        switch navigation.intent {
+        case .library, nil: permissions.libraryReady ? (permissions.libraryFailures.isEmpty ? "Library access is ready" : "Some library data is available") : "Set up library imports"
+        case .companion: permissions.companionReady ? "Reader access is ready" : "Set up the reading companion"
+        case .capture: permissions.captureReady ? "Capture access is ready" : "Set up capture access"
+        }
+    }
+    private var returnTitle: String {
+        switch navigation.intent {
+        case .library, nil: "Return to Library"
+        case .companion: "Return to Reader"
+        case .capture: "Return to Capture"
+        }
+    }
+    private var canReturn: Bool {
+        switch navigation.intent {
+        case .library, nil: !model.isImporting && (permissions.libraryReady || permissions.libraryStatus == .notFound)
+        case .companion: permissions.companionReady
+        case .capture: permissions.captureReady
+        }
+    }
+    private func permissionRow(_ title: String, detail: String, granted: Bool, status: String,
+        request: @escaping () -> Void, manage: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(status).font(.caption).foregroundStyle(.secondary)
+                if granted { IconButton("Manage \(title)", systemImage: "gearshape", action: manage) }
+                else { Button("Request \(title)…", action: request).controlSize(.small) }
+            }
+            Text(detail).font(.caption).foregroundStyle(.secondary)
+        }
     }
 }

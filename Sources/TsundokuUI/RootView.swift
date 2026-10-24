@@ -24,15 +24,6 @@ public struct RootView: View {
             }
             .frame(minWidth: 760, minHeight: 540)
         }
-        .background {
-            if let permissions = model.permissions {
-                LibraryAccessGuidePresenter(permissions: permissions, isPresented: $model.showLibraryAccessGuide)
-                    .frame(width: 0, height: 0)
-            }
-        }
-        .sheet(isPresented: $model.showPermissions) {
-            PermissionsView(model: model)
-        }
         .sheet(isPresented: $model.showImportReport) {
             LibraryImportReportView(model: model)
         }
@@ -90,8 +81,6 @@ public struct RootView: View {
             HistoryView(model: model)
         case .exports:
             ExportsView(model: model)
-        case .settings:
-            SettingsView(model: model)
         }
     }
 
@@ -100,7 +89,7 @@ public struct RootView: View {
         if model.permissionsNeeded && model.section == .exports {
             ToolbarItem {
                 Button {
-                    model.showPermissions = true
+                    model.requestCaptureAccess(pages: model.capturePageLimit)
                 } label: {
                     Label(
                         "Permissions", systemImage: "exclamationmark.triangle")
@@ -175,87 +164,5 @@ struct SidebarView: View {
                 .padding(.vertical, 8)
             }
         }
-    }
-}
-
-// MARK: - Permissions
-
-struct PermissionsView: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Form {
-                Section("Live page access") {
-                    Text(
-                        "These permissions enable live reader actions. macOS may separately ask for access to Kindle and Apple Books library data."
-                    )
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                }
-
-                Section("Accessibility") {
-                    LabeledContent("Status") {
-                        Text(
-                            model.permissionAccessibility
-                                ? "Available" : "Unavailable")
-                    }
-                    Text(
-                        "Read the current page, turn pages, and detect the "
-                            + "end of the book."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    Button(
-                        model.permissionAccessibility
-                            ? "Open Settings" : "Grant…"
-                    ) {
-                        if model.permissionAccessibility {
-                            model.openAccessibilitySettings()
-                        } else {
-                            model.requestAccessibility()
-                        }
-                    }
-                }
-
-                Section("Screen Recording") {
-                    LabeledContent("Status") {
-                        Text(
-                            model.permissionScreenStatus)
-                    }
-                    Text("Capture the page rectangle for PDF export.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button(
-                        model.permissionScreen ? "Open Settings" : "Grant…"
-                    ) {
-                        if model.permissionScreen {
-                            model.openScreenSettings()
-                        } else {
-                            model.requestScreenRecording()
-                        }
-                    }
-                }
-            }
-            .formStyle(.grouped)
-
-            Divider()
-
-            HStack {
-                IconButton("Re-check", systemImage: "arrow.clockwise", tooltip: "Verify reader access. macOS may ask for authorization.") {
-                    Task { await model.verifyPermissions() }
-                }.disabled(model.permissionChecking)
-                Spacer()
-                IconButton(
-                    "Done", systemImage: "xmark", tooltip: "Close permissions"
-                ) {
-                    model.refreshPermissions()
-                    model.showPermissions = false
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-            .padding()
-        }
-        .frame(width: 480, height: 460)
     }
 }

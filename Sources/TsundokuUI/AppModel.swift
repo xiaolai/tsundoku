@@ -12,7 +12,6 @@ public final class AppModel: ObservableObject {
         case highlights
         case history
         case exports
-        case settings
 
         public var id: String { rawValue }
 
@@ -22,7 +21,6 @@ public final class AppModel: ObservableObject {
             case .highlights: "Annotations"
             case .history: "History"
             case .exports: "Exports"
-            case .settings: "Settings"
             }
         }
 
@@ -32,7 +30,6 @@ public final class AppModel: ObservableObject {
             case .highlights: "highlighter"
             case .history: "clock.arrow.circlepath"
             case .exports: "doc.richtext"
-            case .settings: "gearshape"
             }
         }
     }
@@ -114,7 +111,7 @@ public final class AppModel: ObservableObject {
     @Published public var showSavedAINotes = false
     @Published public var sourceHealth: [BookSource: String] = [:]
     @Published public var sourceLastImport: [BookSource: Date] = [:]
-    public var openSettingsWindow: (() -> Void)?
+    public var openSettingsWindow: ((SettingsRoute) -> Void)?
     public var openSavedNotesWindow: (() -> Void)?
     @Published public var settings = AISettings.load() {
         didSet {
@@ -125,7 +122,6 @@ public final class AppModel: ObservableObject {
     @Published public var status = "Starting…"
     @Published public var notice: String?
     @Published public var isImporting = false
-    @Published public var showPermissions = false
     @Published public private(set) var permissionAccessibility = AXIsProcessTrusted()
     @Published public private(set) var permissionScreen = CGPreflightScreenCaptureAccess()
     @Published public private(set) var permissionCheckResult: String?
@@ -137,7 +133,6 @@ public final class AppModel: ObservableObject {
     @Published public var importError: String?
     @Published public var importFailures: [LibraryImportFailure] = []
     @Published public var showImportReport = false
-    @Published public var showLibraryAccessGuide = false
     @Published public var trackedBookID: String?
     @Published public var capturePhase: CapturePhase = .idle
     @Published public var captureProgress: Double = 0
@@ -150,7 +145,9 @@ public final class AppModel: ObservableObject {
     @Published public var originalNote: String?
     @Published public var popularHighlightsState: Bool?
     @Published public var popularHighlightsNote: String?
-    @Published public var capturePageLimit: Int?
+    @Published public var capturePageLimit: Int? = 10
+    private var captureAccessDraft: CaptureAccessDraft?
+    private let accessDefaults: UserDefaults
     @Published public var exportFolder: URL = FileManager.default.urls(
         for: .documentDirectory, in: .userDomainMask
     )[0].appendingPathComponent("Tsundoku")
@@ -195,8 +192,9 @@ public final class AppModel: ObservableObject {
     public init(
         archiveURL: URL? = nil, kindlePaths: KindlePaths? = nil,
         booksPaths: BooksPaths? = nil, recoverReaderSettings: Bool = true,
-        deferReaderRecovery: Bool = false
+        deferReaderRecovery: Bool = false, accessDefaults: UserDefaults = .standard
     ) {
+        self.accessDefaults = accessDefaults
         let arguments = CommandLine.arguments
         func launchPath(_ option: String) -> URL? {
             guard let index = arguments.firstIndex(of: option),
@@ -529,6 +527,7 @@ public final class AppModel: ObservableObject {
         hasImported = true
         TsundokuDiagnostics.shared.event("library_import_started")
         isImporting = true
+        let accessGeneration = permissions?.librarySetupGeneration
         importError = nil
         importFailures = []
         status = "Reading local stores…"
@@ -538,6 +537,7 @@ public final class AppModel: ObservableObject {
             var totalUser = 0
             var lastImportDate: Date?
             var importedSources: [String] = []
+            var committedSources = Set<BookSource>()
             var failures: [LibraryImportFailure] = []
 
             do {
@@ -556,6 +556,7 @@ public final class AppModel: ObservableObject {
                     totalUser += imported.userAnnotations
                     lastImportDate = imported.importedAt
                     importedSources.append("Kindle")
+                    committedSources.insert(.kindle)
                     self.sourceLastImport[.kindle] = imported.importedAt
                     try? archive.setMeta("last_import_source_Kindle", ISO8601DateFormatter().string(from: imported.importedAt))
                     self.sourceHealth[.kindle] = "Imported \(imported.books.formatted()) books · \(TsundokuFormat.relative(imported.importedAt))"
@@ -586,6 +587,7 @@ public final class AppModel: ObservableObject {
                         lastImportDate ?? imported.importedAt,
                         imported.importedAt)
                     importedSources.append("Apple Books")
+                    committedSources.insert(.appleBooks)
                     self.sourceLastImport[.appleBooks] = imported.importedAt
                     try? archive.setMeta("last_import_source_Apple Books", ISO8601DateFormatter().string(from: imported.importedAt))
                     self.sourceHealth[.appleBooks] = "Imported \(imported.books.formatted()) books · \(TsundokuFormat.relative(imported.importedAt))"
@@ -637,6 +639,9 @@ public final class AppModel: ObservableObject {
                 self.status = failures.first?.summary ?? "Library import failed."
                 self.post(self.status, seconds: 12)
             }
+            if let accessGeneration {
+                self.permissions?.completeLibrarySetup(importedSources: committedSources, failures: failures, generation: accessGeneration)
+            }
             self.lastImportResult = self.status
             self.reloadFromArchive()
             if self.importRequestedAfterCurrentRun {
@@ -663,8 +668,45 @@ public final class AppModel: ObservableObject {
     public func requestLibraryAccess() {
         if permissions == nil { permissions = PermissionsModel() }
         showImportReport = false
-        showLibraryAccessGuide = true
+        openAccess(focus: .library, intent: .library)
         permissions?.requestLibraryAccess()
+    }
+
+    public func openAccess(focus: AccessFocus, intent: AccessIntent? = nil) {
+        showImportReport = false
+        openSettingsWindow?(SettingsRoute(pane: .access, focus: focus, intent: intent))
+    }
+
+    public func requestCaptureAccess(pages: Int?) {
+        captureAccessDraft = CaptureAccessDraft(bookID: selectedBookID, pages: pages, settings: settings)
+        openAccess(focus: permissionAccessibility ? .screenRecording : .accessibility, intent: .capture)
+    }
+
+    public func returnToCapture() {
+        let stored = accessDefaults.data(forKey: "settings.captureAccessResume")
+            .flatMap { try? JSONDecoder().decode(CaptureAccessDraft.self, from: $0) }
+        let restored = stored.flatMap { (0..<(24 * 3600)).contains(Date().timeIntervalSince($0.createdAt)) ? $0 : nil }
+        if let draft = captureAccessDraft ?? restored {
+            selectedBookID = draft.bookID
+            capturePageLimit = draft.pages
+            draft.restore(into: &settings)
+        }
+        captureAccessDraft = nil
+        discardCaptureAccessRelaunch()
+        section = .exports
+    }
+
+    public func persistCaptureAccessForRelaunch() {
+        guard let draft = captureAccessDraft, let data = try? JSONEncoder().encode(draft) else { return }
+        accessDefaults.set(data, forKey: "settings.captureAccessResume")
+    }
+    public func discardCaptureAccessRelaunch() { accessDefaults.removeObject(forKey: "settings.captureAccessResume") }
+    public func cancelAccessTask(intent: AccessIntent? = nil) {
+        switch intent {
+        case .capture: captureAccessDraft = nil; discardCaptureAccessRelaunch(); permissions?.cancelReaderRecovery(intent: .capture)
+        case .library, nil: permissions?.cancelLibrarySetup()
+        case .companion: permissions?.cancelReaderRecovery(intent: .companion)
+        }
     }
 
     public func refreshPermissions() {
@@ -1004,7 +1046,7 @@ public final class AppModel: ObservableObject {
         guard capturePhase != .running else { return }
         refreshPermissions()
         guard !permissionsNeeded else {
-            showPermissions = true
+            requestCaptureAccess(pages: pages)
             return
         }
         // The probe and the crash recovery both open Kindle's settings panel;
@@ -1156,4 +1198,43 @@ public final class AppEnvironment {
     public static let shared = AppEnvironment()
     public let model = AppModel()
     private init() {}
+}
+
+/// A bounded resume bookmark, never a capture job. It contains only the book
+/// identity, page limit and capture preferences; no provider credentials.
+private struct CaptureAccessDraft: Codable {
+    let bookID: String?
+    let pages: Int?
+    let createdAt: Date
+    let options: CaptureAccessOptions
+    init(bookID: String?, pages: Int?, settings: AISettings) {
+        self.bookID = bookID; self.pages = pages; createdAt = Date()
+        options = CaptureAccessOptions(settings)
+    }
+    func restore(into value: inout AISettings) { options.restore(into: &value) }
+}
+private struct CaptureAccessOptions: Codable {
+    let pageSize: CapturePageSize
+    let fontSize: Int?
+    let booksFontSteps: Int
+    let cropTop: Int
+    let booksCropBottom: Int
+    let kindleCropBottom: Int
+    let cleanPage: Bool
+    let includeCover: Bool
+    let writeSidecars: Bool
+    init(_ settings: AISettings) {
+        pageSize = settings.capturePageSize; fontSize = settings.captureFontSize
+        booksFontSteps = settings.booksFontSteps; cropTop = settings.captureCropTop
+        booksCropBottom = settings.booksCropBottom; kindleCropBottom = settings.kindleCropBottom
+        cleanPage = settings.cleanPageDuringCapture; includeCover = settings.includeCoverPage
+        writeSidecars = settings.writeSidecars
+    }
+    func restore(into value: inout AISettings) {
+        value.capturePageSize = pageSize; value.captureFontSize = fontSize
+        value.booksFontSteps = booksFontSteps; value.captureCropTop = cropTop
+        value.booksCropBottom = booksCropBottom; value.kindleCropBottom = kindleCropBottom
+        value.cleanPageDuringCapture = cleanPage; value.includeCoverPage = includeCover
+        value.writeSidecars = writeSidecars
+    }
 }

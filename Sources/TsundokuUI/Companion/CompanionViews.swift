@@ -20,6 +20,8 @@ public final class CompanionSettingsStore: ObservableObject {
     @Published public var loginItemStatus = ""
 
     public var onChange: ((CompanionSettings) -> Void)?
+    public var onTestShortcut: (() -> Void)?
+    public func testShortcut() { onTestShortcut?() }
 
     public init(settings: CompanionSettings = .load()) {
         self.settings = settings
@@ -124,139 +126,7 @@ public struct CompanionPanelView: View {
     }
 }
 
-// MARK: - Onboarding
-
-public struct CompanionOnboardingView: View {
-    @ObservedObject var permissions: PermissionsModel
-    @ObservedObject var settings: CompanionSettingsStore
-    let onOpenLoginItemSettings: () -> Void
-    let onClose: () -> Void
-
-    public init(
-        permissions: PermissionsModel,
-        settings: CompanionSettingsStore,
-        onOpenLoginItemSettings: @escaping () -> Void,
-        onClose: @escaping () -> Void
-    ) {
-        self.permissions = permissions
-        self.settings = settings
-        self.onOpenLoginItemSettings = onOpenLoginItemSettings
-        self.onClose = onClose
-    }
-
-    public var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
-                Image(systemName: "eyeglasses")
-                    .font(.system(size: 26, weight: .medium))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Set Up Tsundoku")
-                        .font(.headline)
-                    Text(
-                        "Allow library imports and live reader actions."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-            }
-
-            Divider()
-
-            LibraryAccessRow(permissions: permissions, resumeSetup: true)
-
-            Divider()
-
-            permissionRow(
-                title: "Accessibility",
-                detail:
-                    "Read the current page and control the reader.",
-                granted: permissions.accessibility,
-                grant: permissions.requestAccessibility,
-                openSettings: permissions.openAccessibilitySettings)
-
-            permissionRow(
-                title: "Screen Recording",
-                detail:
-                    "Capture PDFs and read pages with OCR.",
-                granted: permissions.screenRecording,
-                status: permissions.snapshot.screenStatus,
-                grant: permissions.requestScreenRecording,
-                openSettings: permissions.openScreenSettings)
-
-            Divider()
-
-            LabeledContent("Start at login") {
-                HStack(spacing: 8) {
-                    Toggle("", isOn: $settings.settings.launchAtLogin)
-                        .labelsHidden()
-                    Text(settings.loginItemStatus)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if settings.loginItemStatus == "Requires approval" {
-                        IconButton(
-                            "Approve…", systemImage: "gearshape",
-                            action: onOpenLoginItemSettings
-                        )
-                        .controlSize(.small)
-                    }
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            HStack {
-                IconButton("Re-check", systemImage: "arrow.clockwise", tooltip: "Check reader access. macOS may ask for authorization.") {
-                    Task {
-                        await permissions.verifyAccess()
-                        await permissions.verifyLibraryAccess()
-                    }
-                }
-                .disabled(permissions.isChecking || permissions.libraryChecking)
-                Spacer()
-                Button(permissions.setupIncomplete ? "Continue Anyway" : "Done") {
-                    onClose()
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(22)
-        .frame(width: 560, height: 620)
-        .onReceive(
-            NotificationCenter.default.publisher(
-                for: NSApplication.didBecomeActiveNotification)
-        ) { _ in
-            permissions.refresh()
-        }
-    }
-
-    private func permissionRow(
-        title: String, detail: String, granted: Bool, status: String? = nil,
-        grant: @escaping () -> Void,
-        openSettings: @escaping () -> Void
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(title).font(.subheadline.weight(.semibold))
-                Spacer()
-                Text(status ?? (granted ? "Available" : "Unavailable"))
-                    .font(.caption)
-                    .foregroundStyle(granted && status != "Check failed" && status != "Checking…" ? .green : .orange)
-                if granted {
-                    IconButton(
-                        "Settings…", systemImage: "gearshape",
-                        action: openSettings)
-                } else {
-                    Button("Grant…", action: grant).controlSize(.small)
-                }
-            }
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-}
-
-// MARK: - Hot key recorder
+// MARK: - Companion preferences
 
 public struct CompanionSettingsSection: View {
     @ObservedObject var store: CompanionSettingsStore
@@ -306,8 +176,7 @@ public struct CompanionSettingsSection: View {
                     "Test Shortcut", systemImage: "play",
                     tooltip: "Test the shortcut from another app"
                 ) {
-                    store.hotKeyTestNote =
-                        "Press the shortcut in another app to check delivery and conflicts."
+                    store.testShortcut()
                 }
                 .controlSize(.small)
             }

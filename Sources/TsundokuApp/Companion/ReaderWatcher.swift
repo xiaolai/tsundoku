@@ -76,6 +76,12 @@ final class ReaderWatcher {
         stopTracker()
     }
 
+    @MainActor func focusReader() -> Bool {
+        guard let snapshot = lastRawSnapshot,
+            let app = NSRunningApplication(processIdentifier: snapshot.pid) else { return false }
+        return app.activate(options: [])
+    }
+
     private static func application(from note: Notification)
         -> NSRunningApplication?
     {

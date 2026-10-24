@@ -41,8 +41,12 @@ public final class PermissionsModel: ObservableObject {
     private let screenAccessCheck: @MainActor () async throws -> Void
     private var previousPreflight: Bool
     private var checkScreenOnNextActivation = false
+    private var requestedReaderFocus: AccessFocus?
+    private let relaunchTimeout: Duration
     @Published public private(set) var relaunchPending = false
-    @Published public private(set) var activeLibraryGuideID: UUID?
+    @Published public private(set) var relaunchError: String?
+    @Published public private(set) var relaunchErrorFocus: AccessFocus?
+    @Published public private(set) var readerAccessRequested = false
     @Published public private(set) var libraryStatus: LibraryAccessStatus = .notChecked
     @Published public private(set) var libraryChecking = false
     @Published public private(set) var libraryRegistrationInProgress = false
@@ -54,6 +58,7 @@ public final class PermissionsModel: ObservableObject {
     private var libraryRegistrationTask: Task<Void, Never>?
     private var libraryRegistrationID: UUID?
     private let setupDefaults: UserDefaults
+    private let resumeAccessKey = "permissions.resumeAccessOnLaunch"
     private let librarySetupKey = "permissions.librarySetupPending"
     private let librarySetupDateKey = "permissions.librarySetupRequestedAt"
     private let now: () -> Date
@@ -61,6 +66,7 @@ public final class PermissionsModel: ObservableObject {
     private var importedSetupSources: Set<BookSource> = []
     @Published public private(set) var readableLibrarySources: [BookSource] = []
     public var onRelaunchRequested: (() throws -> Void)?
+    public var onRelaunchFailed: (() -> Void)?
     private var applicationIsTerminating = false
     public var onLibraryAccessReady: (() -> Void)?
 
@@ -70,8 +76,59 @@ public final class PermissionsModel: ObservableObject {
         let age = now().timeIntervalSince(requested)
         return age >= 0 && age < 24 * 3600
     }
-    public var setupIncomplete: Bool {
-        missing || (libraryStatus != .available && libraryStatus != .notFound)
+    public var librarySetupGeneration: Int { setupGeneration }
+    public var libraryReady: Bool { !readableLibrarySources.isEmpty }
+    public var companionReady: Bool { accessibility }
+    public var captureReady: Bool { accessibility && screenRecording }
+    public var libraryInstruction: String? {
+        if libraryReady {
+            guard librarySetupPending, libraryFailures.contains(where: \.accessDenied) else { return nil }
+            return "Enable Tsundoku in Full Disk Access to import the blocked library, then return here."
+        }
+        guard librarySetupPending || libraryStatus == .blocked else { return nil }
+        return "In Full Disk Access, turn on Tsundoku, then return here."
+    }
+    public var accessResumeFocus: AccessFocus? {
+        guard setupDefaults.bool(forKey: resumeAccessKey),
+            let requested = setupDefaults.object(forKey: "permissions.resumeAccessRequestedAt") as? Date,
+            (0..<(24 * 3600)).contains(now().timeIntervalSince(requested)) else { return nil }
+        let focus = setupDefaults.string(forKey: "permissions.resumeAccessFocus").flatMap(AccessFocus.init(rawValue:)) ?? .library
+        return focus != .library || librarySetupPending ? focus : nil
+    }
+    public var accessResumeIntent: AccessIntent? {
+        guard let focus = accessResumeFocus else { return nil }
+        return setupDefaults.string(forKey: "permissions.resumeAccessIntent").flatMap(AccessIntent.init(rawValue:))
+            ?? (focus == .library ? .library : focus == .accessibility ? .companion : .capture)
+    }
+    private func clearAccessResume() {
+        for key in [resumeAccessKey, "permissions.resumeAccessRequestedAt", "permissions.resumeAccessFocus", "permissions.resumeAccessIntent"] {
+            setupDefaults.removeObject(forKey: key)
+        }
+    }
+    func cancelReaderRecovery(intent: AccessIntent) {
+        if accessResumeIntent == intent { clearAccessResume() }
+    }
+    public func consumeAccessResume() -> Bool {
+        let resume = accessResumeFocus != nil
+        clearAccessResume()
+        return resume
+    }
+    /// Called after the importer commits a readable source, including an empty store.
+    public func completeLibrarySetup(importedSources: Set<BookSource>, failures: [LibraryImportFailure] = [], generation: Int? = nil) {
+        guard generation == nil || generation == setupGeneration, librarySetupPending, !importedSources.isEmpty else { return }
+        guard !failures.contains(where: \.accessDenied) else { return }
+        cancelLibrarySetup(clearResume: accessResumeFocus == nil || accessResumeFocus == .library)
+    }
+
+    public func relaunchFocus(for intent: AccessIntent?) -> AccessFocus? {
+        switch intent {
+        case .library: return nil
+        case .companion: return companionReady ? nil : .accessibility
+        case .capture: return !accessibility ? .accessibility : screenRecording ? nil : .screenRecording
+        case nil:
+            guard let focus = requestedReaderFocus else { return nil }
+            return focus == .accessibility ? (accessibility ? nil : focus) : (screenRecording ? nil : focus)
+        }
     }
 
     public var accessibility: Bool { snapshot.accessibility }
@@ -133,6 +190,7 @@ public final class PermissionsModel: ObservableObject {
             return NSWorkspace.shared.open(url)
         },
         setupDefaults: UserDefaults = .standard,
+        relaunchTimeout: Duration = .seconds(65),
         now: @escaping () -> Date = Date.init
     ) {
         self.accessibilityCheck = accessibilityCheck
@@ -142,6 +200,7 @@ public final class PermissionsModel: ObservableObject {
         self.librarySettingsOpener = librarySettingsOpener
         self.libraryRegistrationRequest = libraryRegistrationRequest
         self.setupDefaults = setupDefaults
+        self.relaunchTimeout = relaunchTimeout
         self.now = now
         if setupDefaults.bool(forKey: librarySetupKey), setupDefaults.object(forKey: librarySetupDateKey) == nil {
             setupDefaults.set(now(), forKey: librarySetupDateKey)
@@ -243,7 +302,7 @@ public final class PermissionsModel: ObservableObject {
 
     public func prepareForTermination() { applicationIsTerminating = true }
 
-    public func cancelLibrarySetup() {
+    public func cancelLibrarySetup(clearResume: Bool = true) {
         guard !applicationIsTerminating else { return }
         libraryRegistrationID = nil
         libraryRegistrationTask?.cancel()
@@ -253,6 +312,7 @@ public final class PermissionsModel: ObservableObject {
         importedSetupSources.removeAll()
         setupDefaults.removeObject(forKey: librarySetupKey)
         setupDefaults.removeObject(forKey: librarySetupDateKey)
+        if clearResume, accessResumeFocus == nil || accessResumeFocus == .library { clearAccessResume() }
     }
 
     public func resumeLibrarySetupIfNeeded() {
@@ -266,7 +326,7 @@ public final class PermissionsModel: ObservableObject {
         let pendingAtStart = librarySetupPending
         let generation = setupGeneration
         let result = await libraryAccessCheck()
-        guard !applicationIsTerminating else { libraryChecking = false; return }
+        guard !applicationIsTerminating, generation == setupGeneration else { libraryChecking = false; return }
         libraryStatus = result.status
         readableLibrarySources = result.readableSources
         libraryFailures = result.failures
@@ -274,9 +334,7 @@ public final class PermissionsModel: ObservableObject {
         guard generation == setupGeneration, pendingAtStart, librarySetupPending, !libraryRegistrationInProgress else { return }
         let newSources = Set(result.readableSources).subtracting(importedSetupSources)
         importedSetupSources.formUnion(newSources)
-        if result.status == .available || result.status == .notFound {
-            cancelLibrarySetup()
-        }
+        if result.status == .notFound { cancelLibrarySetup(clearResume: accessResumeFocus == nil || accessResumeFocus == .library) }
         if !newSources.isEmpty { onLibraryAccessReady?() }
     }
 
@@ -285,44 +343,66 @@ public final class PermissionsModel: ObservableObject {
         onLibraryAccessReady?()
     }
 
-    public func claimLibraryGuide(_ id: UUID) { activeLibraryGuideID = id }
-
-    public func dismissLibraryGuide(_ id: UUID) {
-        guard activeLibraryGuideID == id else { return }
-        activeLibraryGuideID = nil
-        cancelLibrarySetup()
-    }
-
-    public func requestRelaunch() {
-        guard !relaunchPending else { return }
-        // Relaunch must retain setup intent even if a guide is torn down during termination.
-        setupDefaults.set(true, forKey: librarySetupKey)
-        setupDefaults.set(now(), forKey: librarySetupDateKey)
+    public func requestRelaunch(focus: AccessFocus = .library, intent: AccessIntent? = nil) {
+        guard !relaunchPending, !applicationIsTerminating else { return }
+        relaunchError = nil
+        relaunchErrorFocus = focus
+        let hadLibraryIntent = librarySetupPending
+        let previousLibraryDate = setupDefaults.object(forKey: librarySetupDateKey)
+        let requestGeneration = setupGeneration
+        // Only an explicit restart arms future presentation.
+        if focus == .library {
+            setupDefaults.set(true, forKey: librarySetupKey)
+            setupDefaults.set(now(), forKey: librarySetupDateKey)
+        }
+        setupDefaults.set(true, forKey: resumeAccessKey)
+        setupDefaults.set(now(), forKey: "permissions.resumeAccessRequestedAt")
+        setupDefaults.set(focus.rawValue, forKey: "permissions.resumeAccessFocus")
+        setupDefaults.set((intent ?? (focus == .library ? .library : focus == .accessibility ? .companion : .capture)).rawValue,
+            forKey: "permissions.resumeAccessIntent")
+        func failedRelaunch() {
+            clearAccessResume()
+            if focus == .library && setupGeneration == requestGeneration {
+                if hadLibraryIntent { setupDefaults.set(previousLibraryDate, forKey: librarySetupDateKey) }
+                else { cancelLibrarySetup() }
+            }
+            onRelaunchFailed?()
+        }
+        func reportFailure(_ message: String) {
+            relaunchError = message
+            if focus == .library { librarySettingsError = message }
+        }
         guard let onRelaunchRequested else {
-            librarySettingsError = "Quit Tsundoku, then reopen it from Applications."
+            reportFailure("Quit Tsundoku, then reopen it from Applications.")
             return
         }
         relaunchPending = true
         do {
             try onRelaunchRequested()
             Task { [weak self] in
-                try? await Task.sleep(for: .seconds(65))
+                try? await Task.sleep(for: self?.relaunchTimeout ?? .seconds(65))
                 guard let self, !self.applicationIsTerminating else { return }
                 self.relaunchPending = false
-                self.librarySettingsError = "Tsundoku did not quit. Close any open dialog, then try again."
+                failedRelaunch()
+                reportFailure("Tsundoku did not quit. Close any open dialog, then try again.")
             }
         } catch {
+            failedRelaunch()
             relaunchPending = false
-            librarySettingsError = "Could not reopen Tsundoku: \(error.localizedDescription). Quit and reopen it from Applications."
+            reportFailure("Could not reopen Tsundoku: \(error.localizedDescription). Quit and reopen it from Applications.")
         }
     }
 
     public func requestAccessibility() {
+        readerAccessRequested = true
+        requestedReaderFocus = .accessibility
         _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
         openAccessibilitySettings()
     }
 
     public func requestScreenRecording() {
+        readerAccessRequested = true
+        requestedReaderFocus = .screenRecording
         _ = CGRequestScreenCaptureAccess()
         openScreenSettings()
     }

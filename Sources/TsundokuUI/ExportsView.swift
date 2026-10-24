@@ -4,7 +4,10 @@ import TsundokuCore
 
 public struct ExportsView: View {
     @ObservedObject var model: AppModel
-    @State private var pageLimit: PageLimit = .ten
+    private var pageLimit: Binding<PageLimit> {
+        Binding(get: { PageLimit.allCases.first { $0.pages == model.capturePageLimit } ?? .ten },
+            set: { model.capturePageLimit = $0.pages })
+    }
 
     public init(model: AppModel) {
         self.model = model
@@ -43,7 +46,7 @@ public struct ExportsView: View {
                         .lineLimit(2)
                 }
 
-                Picker("Pages", selection: $pageLimit) {
+                Picker("Pages", selection: pageLimit) {
                     ForEach(PageLimit.allCases) { limit in
                         Text(limit.title).tag(limit)
                     }
@@ -187,7 +190,7 @@ public struct ExportsView: View {
                         }
                     } else {
                         Button {
-                            model.startCapture(pages: pageLimit.pages)
+                            model.startCapture(pages: model.capturePageLimit)
                         } label: {
                             Label("Start Capture", systemImage: "play.fill")
                         }
@@ -213,7 +216,7 @@ public struct ExportsView: View {
                         "Review Permissions…", systemImage: "lock.shield",
                         tooltip: "Review capture permissions"
                     ) {
-                        model.showPermissions = true
+                        model.requestCaptureAccess(pages: model.capturePageLimit)
                     }
                 }
             }

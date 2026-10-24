@@ -24,9 +24,9 @@ final class ArtifactsWindowController: NSObject, NSWindowDelegate {
 
     func modelIfCreated() -> AppModel? { model }
 
-    func show(section: AppModel.Section, importLibrary: Bool) {
+    func show(section: AppModel.Section? = nil, importLibrary: Bool) {
         let model = ensureModel()
-        model.section = section
+        if let section { model.section = section }
         model.activate(importLibrary: importLibrary)
         let window = ensureWindow(model: model)
         window.makeKeyAndOrderFront(nil)
@@ -34,7 +34,7 @@ final class ArtifactsWindowController: NSObject, NSWindowDelegate {
         TsundokuDiagnostics.shared.event(
             "artifacts_window_shown",
             [
-                "section": section.rawValue,
+                "section": model.section.rawValue,
                 "import_requested": importLibrary,
                 "window_visible": window.isVisible,
                 "activation_policy": NSApp.activationPolicy().rawValue,
