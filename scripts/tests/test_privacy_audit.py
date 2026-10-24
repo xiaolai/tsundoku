@@ -140,5 +140,34 @@ class SignedResourceEnvelopeTests(unittest.TestCase):
             self.assertNotIn(token, str(report))
 
 
+class HistoricalFindingPolicyTests(unittest.TestCase):
+    def test_exact_historical_findings_are_allowed_only_outside_head(self):
+        findings = [{'rule': 'internal-host', 'object': 'old'}]
+        kept, count = audit.filter_allowed_history(
+            findings, {('internal-host', 'old')}, {'other'})
+        self.assertEqual((kept, count), ([], 1))
+        kept, count = audit.filter_allowed_history(
+            findings, {('internal-host', 'old')}, {'old'})
+        self.assertEqual((kept, count), (findings, 0))
+        kept, count = audit.filter_allowed_history(
+            findings, {('private-doc-link', 'old')}, {'other'})
+        self.assertEqual((kept, count), (findings, 0))
+
+    def test_no_policy_keeps_every_finding(self):
+        findings = [{'rule': 'internal-host', 'object': 'old'}]
+        self.assertEqual(audit.filter_allowed_history(findings, set(), set()), (findings, 0))
+
+
+class CodeSignatureTests(unittest.TestCase):
+    def test_code_signature_blob_is_excluded(self):
+        import struct
+        payload = b'public-code-signature-hash'
+        header = struct.pack('<IiiIIIII', 0xfeedfacf, 0x0100000c, 0, 2, 1, 16, 0, 0)
+        command = struct.pack('<IIII', 0x1d, 16, 48, len(payload))
+        data = header + command + payload
+        self.assertEqual(audit.without_code_signature(data), header + command)
+        self.assertEqual(audit.without_code_signature(b'not-a-macho'), b'not-a-macho')
+
+
 if __name__ == '__main__':
     unittest.main()

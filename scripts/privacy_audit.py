@@ -90,6 +90,21 @@ def contact_findings(raw, location, object_id, allowed):
     return result
 
 
+def filter_allowed_history(findings, allowed, head_oids):
+    """Suppress exact historical findings, but never the same bytes at HEAD."""
+    if not allowed:
+        return findings, 0
+    kept = []
+    allowed_count = 0
+    for item in findings:
+        if item.get('object') not in head_oids and (
+            item.get('rule'), item.get('object')) in allowed:
+            allowed_count += 1
+        else:
+            kept.append(item)
+    return kept, allowed_count
+
+
 def repository_report(root, run_gitleaks=True):
     root = Path(root).resolve()
     result = []; metadata = bytearray(); checked = set(); forbidden_env = False
@@ -163,14 +178,8 @@ def repository_report(root, run_gitleaks=True):
             for line in git(root, 'ls-tree', '-r', 'HEAD').decode().splitlines()
             if line
         }
-        kept = []
-        for item in unique:
-            if item.get('object') not in head_oids and (
-                item.get('rule'), item.get('object')) in allowed_historical:
-                allowed_count += 1
-            else:
-                kept.append(item)
-        unique = kept
+        unique, allowed_count = filter_allowed_history(
+            unique, allowed_historical, head_oids)
     return {'schema': 1, 'scope': 'all-local-refs-and-tracked-worktree', 'commits': len(commits),
             'checked_objects_and_paths': len(checked), 'gitleaks_ran': run_gitleaks and not forbidden_env,
             'allowed_historical_findings': allowed_count,
