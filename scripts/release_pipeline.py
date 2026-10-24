@@ -146,6 +146,26 @@ def gatekeeper(path, image=False):
             'Gatekeeper did not accept Notarized Developer ID.')
 
 
+def compiler_warnings(output):
+    # SwiftPM colourises diagnostics even when it is not writing to a terminal,
+    # so the escape sequences must go before matching 'warning:'.
+    clean = re.sub(r'\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\', '', output)
+    return sorted({line.strip() for line in clean.splitlines() if ' warning: ' in line or line.startswith('warning: ')})
+
+
+def check_warnings():
+    # Warnings are defects nobody reads; a stale one must block the release
+    # instead of shipping with the artifact. A scratch path forces a full
+    # compile, because an incremental build only reprints what it rebuilds.
+    with tempfile.TemporaryDirectory(prefix='tsundoku-warning-check-') as scratch:
+        process = subprocess.run(['swift', 'build', '--build-tests', '--scratch-path', scratch],
+                                 cwd=ROOT, capture_output=True, text=True)
+    output = process.stdout + process.stderr
+    require(process.returncode == 0, 'Warning-check build failed: ' + output[-2000:])
+    found = compiler_warnings(output)
+    require(not found, 'Compiler warnings are release-blocking:\n' + '\n'.join(found[:20]))
+
+
 def build(directory, state, args):
     require(args.profile, 'Pass --profile with an existing notarytool Keychain profile.')
     audit(directory)
@@ -156,6 +176,7 @@ def build(directory, state, args):
     app = directory / 'Tsundoku.app'; zipped = directory / 'Tsundoku.zip'
     built_record = directory / 'built.json'
     if not built_record.exists():
+        check_warnings()
         command(['python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-v'])
         command(['swift', 'test'])
         command(['bash', 'scripts/build-app.sh'], env=env)

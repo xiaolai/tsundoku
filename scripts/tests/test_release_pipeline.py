@@ -8,6 +8,15 @@ import release_pipeline as release
 
 
 class ReleasePipelineTests(unittest.TestCase):
+    def test_compiler_warnings_are_extracted_and_deduplicated(self):
+        output = ('\x1b[1;33mwarning: \x1b[1;39mcoloured dependency note\x1b[0m\n'
+                  '/src/A.swift:1:2: warning: unused variable\n'
+                  'Compiling B\n/src/A.swift:1:2: warning: unused variable\n'
+                  'error: not a warning\n')
+        self.assertEqual(release.compiler_warnings(output),
+                         ['/src/A.swift:1:2: warning: unused variable', 'warning: coloured dependency note'])
+        self.assertEqual(release.compiler_warnings('Build complete!\n'), [])
+
     def test_manifest_requires_exact_public_asset_allowlist(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
