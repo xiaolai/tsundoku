@@ -88,7 +88,7 @@ final class InspectorAnchorView: NSView {
                     : [.titled, .closable, .resizable, .utilityWindow],
                 backing: .buffered, defer: false)
             panel.identifier = NSUserInterfaceItemIdentifier(
-                "TsundokuInspector")
+                TsundokuWindowIdentifier.inspector)
             // The access guide must never cover the foreground System Settings app.
             panel.isFloatingPanel = !keepsVisibleWhenInactive
             if keepsVisibleWhenInactive { panel.level = .normal }

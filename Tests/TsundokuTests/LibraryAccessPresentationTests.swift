@@ -34,12 +34,4 @@ struct LibraryAccessPresentationTests {
         #expect(!command[1].contains(path.path))
         #expect(Array(command.suffix(4)) == ["123", path.path, "--archive-path", "a;b"])
     }
-    @Test func expandingSettingsNearAnEdgeKeepsTheWindowVisible() {
-        let visible = NSRect(x: 100, y: 50, width: 900, height: 700)
-        let expanded = NSRect(x: 800, y: -300, width: 640, height: 620)
-        let fitted = SettingsWindowGeometry.constrain(expanded, to: visible)
-        #expect(visible.contains(fitted))
-        #expect(fitted.size == expanded.size)
-    }
-
 }

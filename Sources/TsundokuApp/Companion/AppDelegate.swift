@@ -1,38 +1,69 @@
 import AppKit
 import ApplicationServices
 import Carbon
+import Combine
 import SwiftUI
 import TsundokuCore
 import TsundokuUI
 
-@main
-enum TsundokuMain {
-    static func main() {
-        let application = NSApplication.shared
-        let delegate = AppDelegate()
-        application.delegate = delegate
-        application.setActivationPolicy(.accessory)
-        application.run()
-    }
-}
-
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let settings = CompanionSettingsStore()
     private let permissions = PermissionsModel()
     private var companion: CompanionController!
     private let watcher = ReaderWatcher()
     private let hotKey = GlobalHotKey()
-    private var statusItem: StatusItemController!
-    private var artifacts: ArtifactsWindowController!
-    private let settingsNavigation = SettingsNavigation()
-    private var settingsWindow: SettingsWindowController?
-    private var appModel: AppModel?
+    let settingsNavigation = SettingsNavigation()
+    let providerState: ProviderSettingsState
+    let windowBridge = SceneWindowBridge()
+
+    @Published private(set) var appModel: AppModel?
+    @Published private(set) var menuRevision = 0
+    @Published private(set) var feedbackSymbol = "eyeglasses"
+    @Published private(set) var feedbackNote = ""
+    @Published private(set) var panelOpen = false
+    @Published private(set) var readerPresent = false
+    @Published private(set) var launchAtLogin = false
+    @Published private(set) var libraryVisible = false
+    @Published private(set) var settingsVisible = false
+
+    private var cancellables: Set<AnyCancellable> = []
+    private var libraryWindow: NSWindow?
+    private var settingsWindow: NSWindow?
     private var loginStatus = ""
     private var hotKeyTestArmed = false
     private var appliedHotKey: CompanionHotKey?
     private var appliedLaunchAtLogin: Bool?
     private var hotKeyTestTimeout: Task<Void, Never>?
+    private var feedbackTask: Task<Void, Never>?
+    /// Set when this delegate opened Settings with a route; the Settings scene
+    /// then keeps that pane instead of resetting to the ordinary pane.
+    private var settingsPresentationRouted = false
+
+    override init() {
+        let arguments = CommandLine.arguments
+        if arguments.contains("--settings-fixture"),
+            arguments.contains("--no-system-integrations")
+        {
+            var saves = 0
+            providerState = ProviderSettingsState(
+                loadKey: { "fixture-key" },
+                saveKey: { _ in
+                    saves += 1
+                    return saves == 1 ? -1 : 0
+                },
+                connectionTest: { _ in "Connected · Fixture" })
+        } else {
+            providerState = ProviderSettingsState()
+        }
+        super.init()
+    }
+
+    /// Set before the first window exists so Launch Services never shows a
+    /// Dock icon for this menu-bar app.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = CommandLine.arguments
@@ -59,11 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         permissions.onRelaunchFailed = { [weak self] in self?.appModel?.discardCaptureAccessRelaunch() }
         applyAppearance(arguments)
         NSApp.setActivationPolicy(.accessory)
-        buildMainMenu()
 
-        artifacts = ArtifactsWindowController { [weak self] in
-            self?.ensureAppModel() ?? AppModel()
-        }
         companion = CompanionController(
             settings: settings, permissions: permissions,
             appModelFactory: { [weak self] in
@@ -73,7 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self?.shellStatus() ?? [:]
         }
         companion.onPresentationChange = { [weak self] _, _ in
-            self?.updateStatusItem()
+            self?.refreshStatusMenu()
         }
         companion.start()
 
@@ -86,8 +113,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(spaceChanged),
             name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+        for name in [
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.willCloseNotification,
+        ] {
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(windowStateChanged(_:)),
+                name: name, object: nil)
+        }
 
-        configureStatusItem()
         if !arguments.contains("--no-system-integrations") { configureHotKey() }
         settings.onChange = { [weak self] settings in
             self?.applySettings(settings, userInitiated: true)
@@ -112,19 +146,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         settingsNavigation.onReturnToTask = { [weak self] intent, close in
             guard let self else { return }
-            if close { self.settingsWindow?.close() }
+            if close { self.closeSettingsWindow() }
             switch intent {
             case .library:
-                self.artifacts.show(importLibrary: false)
+                self.openLibrary(importLibrary: false)
             case .capture:
                 self.ensureAppModel().returnToCapture()
-                self.artifacts.show(importLibrary: false)
+                self.openLibrary(importLibrary: false)
             case .companion:
                 if self.watcher.focusReader() {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.companion.showPanel() }
                 } else {
                     self.ensureAppModel().post("Open a book in Kindle or Apple Books, then use the companion shortcut.")
-                    self.artifacts.show(importLibrary: false)
+                    self.openLibrary(importLibrary: false)
                 }
             }
         }
@@ -145,13 +179,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
         }
 
+        refreshStatusMenu()
         runLaunchArguments(arguments)
         logLaunch(arguments)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        providerState.invalidateTest()
         permissions.prepareForTermination()
-        settingsWindow?.prepareForTermination()
         companion?.writeState()
         // Stopping the watcher emits a nil snapshot, which would overwrite the
         // state this run is meant to leave behind as evidence.
@@ -177,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationShouldHandleReopen(
         _ sender: NSApplication, hasVisibleWindows flag: Bool
     ) -> Bool {
-        if artifacts?.isVisible != true {
+        if !libraryVisible {
             openLibrary()
         }
         return true
@@ -196,14 +231,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         guard status != settings.loginItemStatus else { return }
         loginStatus = status
         settings.loginItemStatus = status
-        updateStatusItem()
+        refreshStatusMenu()
         TsundokuDiagnostics.shared.event(
             "login_item_refreshed", ["status": status])
     }
 
     // MARK: - Model
 
-    private func ensureAppModel() -> AppModel {
+    @discardableResult
+    func ensureAppModel() -> AppModel {
         if let appModel { return appModel }
         let model = AppModel(deferReaderRecovery: true)
         model.companionSettings = settings
@@ -224,43 +260,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         model.openSettingsWindow = { [weak self] route in self?.openSettings(route) }
         model.openSavedNotesWindow = { [weak self] in
-            guard let self else { return }
-            self.artifacts.show(section: .highlights, importLibrary: false)
-            self.appModel?.showSavedAINotes = true
+            self?.showSavedNotes()
         }
         appModel = model
+        model.objectWillChange
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.menuRevision += 1 }
+            }
+            .store(in: &cancellables)
         TsundokuDiagnostics.shared.event("app_model_created")
         return model
     }
 
-    // MARK: - Services
+    // MARK: - Status menu
 
-    private func configureStatusItem() {
-        statusItem = StatusItemController()
-        statusItem.onShowCompanion = { [weak self] in
-            self?.companion.showPanel()
-        }
-        statusItem.onHideCompanion = { [weak self] in
-            self?.companion.closePanel()
-        }
-        statusItem.onOpenLibrary = { [weak self] in
-            self?.openLibrary()
-        }
-        statusItem.onOpenSettings = { [weak self] in
-            self?.openSettings()
-        }
-        statusItem.onToggleLaunchAtLogin = { [weak self] in
-            guard let self else { return }
-            self.settings.settings.launchAtLogin.toggle()
-        }
-        statusItem.onTestShortcut = { [weak self] in
-            self?.settings.testShortcut()
-        }
-        statusItem.onQuit = {
-            NSApp.terminate(nil)
-        }
-        updateStatusItem()
+    func showCompanion() { companion?.showPanel() }
+    func hideCompanion() { companion?.closePanel() }
+    func setLaunchAtLogin(_ enabled: Bool) {
+        settings.settings.launchAtLogin = enabled
     }
+    func testShortcut() { settings.testShortcut() }
+
+    private func refreshStatusMenu() {
+        let nextPanel = companion?.isPanelOpen ?? false
+        let nextReader = companion?.canShowPanel ?? false
+        let nextLaunch = settings.settings.launchAtLogin
+        guard nextPanel != panelOpen || nextReader != readerPresent
+            || nextLaunch != launchAtLogin
+        else { return }
+        panelOpen = nextPanel
+        readerPresent = nextReader
+        launchAtLogin = nextLaunch
+        menuRevision += 1
+    }
+
+    // MARK: - Services
 
     private func configureHotKey() {
         hotKey.onPress = { [weak self] in
@@ -276,7 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self.hotKeyTestArmed = false
             self.hotKeyTestTimeout?.cancel()
             self.settings.hotKeyTestNote = "Shortcut received. If another app also reacts, choose a different shortcut."
-            self.statusItem.showShortcutFeedback("Shortcut received", success: true)
+            self.showShortcutFeedback("Shortcut received", success: true)
             TsundokuDiagnostics.shared.event("hotkey_test_fired")
         }
     }
@@ -284,7 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func applySettings(
         _ new: CompanionSettings, userInitiated: Bool
     ) {
-        guard companion != nil, statusItem != nil else { return }
+        guard companion != nil else { return }
         guard !CommandLine.arguments.contains("--no-system-integrations") else { return }
         if appliedHotKey != new.hotKey {
             let status = hotKey.install(new.hotKey)
@@ -311,43 +345,248 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 "login_item_applied", ["status": loginStatus])
         }
         companion.settingsChanged(new)
-        updateStatusItem()
+        refreshStatusMenu()
     }
 
-    private func updateStatusItem() {
-        statusItem?.update(
-            panelOpen: companion?.isPanelOpen ?? false,
-            readerPresent: companion?.canShowPanel ?? false,
-            launchAtLogin: settings.settings.launchAtLogin)
+    /// Mirrors the old status item's feedback: a symbol change for a definite
+    /// result, and a menu row that keeps the note until the next test.
+    private func showShortcutFeedback(_ text: String, success: Bool?) {
+        feedbackTask?.cancel()
+        feedbackNote = text
+        if let success {
+            feedbackSymbol = success ? "checkmark.circle" : "exclamationmark.circle"
+            feedbackTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled else { return }
+                self?.feedbackSymbol = "eyeglasses"
+            }
+        }
     }
 
     private func armHotKeyTest() {
         hotKeyTestTimeout?.cancel()
         guard hotKey.isRegistered else {
             settings.hotKeyTestNote = "The shortcut is not registered. Choose another shortcut and try again."
-            statusItem.showShortcutFeedback("Shortcut unavailable", success: false)
+            showShortcutFeedback("Shortcut unavailable", success: false)
             return
         }
         hotKeyTestArmed = true
         settings.hotKeyTestNote = "Switch to another app and press \(settings.settings.hotKey.displayName)."
-        statusItem.showShortcutFeedback("Press \(settings.settings.hotKey.displayName) to test", success: nil)
+        showShortcutFeedback("Press \(settings.settings.hotKey.displayName) to test", success: nil)
         TsundokuDiagnostics.shared.event("hotkey_test_armed")
         hotKeyTestTimeout = Task { [weak self] in
             try? await Task.sleep(for: .seconds(15))
             guard !Task.isCancelled, let self, self.hotKeyTestArmed else { return }
             self.hotKeyTestArmed = false
             self.settings.hotKeyTestNote = "No shortcut received. Check for a conflicting shortcut and try again."
-            self.statusItem.showShortcutFeedback("No shortcut received", success: false)
+            self.showShortcutFeedback("No shortcut received", success: false)
         }
     }
 
     // MARK: - Windows
 
-    private func openLibrary(useRequestedSection: Bool = false, importLibrary: Bool = true) {
+    /// The status item's "Library…" opens the library itself, not whatever
+    /// section or book workspace happened to be open last.
+    func showLibrarySection() {
+        let model = ensureAppModel()
+        model.section = .library
+        model.bookWorkspaceID = nil
+        openLibrary()
+    }
+
+    func openLibrary(useRequestedSection: Bool = false, importLibrary: Bool = true) {
         let section = useRequestedSection ? requestedSection : nil
-        artifacts.show(section: section,
-            importLibrary: importLibrary && !CommandLine.arguments.contains("--no-import"))
-        if let model = artifacts.modelIfCreated(), !CommandLine.arguments.contains("--shell-only") { model.startLivePolling() }
+        let model = ensureAppModel()
+        if let section { model.section = section }
+        model.activate(
+            importLibrary: importLibrary
+                && !CommandLine.arguments.contains("--no-import"))
+        windowBridge.openLibrary()
+        NSApp.activate(ignoringOtherApps: true)
+        if !CommandLine.arguments.contains("--shell-only") {
+            model.startLivePolling()
+        }
+    }
+
+    /// The SwiftUI `Window` scene owns creation and ordering; this records the
+    /// hosting window so menu enablement and the macOS 27 content rounding can
+    /// use the same stable identity the old controller assigned.
+    private static let libraryWindowNotifications = [
+        NSWindow.willCloseNotification,
+        NSWindow.didBecomeKeyNotification,
+        NSWindow.didBecomeMainNotification,
+        NSWindow.didEnterFullScreenNotification,
+        NSWindow.didExitFullScreenNotification,
+    ]
+
+    private func removeLibraryWindowObservers(_ window: NSWindow) {
+        for name in Self.libraryWindowNotifications {
+            NotificationCenter.default.removeObserver(
+                self, name: name, object: window)
+        }
+    }
+
+    func configureLibraryWindow(_ window: NSWindow?) {
+        guard let window else { return }
+        if libraryWindow !== window {
+            if let previous = libraryWindow {
+                removeLibraryWindowObservers(previous)
+            }
+            libraryWindow = window
+            window.identifier = NSUserInterfaceItemIdentifier(
+                TsundokuWindowIdentifier.library)
+            window.setFrameAutosaveName("TsundokuArtifacts")
+            // The SwiftUI Window scene keeps full-size content but gives the
+            // titlebar an opaque backing. The library's edge-to-edge layout
+            // needs the old transparent titlebar and clear window behind it.
+            window.titlebarAppearsTransparent = true
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            TsundokuDiagnostics.shared.event(
+                "library_window_configured",
+                [
+                    "style_mask": window.styleMask.rawValue,
+                    "full_size_content": window.styleMask
+                        .contains(.fullSizeContentView),
+                    "titlebar_transparent": window.titlebarAppearsTransparent,
+                    "title_visibility": window.titleVisibility.rawValue,
+                    "titlebar_height": window.frame.height
+                        - window.contentLayoutRect.height,
+                ])
+            let observers: [(NSNotification.Name, Selector)] = [
+                (NSWindow.willCloseNotification, #selector(libraryWindowWillClose(_:))),
+                (NSWindow.didBecomeKeyNotification, #selector(libraryWindowBecameVisible(_:))),
+                (NSWindow.didBecomeMainNotification, #selector(libraryWindowBecameVisible(_:))),
+                (NSWindow.didEnterFullScreenNotification, #selector(libraryWindowDidEnterFullScreen(_:))),
+                (NSWindow.didExitFullScreenNotification, #selector(libraryWindowDidExitFullScreen(_:))),
+            ]
+            for (name, selector) in observers {
+                NotificationCenter.default.addObserver(
+                    self, selector: selector, name: name, object: window)
+            }
+        }
+        roundLibraryContent(of: window)
+        // The scene's content is configured before SwiftUI orders the window
+        // front. Defer the observable publication out of the update
+        // transaction and verify the sampled window is still current.
+        Task { @MainActor [weak self, weak window] in
+            guard let self, let window, self.libraryWindow === window else { return }
+            self.setLibraryVisible(window.isVisible)
+        }
+    }
+
+    @objc private func libraryWindowBecameVisible(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        setLibraryVisible(window.isVisible)
+    }
+
+    func setLibraryVisible(_ visible: Bool) {
+        // `WindowConfigurator` reports on every SwiftUI update. Publishing an
+        // unchanged value here would re-render, report again, and spin.
+        guard visible != libraryVisible else { return }
+        libraryVisible = visible
+        menuRevision += 1
+        guard visible, let model = appModel else { return }
+        TsundokuDiagnostics.shared.event(
+            "artifacts_window_shown",
+            [
+                "section": model.section.rawValue,
+                "window_visible": true,
+                "activation_policy": NSApp.activationPolicy().rawValue,
+            ])
+    }
+
+    @objc private func libraryWindowWillClose(_ notification: Notification) {
+        if let window = notification.object as? NSWindow {
+            removeLibraryWindowObservers(window)
+        }
+        libraryVisible = false
+        libraryWindow = nil
+        appModel?.stopLivePolling()
+        menuRevision += 1
+        TsundokuDiagnostics.shared.event("artifacts_window_closed")
+    }
+
+    @objc private func libraryWindowDidEnterFullScreen(
+        _ notification: Notification
+    ) {
+        guard let window = notification.object as? NSWindow else { return }
+        window.contentView?.layer?.cornerRadius = 0
+        window.contentView?.layer?.masksToBounds = false
+    }
+
+    @objc private func libraryWindowDidExitFullScreen(
+        _ notification: Notification
+    ) {
+        roundLibraryContent(of: notification.object as? NSWindow)
+    }
+
+    /// macOS 27 draws a SwiftUI full-size window square, to the screen edge.
+    /// The old `WindowGroup` needed the same correction; earlier systems draw
+    /// their own shape and are left alone.
+    private func roundLibraryContent(of window: NSWindow?) {
+        guard #available(macOS 27.0, *), let window else { return }
+        guard
+            !window.styleMask.contains(.fullScreen),
+            window.styleMask.contains(.fullSizeContentView),
+            let content = window.contentView
+        else { return }
+        content.wantsLayer = true
+        content.layer?.cornerRadius = 16
+        content.layer?.masksToBounds = true
+    }
+
+    func configureSettingsWindow(_ window: NSWindow?) {
+        guard let window, settingsWindow !== window else { return }
+        settingsWindow = window
+        window.identifier = NSUserInterfaceItemIdentifier(
+            TsundokuWindowIdentifier.settings)
+        // The Settings scene titles the window from the selected pane; the
+        // gates identify it by the five pane tabs instead of a fixed title.
+        TsundokuDiagnostics.shared.event(
+            "settings_window_configured",
+            [
+                "title": window.title,
+                "style_mask": window.styleMask.rawValue,
+                "frame": [
+                    "width": window.frame.width,
+                    "height": window.frame.height,
+                ],
+            ])
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(settingsWindowWillClose(_:)),
+            name: NSWindow.willCloseNotification, object: window)
+    }
+
+    func setSettingsVisible(_ visible: Bool, dismiss: (() -> Void)? = nil) {
+        windowBridge.setDismissSettings(visible ? dismiss : nil)
+        guard visible != settingsVisible else { return }
+        settingsVisible = visible
+        if !visible { forgetSettingsWindow() }
+        menuRevision += 1
+    }
+
+    private func forgetSettingsWindow() {
+        if let window = settingsWindow {
+            NotificationCenter.default.removeObserver(
+                self, name: NSWindow.willCloseNotification, object: window)
+        }
+        settingsWindow = nil
+    }
+
+    @objc private func settingsWindowWillClose(_ notification: Notification) {
+        settingsVisible = false
+        if let window = notification.object as? NSWindow {
+            NotificationCenter.default.removeObserver(
+                self, name: NSWindow.willCloseNotification, object: window)
+        }
+        settingsWindow = nil
+        windowBridge.setDismissSettings(nil)
+        menuRevision += 1
+    }
+
+    @objc private func windowStateChanged(_ notification: Notification) {
+        menuRevision += 1
     }
 
     private var requestsLegacySettings: Bool {
@@ -368,34 +607,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         return nil
     }
 
-    /// Explicit synthetic mode for native UI gates. Never reads or writes the
-    /// real Keychain and never connects to a provider. Normal launches use the
-    /// production state object.
-    private func providerStateForTesting() -> ProviderSettingsState? {
-        let arguments = CommandLine.arguments
-        guard arguments.contains("--settings-fixture"), arguments.contains("--no-system-integrations") else { return nil }
-        var saves = 0
-        return ProviderSettingsState(loadKey: { "fixture-key" }, saveKey: { _ in
-            saves += 1
-            return saves == 1 ? -1 : 0
-        }, connectionTest: { _ in "Connected · Fixture" })
+    func openSettings(_ route: SettingsRoute? = nil) {
+        let wasVisible = settingsVisible
+        if !wasVisible { settingsPresentationRouted = true }
+        settingsNavigation.open(route, wasVisible: wasVisible)
+        ensureAppModel()
+        windowBridge.openSettings()
+        NSApp.activate(ignoringOtherApps: true)
+        TsundokuDiagnostics.shared.event(
+            "settings_shown",
+            ["pane": settingsNavigation.selectedPane.rawValue])
     }
 
-    private func openSettings(_ route: SettingsRoute? = nil) {
-        settingsNavigation.open(route, wasVisible: settingsWindow?.isVisible == true)
-        if settingsWindow == nil {
-            settingsWindow = SettingsWindowController(model: ensureAppModel(), navigation: settingsNavigation, providerState: providerStateForTesting())
+    /// The automatic Settings command (and the status menu) both present the
+    /// scene; this is the one place that initializes its model and restores
+    /// ordinary pane navigation when the open did not carry a route.
+    func settingsSceneAppeared() {
+        ensureAppModel()
+        if settingsPresentationRouted {
+            settingsPresentationRouted = false
+        } else {
+            settingsNavigation.open(nil, wasVisible: false)
         }
-        settingsWindow?.present()
-        TsundokuDiagnostics.shared.event("settings_shown", ["pane": settingsNavigation.selectedPane.rawValue])
+        TsundokuDiagnostics.shared.event(
+            "settings_scene_appeared",
+            ["pane": settingsNavigation.selectedPane.rawValue])
+    }
+
+    /// `dismiss` is the SwiftUI path; if the Settings scene ignores it, close
+    /// the window it is actually showing.
+    func closeSettingsWindow() {
+        windowBridge.dismissSettings()
+        Task { @MainActor [weak self] in
+            guard let self, let window = self.settingsWindow,
+                window.isVisible
+            else { return }
+            window.performClose(nil)
+        }
+    }
+
+    func installSceneActions(
+        openWindow: OpenWindowAction, openSettings: OpenSettingsAction
+    ) {
+        windowBridge.install(
+            openWindow: openWindow, openSettings: openSettings)
     }
 
     @objc private func spaceChanged() {
         companion?.spaceChanged()
-    }
-
-    @objc private func settingsFromMenu() {
-        openSettings()
     }
 
     // MARK: - Launch arguments
@@ -539,9 +798,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             "login_item": loginStatus.isEmpty
                 ? LoginItem.statusText : loginStatus,
             "launch_at_login": settings.settings.launchAtLogin,
-            "artifacts_window_visible": artifacts?.isVisible ?? false,
+            "artifacts_window_visible": libraryVisible,
             "app_model_created": appModel != nil,
-            "settings_visible": settingsWindow?.isVisible ?? false,
+            "settings_visible": settingsVisible,
             "settings_pane": settingsNavigation.selectedPane.rawValue,
             "diagnostics_dropped_events":
                 TsundokuDiagnostics.shared.droppedEventCount,
@@ -550,137 +809,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ]
     }
 
-    // MARK: - Main menu
+    // MARK: - Menu commands
 
-    private func buildMainMenu() {
-        let mainMenu = NSMenu()
-
-        let appItem = NSMenuItem()
-        mainMenu.addItem(appItem)
-        let appMenu = NSMenu()
-        appItem.submenu = appMenu
-        appMenu.addItem(
-            withTitle: "About Tsundoku",
-            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
-            keyEquivalent: "")
-        appMenu.addItem(.separator())
-        let settingsItem = NSMenuItem(
-            title: "Settings…", action: #selector(settingsFromMenu),
-            keyEquivalent: ",")
-        settingsItem.target = self
-        appMenu.addItem(settingsItem)
-        appMenu.addItem(.separator())
-        appMenu.addItem(
-            withTitle: "Quit Tsundoku",
-            action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q")
-
-        let fileItem = NSMenuItem()
-        let fileMenu = NSMenu(title: "File")
-        fileItem.submenu = fileMenu
-        mainMenu.addItem(fileItem)
-        addBrowserItem("Open Book Annotations", command: "open", key: "o", to: fileMenu)
-        let importItem = NSMenuItem(title: "Import Library", action: #selector(importFromMenu), keyEquivalent: "r")
-        importItem.target = self
-        fileMenu.addItem(importItem)
-        addBrowserItem("Export Annotation Results…", command: "export", key: "e", to: fileMenu)
-        addBrowserItem("Saved AI Notes…", command: "aiNotes", key: "", to: fileMenu)
-
-        let editItem = NSMenuItem()
-        mainMenu.addItem(editItem)
-        let editMenu = NSMenu(title: "Edit")
-        editItem.submenu = editMenu
-        for (title, selector, key) in [
-            ("Undo", Selector(("undo:")), "z"),
-            ("Redo", Selector(("redo:")), "Z"),
-            ("Cut", #selector(NSText.cut(_:)), "x"),
-            ("Copy", #selector(copyFromMenu), "c"),
-            ("Paste", #selector(NSText.paste(_:)), "v"),
-            ("Select All", #selector(selectAllFromMenu), "a"),
-        ] {
-            let item = editMenu.addItem(withTitle: title, action: selector, keyEquivalent: key)
-            if title == "Copy" || title == "Select All" { item.target = self }
+    /// Native edit commands were validated by the responder chain; the custom
+    /// menu buttons ask the same validator, so a read-only field or an empty
+    /// selection disables them exactly as the standard menu would.
+    private func canPerformTextAction(_ action: Selector) -> Bool {
+        guard NSApp.keyWindow?.firstResponder is NSTextView,
+            let target = NSApp.target(forAction: action, to: nil, from: nil)
+        else { return false }
+        let item = NSMenuItem(title: "", action: action, keyEquivalent: "")
+        // AppKit consults NSMenuItemValidation before NSUserInterfaceValidations.
+        if let validating = target as? NSMenuItemValidation {
+            return validating.validateMenuItem(item)
         }
-        editMenu.addItem(.separator())
-        addBrowserItem("Find…", command: "find", key: "f", to: editMenu)
-
-        let viewItem = NSMenuItem()
-        let viewMenu = NSMenu(title: "View")
-        viewItem.submenu = viewMenu
-        mainMenu.addItem(viewItem)
-        addBrowserItem("Cards", command: "cards", key: "1", to: viewMenu)
-        addBrowserItem("List", command: "list", key: "2", to: viewMenu)
-        viewMenu.addItem(.separator())
-        addBrowserItem("Show / Hide Sidebar", command: "sidebar", key: "", to: viewMenu)
-        addBrowserItem("Show / Hide Inspector", command: "inspector", key: "i", to: viewMenu)
-        addBrowserItem("Back to Books", command: "back", key: "[", to: viewMenu)
-
-        let windowItem = NSMenuItem()
-        mainMenu.addItem(windowItem)
-        let windowMenu = NSMenu(title: "Window")
-        windowItem.submenu = windowMenu
-        windowMenu.addItem(
-            withTitle: "Minimize",
-            action: #selector(NSWindow.performMiniaturize(_:)),
-            keyEquivalent: "m")
-        windowMenu.addItem(
-            withTitle: "Close", action: #selector(NSWindow.performClose(_:)),
-            keyEquivalent: "w")
-        NSApp.windowsMenu = windowMenu
-
-        NSApp.mainMenu = mainMenu
+        if let validating = target as? NSUserInterfaceValidations {
+            return validating.validateUserInterfaceItem(item)
+        }
+        return true
     }
 
-    private func addBrowserItem(_ title: String, command: String, key: String, to menu: NSMenu) {
-        let item = NSMenuItem(title: title, action: #selector(browserFromMenu(_:)), keyEquivalent: key)
-        item.target = self
-        item.representedObject = command
-        menu.addItem(item)
+    var canCut: Bool { canPerformTextAction(#selector(NSText.cut(_:))) }
+    var canPaste: Bool { canPerformTextAction(#selector(NSText.paste(_:))) }
+
+    var browserMenuState: BrowserMenuState {
+        BrowserMenuState.make(
+            keyWindowIdentifier: NSApp.keyWindow?.identifier?.rawValue,
+            mainWindowIdentifier: NSApp.mainWindow?.identifier?.rawValue,
+            section: appModel?.section,
+            bookWorkspaceID: appModel?.bookWorkspaceID,
+            selectedBookID: appModel?.selectedBookID,
+            isImporting: appModel?.isImporting == true)
     }
 
-    @objc private func browserFromMenu(_ sender: NSMenuItem) {
-        guard let command = sender.representedObject as? String else { return }
+    func performBrowserCommand(_ command: String) {
         TsundokuDiagnostics.shared.event("browser_menu_command", [
-            "command": command, "window": NSApp.keyWindow?.identifier?.rawValue ?? "none",
+            "command": command,
+            "window": NSApp.keyWindow?.identifier?.rawValue ?? "none",
         ])
-        if command == "aiNotes" { ensureAppModel().openSavedNotesWindow?(); return }
-        if NSApp.keyWindow?.identifier?.rawValue == "TsundokuInspector" {
+        if NSApp.keyWindow?.identifier?.rawValue
+            == TsundokuWindowIdentifier.inspector
+        {
             NSApp.mainWindow?.makeKeyAndOrderFront(nil)
         }
-        NotificationCenter.default.post(name: .tsundokuBrowserCommand, object: NSApp.keyWindow,
-                                        userInfo: ["command": command])
+        NotificationCenter.default.post(
+            name: .tsundokuBrowserCommand, object: NSApp.keyWindow,
+            userInfo: ["command": command])
     }
 
-    @objc private func importFromMenu() { ensureAppModel().importLibrary() }
+    func importFromMenu() { ensureAppModel().importLibrary() }
 
-    @objc private func selectAllFromMenu() { textOrBrowserAction(#selector(NSText.selectAll(_:)), command: "selectAll") }
-    @objc private func copyFromMenu() { textOrBrowserAction(#selector(NSText.copy(_:)), command: "copy") }
+    func showSavedNotes() {
+        let model = ensureAppModel()
+        model.section = .highlights
+        openLibrary(importLibrary: false)
+        model.showSavedAINotes = true
+    }
+
+    func selectAllFromMenu() {
+        textOrBrowserAction(
+            #selector(NSText.selectAll(_:)), command: "selectAll")
+    }
+
+    func copyFromMenu() {
+        textOrBrowserAction(#selector(NSText.copy(_:)), command: "copy")
+    }
+
+    func performResponderAction(_ action: Selector) {
+        NSApp.sendAction(action, to: nil, from: nil)
+    }
 
     private func textOrBrowserAction(_ action: Selector, command: String) {
         if NSApp.keyWindow?.firstResponder is NSTextView {
             NSApp.sendAction(action, to: nil, from: nil)
         } else {
-            NotificationCenter.default.post(name: .tsundokuBrowserCommand, object: NSApp.keyWindow,
-                                            userInfo: ["command": command])
+            NotificationCenter.default.post(
+                name: .tsundokuBrowserCommand, object: NSApp.keyWindow,
+                userInfo: ["command": command])
         }
     }
 
-    func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(browserFromMenu(_:)), let command = item.representedObject as? String {
-            if command == "aiNotes" { return true }
-            let keyID = NSApp.keyWindow?.identifier?.rawValue
-            let browserActive = keyID == "TsundokuLibrary" || (keyID == "TsundokuInspector" && NSApp.mainWindow?.identifier?.rawValue == "TsundokuLibrary")
-            guard browserActive, let model = appModel else { return false }
-            let annotations = model.section == .highlights || (model.section == .library && model.bookWorkspaceID != nil)
-            switch command {
-            case "cards", "list", "export": return annotations
-            case "find", "inspector": return model.section == .library || model.section == .highlights
-            case "open": return model.section == .library && model.bookWorkspaceID == nil && model.selectedBookID != nil
-            case "back": return model.section == .library && model.bookWorkspaceID != nil
-            default: return true
-            }
-        }
-        if item.action == #selector(importFromMenu) { return appModel?.isImporting != true }
-        return true
-    }
 }

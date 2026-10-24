@@ -24,8 +24,16 @@ def call(*items):
 
 def press(label, menu=None):
     if menu:
-        call("press", menu)
+        # Opening the menu is best-effort: its items are exposed in the AX
+        # tree and the item press below is the action under test.
+        subprocess.run([str(args.helper), str(args.pid), "press", menu],
+                       text=True, capture_output=True, check=False)
     call("press", label)
+
+
+def press_status_menu(label):
+    """MenuBarExtra content exists only while its menu is open."""
+    call("pressStatusMenu", "Tsundoku", label)
 
 
 def snapshot(name, *expected):
@@ -78,7 +86,7 @@ press("Options")
 press("Random Border Colors")
 assert preference("browser.randomBorders") == 0
 snapshot("neutral-borders-restored", "6 results")
-press("Library…")
+press_status_menu("Library…")
 press("Open Book Annotations", "File")
 text = snapshot("scoped-card-metadata", "3 results", "Open in Annotations")
 title = "Learning Through Small Experiments"

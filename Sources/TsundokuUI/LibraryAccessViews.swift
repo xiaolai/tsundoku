@@ -14,6 +14,7 @@ struct AccessSettingsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var permissions: PermissionsModel
     @ObservedObject var navigation: SettingsNavigation
+    @Environment(\.scenePhase) private var scenePhase
     private var appURL: URL { Bundle.main.bundleURL }
     private var needsInstallation: Bool { LibraryAppLocation.requiresInstallation(appURL) }
     private var blocked: Bool { permissions.libraryFailures.contains(where: \.accessDenied) }
@@ -83,7 +84,7 @@ struct AccessSettingsView: View {
                                 Image(nsImage: NSWorkspace.shared.icon(forFile: appURL.path)).resizable().frame(width: 36, height: 36)
                                 Text("Drag Tsundoku into the Full Disk Access list.").font(.caption)
                             }
-                            .onDrag { NSItemProvider(object: appURL as NSURL) }
+                            .draggable(appURL)
                             IconButton("Show Tsundoku in Finder", systemImage: "folder") {
                                 NSWorkspace.shared.activateFileViewerSelecting([appURL])
                             }
@@ -169,7 +170,8 @@ struct AccessSettingsView: View {
             .onChange(of: navigation.focus) { _, focus in
                 if let focus { scroll.scrollTo(focus, anchor: .center) }
             }
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
                 if permissions.librarySetupPending || navigation.intent == .library {
                     Task { await permissions.verifyLibraryAccess() }
                 }

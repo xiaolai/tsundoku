@@ -136,10 +136,10 @@ checks.append("no-duplicate-first-import")
 # A parent red-close must cancel setup and dispose its guide, not carry intent to launch.
 (a.root / "sources/books/Documents/BKLibrary").chmod(0o000)
 command(pid, "press", "Settings…")
-snapshot(pid, "settings-shown", "Tsundoku Settings")
+snapshot(pid, "settings-shown", "Companion", "Access", "AI Provider", "Library Data", "About")
 command(pid, "press", "Full Disk Access…")
 snapshot(pid, "settings-guide", "Grant Library Access")
-command(pid, "closeWindow", "Tsundoku Settings")
+command(pid, "key", "13", "cmd")
 time.sleep(0.5)
 assert not any(title == "Library Access" for title, _ in frames(pid)), "Closing Settings must close its guide"
 checks.append("parent-close-disposes-guide")

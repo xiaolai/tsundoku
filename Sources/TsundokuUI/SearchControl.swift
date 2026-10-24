@@ -7,7 +7,7 @@ extension Notification.Name {
 }
 
 @MainActor var browserWindowIsKey: Bool {
-    NSApp.keyWindow?.identifier?.rawValue == "TsundokuLibrary"
+    NSApp.keyWindow?.identifier?.rawValue == TsundokuWindowIdentifier.library
 }
 
 /// Native searchable manages toolbar collapse, expansion and keyboard focus.

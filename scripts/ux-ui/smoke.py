@@ -24,22 +24,47 @@ def command(*arguments):
 
 def press(label, menu=None):
     if menu:
-        command("press", menu)
+        # Opening the menu is best-effort: its items are exposed in the AX
+        # tree and the item press below is the action under test. A failed
+        # menu-title press must not fail the check.
+        subprocess.run(
+            [str(args.helper), str(args.pid), "press", menu],
+            text=True, capture_output=True, check=False)
     command("press", label)
 
 
-def snapshot(name, *expected):
+def press_status_menu(label):
+    """MenuBarExtra content exists only while its menu is open."""
+    command("pressStatusMenu", "Tsundoku", label)
+
+
+def snapshot(name, *expected, absent=()):
     text = ""
     for _ in range(6):
         text = command()
-        if all(value in text for value in expected):
+        if all(value in text for value in expected) and not any(
+                value in text for value in absent):
             break
         time.sleep(0.2)
     (args.evidence / f"{name}.txt").write_text(text)
+    if not text.strip():
+        raise AssertionError(f"{name}: empty AX snapshot")
     for value in expected:
         if value not in text:
             raise AssertionError(f"{name}: expected {value!r}")
+    for value in absent:
+        if value in text:
+            raise AssertionError(f"{name}: still present {value!r}")
     checks.append({"check": name, "passed": True, "expected": expected})
+
+
+def expect_window_absent(name, title):
+    """Direct window-enumeration check; an empty tree means no windows."""
+    text = command("windows")
+    (args.evidence / f"{name}.txt").write_text(text)
+    if f"WINDOW {title}" in text:
+        raise AssertionError(f"{name}: window {title!r} still present")
+    checks.append({"check": name, "passed": True, "expected": None})
 
 
 def panel_snapshot(name, *expected, absent=()):
@@ -58,7 +83,7 @@ def panel_snapshot(name, *expected, absent=()):
     checks.append({"check": name, "passed": True, "expected": expected})
 
 
-press("Library…")
+press_status_menu("Library…")
 if "Open in Annotations" in command():
     press("Back to Books", "View")
 snapshot("books", "2 books", "Open Annotations")
@@ -103,9 +128,12 @@ press("Saved AI Notes…", "File")
 snapshot("saved-ai-note", "AI-generated · Fixture provider", "A saved AI-generated answer")
 press("Done")
 press("Settings…")
-snapshot("separate-settings", "Tsundoku Settings", "Companion")
+snapshot("separate-settings", "Companion", "Access", "AI Provider", "Library Data", "About")
 command("key", "13", "cmd")
-snapshot("settings-keeps-library", "Annotations", "6 results")
+# The library text is behind Settings; the pane tabs prove it actually closed.
+snapshot("settings-keeps-library", "Annotations", "6 results",
+         absent=("AI Provider", "Library Data"))
+expect_window_absent("settings-window-closed", "Companion")
 press("Show / Hide Inspector", "View")
 snapshot("modeless-annotation-inspector", "Annotation Inspector", "Choose an Annotation")
 command("resize", "800", "600")
@@ -118,7 +146,7 @@ panel_snapshot("inspector-attached-note", "Notice what changes", "Try a predicti
 press("Note, Learning Through Small Experiments, Kindle")
 panel_snapshot("inspector-follows-selection", "Kindle note stored in the text field.", absent=("Notice what changes",))
 press("Show / Hide Inspector", "View")
-press("Library…")
+press_status_menu("Library…")
 press("Show / Hide Inspector", "View")
 snapshot("modeless-book-inspector", "Book Inspector", "2 books")
 command("resize", "760", "600")
@@ -129,10 +157,18 @@ press("Done")
 command("resize", "800", "600")
 snapshot("narrow-cards", "6 results", "Passage text unavailable")
 window_ids = [line.split()[-1] for line in command("windowIDs").splitlines() if line.startswith("WINDOW_ID")]
-if window_ids:
-    subprocess.run(["screencapture", "-x", "-l", window_ids[0], str(args.evidence / "cards-800.png")], check=True)
+if not window_ids:
+    raise AssertionError("no library window ID for screenshots")
+subprocess.run(["screencapture", "-x", "-l", window_ids[0], str(args.evidence / "cards-800.png")], check=True)
 command("resize", "1280", "820")
-if window_ids:
-    subprocess.run(["screencapture", "-x", "-l", window_ids[0], str(args.evidence / "cards-1280.png")], check=True)
+subprocess.run(["screencapture", "-x", "-l", window_ids[0], str(args.evidence / "cards-1280.png")], check=True)
+
+# Native close/reopen path: the window must disappear, then the status menu
+# must bring it back. The app runs with --shell-only, so polling is disabled;
+# this verifies the scene/window lifecycle, not live reader polling.
+command("closeWindow", "Annotations")
+expect_window_absent("library-closed", "Annotations")
+press_status_menu("Library…")
+snapshot("library-reopened", "2 books")
 (args.evidence / "smoke-results.json").write_text(json.dumps(checks, indent=2) + "\n")
 print(f"{len(checks)} native fixture checks passed")
