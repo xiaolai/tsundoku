@@ -195,10 +195,13 @@ public enum BooksLive {
     public static func focusReader() throws -> BooksFocusReport {
         activate()
         let reader = try readerWindow()
-        let main = AXUIElementSetAttributeValue(
+        // The report below carries the window flags read back after the
+        // request, which is the stronger check; these two results only say
+        // Books accepted the set.
+        _ = AXUIElementSetAttributeValue(
             reader.element, kAXMainAttribute as CFString,
             kCFBooleanTrue)
-        let focused = AXUIElementSetAttributeValue(
+        _ = AXUIElementSetAttributeValue(
             reader.element, kAXFocusedAttribute as CFString,
             kCFBooleanTrue)
         let raised = AXUIElementPerformAction(
@@ -280,7 +283,7 @@ public enum BooksLive {
             let menuBar,
             CFGetTypeID(menuBar) == AXUIElementGetTypeID()
         else { return false }
-        let bar = unsafeBitCast(menuBar, to: AXUIElement.self)
+        let bar = unsafeDowncast(menuBar, to: AXUIElement.self)
         for item in children(bar) {
             let name = stringAttribute(item, kAXTitleAttribute) ?? ""
             guard !name.isEmpty,
@@ -477,7 +480,7 @@ public enum BooksLive {
             let value,
             CFGetTypeID(value) == AXUIElementGetTypeID()
         else { return nil }
-        let window = unsafeBitCast(value, to: AXUIElement.self)
+        let window = unsafeDowncast(value, to: AXUIElement.self)
         let title = stringAttribute(window, kAXTitleAttribute)
         let role = stringAttribute(window, kAXRoleAttribute)
         var position: CFTypeRef?

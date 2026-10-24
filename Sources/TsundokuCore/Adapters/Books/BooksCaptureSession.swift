@@ -381,7 +381,7 @@ public final class BooksCaptureSession: ReaderCaptureSession {
         let terminal = records.filter(\.terminal).count
         let unresolved = records.filter(\.unresolved).count
 
-        var current = try? readCurrent()
+        let current = try? readCurrent()
         guard let current, current.isReading else {
             let report = RestoreReport(
                 opening: opening, final: nil, attempted: attempted,

@@ -214,7 +214,7 @@ enum BooksProbe {
             print("menubar=none")
             return
         }
-        let bar = unsafeBitCast(menuBar, to: AXUIElement.self)
+        let bar = unsafeDowncast(menuBar, to: AXUIElement.self)
         var rawChildren: CFTypeRef?
         guard
             AXUIElementCopyAttributeValue(

@@ -225,84 +225,80 @@ public final class BooksPageSetup {
             sleep(0.8)
             appliedFontSteps = 0
         }
-        do {
-            // Books can ignore a resize while it is reflowing; retry the
-            // write and wait for the window to settle.
-            var page: BooksLivePage?
-            for attempt in 0..<5 {
-                _ = try? writeWindow(originalWindow)
-                sleep(attempt == 0 ? 0.5 : 0.35)
-                page = try? readPage()
-                let frame = page?.windowFrame.map {
-                    CGRect(
-                        x: $0.x, y: $0.y,
-                        width: $0.width, height: $0.height)
-                }
-                finalWindow = frame
-                if let frame,
-                    abs(frame.width - originalWindow.width) <= 1.5,
-                    abs(frame.height - originalWindow.height) <= 1.5
-                {
-                    break
-                }
+        // Books can ignore a resize while it is reflowing; retry the
+        // write and wait for the window to settle.
+        var page: BooksLivePage?
+        for attempt in 0..<5 {
+            _ = try? writeWindow(originalWindow)
+            sleep(attempt == 0 ? 0.5 : 0.35)
+            page = try? readPage()
+            let frame = page?.windowFrame.map {
+                CGRect(
+                    x: $0.x, y: $0.y,
+                    width: $0.width, height: $0.height)
             }
-            guard let page else {
-                reason = "the reader window was not restored"
-                let outcome = PageSetupOutcome(
-                    pageSize: request.pageSize, requestedFont: request.font,
-                    originalFont: nil, finalFont: nil,
-                    originalWindow: originalWindow,
-                    finalWindow: finalWindow,
-                    restored: false, reason: reason)
-                storedRestore = outcome
-                return outcome
-            }
-            if let window = finalWindow,
-                abs(window.width - originalWindow.width) > 1.5
-                    || abs(window.height - originalWindow.height) > 1.5
+            finalWindow = frame
+            if let frame,
+                abs(frame.width - originalWindow.width) <= 1.5,
+                abs(frame.height - originalWindow.height) <= 1.5
             {
-                reason = "the reader window was not restored"
-            } else if let originalMark {
-                // The reflow moved the reading position. Search the restored
-                // spread layout for the page that was showing before the
-                // resize; the search is bounded and stops as soon as the
-                // image matches.
-                restored = matches(page, mark: originalMark)
-                if !restored {
-                    for _ in 0..<12 {
-                        do { try turnBackward() } catch { break }
-                        sleep(0.45)
-                        if let candidate = try? readPage(),
-                            candidate.isReading,
-                            matches(candidate, mark: originalMark)
-                        {
-                            restored = true
-                            break
-                        }
-                    }
-                }
-                if !restored {
-                    for _ in 0..<12 {
-                        do { try turnForward() } catch { break }
-                        sleep(0.45)
-                        if let candidate = try? readPage(),
-                            candidate.isReading,
-                            matches(candidate, mark: originalMark)
-                        {
-                            restored = true
-                            break
-                        }
-                    }
-                }
-                if !restored {
-                    reason = "the reading position changed when the "
-                        + "window was restored and was not found nearby"
-                }
-            } else {
-                reason = "the restored spread could not be verified"
+                break
             }
-        } catch {
-            reason = "\(error)"
+        }
+        guard let page else {
+            reason = "the reader window was not restored"
+            let outcome = PageSetupOutcome(
+                pageSize: request.pageSize, requestedFont: request.font,
+                originalFont: nil, finalFont: nil,
+                originalWindow: originalWindow,
+                finalWindow: finalWindow,
+                restored: false, reason: reason)
+            storedRestore = outcome
+            return outcome
+        }
+        if let window = finalWindow,
+            abs(window.width - originalWindow.width) > 1.5
+                || abs(window.height - originalWindow.height) > 1.5
+        {
+            reason = "the reader window was not restored"
+        } else if let originalMark {
+            // The reflow moved the reading position. Search the restored
+            // spread layout for the page that was showing before the
+            // resize; the search is bounded and stops as soon as the
+            // image matches.
+            restored = matches(page, mark: originalMark)
+            if !restored {
+                for _ in 0..<12 {
+                    do { try turnBackward() } catch { break }
+                    sleep(0.45)
+                    if let candidate = try? readPage(),
+                        candidate.isReading,
+                        matches(candidate, mark: originalMark)
+                    {
+                        restored = true
+                        break
+                    }
+                }
+            }
+            if !restored {
+                for _ in 0..<12 {
+                    do { try turnForward() } catch { break }
+                    sleep(0.45)
+                    if let candidate = try? readPage(),
+                        candidate.isReading,
+                        matches(candidate, mark: originalMark)
+                    {
+                        restored = true
+                        break
+                    }
+                }
+            }
+            if !restored {
+                reason = "the reading position changed when the "
+                    + "window was restored and was not found nearby"
+            }
+        } else {
+            reason = "the restored spread could not be verified"
         }
         let outcome = PageSetupOutcome(
             pageSize: request.pageSize, requestedFont: request.font,

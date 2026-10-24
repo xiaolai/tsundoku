@@ -59,7 +59,14 @@ public final class TsundokuDiagnostics: @unchecked Sendable {
                 ? String(path.dropLast(6)) + ".state.json"
                 : path + ".state.json")
         self.enabled = true
-        try? handle.seekToEnd()
+        do {
+            try handle.seekToEnd()
+        } catch {
+            // Diagnostics must never fail the app, but a silent failure here
+            // would leave the handle at offset 0 and overwrite the log.
+            FileHandle.standardError.write(
+                Data("tsundoku diagnostics: seekToEnd failed: \(error)\n".utf8))
+        }
     }
 
     public func stop() {

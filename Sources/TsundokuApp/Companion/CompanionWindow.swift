@@ -135,7 +135,9 @@ final class CompanionWindow {
                 name: .easeOut)
             window.animator().setFrame(frame, display: true)
         } completionHandler: { [weak self] in
-            self?.window.invalidateShadow()
+            // AppKit runs the completion on the main thread when the
+            // animation ends; the closure itself carries no actor annotation.
+            MainActor.assumeIsolated { self?.window.invalidateShadow() }
         }
     }
 

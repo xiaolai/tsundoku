@@ -30,7 +30,10 @@ public struct KindleCaptureAdapter: ReaderCaptureAdapter {
         if let pageSetup, pageSetup.isRequested {
             let setup = KindlePageSetup(request: pageSetup)
             do {
-                try setup.begin()
+                // The outcome is retained on the setup object and read back
+                // through `outcome` while the session runs; here only a
+                // throw matters.
+                _ = try setup.begin()
             } catch {
                 throw ReaderCaptureError.captureFailed(
                     .kindle, reason: "page setup: \(error)")

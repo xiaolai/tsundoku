@@ -10,6 +10,13 @@ import TsundokuCore
 /// counts as frontmost-eligible: activating the app to type into the panel must
 /// not hide that panel (the spike measured Books stealing the first key, and
 /// the fix is activation, not hiding).
+///
+/// Main-actor bound. The workspace and window notifications below are
+/// registered with `queue: .main` and the tracker's timer and AX observer run
+/// on the main run loop, so `MainActor.assumeIsolated` states the delivery
+/// guarantee the framework documents instead of pretending the callbacks are
+/// free-threaded.
+@MainActor
 final class ReaderWatcher {
     var onSnapshot: ((ReaderSnapshot?) -> Void)?
     var onFullScreenChange: ((Bool) -> Void)?
@@ -30,24 +37,30 @@ final class ReaderWatcher {
                 forName: NSWorkspace.didLaunchApplicationNotification,
                 object: nil, queue: .main
             ) { [weak self] note in
-                guard let app = Self.application(from: note) else { return }
-                self?.handleLaunch(app)
+                guard let bundleID = Self.bundleID(from: note) else { return }
+                MainActor.assumeIsolated {
+                    self?.handleLaunch(bundleID)
+                }
             })
         observers.append(
             center.addObserver(
                 forName: NSWorkspace.didTerminateApplicationNotification,
                 object: nil, queue: .main
             ) { [weak self] note in
-                guard let app = Self.application(from: note) else { return }
-                self?.handleTerminate(app)
+                guard let bundleID = Self.bundleID(from: note) else { return }
+                MainActor.assumeIsolated {
+                    self?.handleTerminate(bundleID)
+                }
             })
         observers.append(
             center.addObserver(
                 forName: NSWorkspace.didActivateApplicationNotification,
                 object: nil, queue: .main
             ) { [weak self] note in
-                guard let app = Self.application(from: note) else { return }
-                self?.handleActivate(app)
+                let bundleID = Self.bundleID(from: note)
+                MainActor.assumeIsolated {
+                    self?.handleActivate(bundleID)
+                }
             })
         // Library, onboarding and status-menu windows can become key without
         // an application activation. Re-evaluate on either side of that.
@@ -59,7 +72,9 @@ final class ReaderWatcher {
                 NotificationCenter.default.addObserver(
                     forName: name, object: nil, queue: .main
                 ) { [weak self] _ in
-                    self?.refreshEligibilityAndEmit()
+                    MainActor.assumeIsolated {
+                        self?.refreshEligibilityAndEmit()
+                    }
                 })
         }
         refreshFrontmostEligibility()
@@ -82,11 +97,14 @@ final class ReaderWatcher {
         return app.activate(options: [])
     }
 
-    private static func application(from note: Notification)
-        -> NSRunningApplication?
+    /// Reads the launching bundle identifier. Nonisolated so the notification
+    /// closure can reduce the payload to a Sendable value before it enters the
+    /// main actor; the notification itself never crosses.
+    nonisolated private static func bundleID(from note: Notification)
+        -> String?
     {
-        note.userInfo?[NSWorkspace.applicationUserInfoKey]
-            as? NSRunningApplication
+        (note.userInfo?[NSWorkspace.applicationUserInfoKey]
+            as? NSRunningApplication)?.bundleIdentifier
     }
 
     // MARK: - Selection
@@ -132,13 +150,13 @@ final class ReaderWatcher {
         let tracker = ReaderTracker(
             kind: kind, pid: app.processIdentifier)
         tracker.onUpdate = { [weak self] snapshot in
-            self?.emit(snapshot)
+            MainActor.assumeIsolated { self?.emit(snapshot) }
         }
         tracker.onFailure = { [weak self] reason in
-            self?.handleFailure(reason)
+            MainActor.assumeIsolated { self?.handleFailure(reason) }
         }
         tracker.onFullScreenChange = { [weak self] fullScreen in
-            self?.onFullScreenChange?(fullScreen)
+            MainActor.assumeIsolated { self?.onFullScreenChange?(fullScreen) }
         }
         self.tracker = tracker
         tracker.start()
@@ -218,20 +236,16 @@ final class ReaderWatcher {
 
     // MARK: - Workspace events
 
-    private func handleLaunch(_ app: NSRunningApplication) {
-        guard let kind = app.bundleIdentifier.flatMap({
-            ReaderKind.from(bundleID: $0)
-        }) else { return }
+    private func handleLaunch(_ bundleID: String) {
+        guard let kind = ReaderKind.from(bundleID: bundleID) else { return }
         if let forcedKind, kind != forcedKind { return }
         if tracker == nil {
             start(kind: kind, reason: "did_launch")
         }
     }
 
-    private func handleTerminate(_ app: NSRunningApplication) {
-        guard let kind = app.bundleIdentifier.flatMap({
-            ReaderKind.from(bundleID: $0)
-        }) else { return }
+    private func handleTerminate(_ bundleID: String) {
+        guard let kind = ReaderKind.from(bundleID: bundleID) else { return }
         guard currentKind == kind else { return }
         TsundokuDiagnostics.shared.event(
             "reader_terminated", ["reader": kind.rawValue])
@@ -239,8 +253,8 @@ final class ReaderWatcher {
         selectInitial()
     }
 
-    private func handleActivate(_ app: NSRunningApplication) {
-        guard let bundleID = app.bundleIdentifier else {
+    private func handleActivate(_ bundleID: String?) {
+        guard let bundleID else {
             // Without an identity we cannot claim the frontmost app is a
             // reader; hiding is the safe default.
             frontmostEligible = false

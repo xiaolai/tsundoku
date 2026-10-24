@@ -110,7 +110,7 @@ public struct BooksContext: ReaderContext {
             let value,
             CFGetTypeID(value) == AXUIElementGetTypeID()
         else { return nil }
-        let window = unsafeBitCast(value, to: AXUIElement.self)
+        let window = unsafeDowncast(value, to: AXUIElement.self)
         var title: CFTypeRef?
         _ = AXUIElementCopyAttributeValue(
             window, kAXTitleAttribute as CFString, &title)

@@ -628,7 +628,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
             text: live.text)
         return PageSnapshot(
             identity: identity, image: image, text: text,
-            textSource: text == nil ? .none : .accessibility,
+            textSource: text == nil ? ReaderTextSource.none : .accessibility,
             pageNumber: live.pageNumber, pageCount: live.pageCount,
             location: PageLocation(
                 pageNumber: live.pageNumber, pageCount: live.pageCount),

@@ -643,7 +643,7 @@ public struct ActivatingTextField: NSViewRepresentable {
             return false
         }
 
-        @objc func submit() {
+        @MainActor @objc func submit() {
             parent.onSubmit()
         }
     }

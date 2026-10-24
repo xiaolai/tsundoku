@@ -3,6 +3,14 @@ import Testing
 @testable import TsundokuCore
 @testable import TsundokuUI
 
+/// The access-check closure is main-actor isolated and Sendable, so a flag it
+/// reads cannot be a local variable mutated after capture. Both the closure and
+/// the test run on the main actor, which this box makes explicit.
+@MainActor
+private final class AccessState {
+    var granted = false
+}
+
 @MainActor
 struct LibraryAccessSetupTests {
     private func defaults() -> UserDefaults {
@@ -304,11 +312,11 @@ struct LibraryAccessSetupTests {
     }
 
     @Test func partialImportKeepsWaitingForTheSourceBeingGranted() async {
-        var granted = false
+        let access = AccessState()
         var imports = 0
         let denied = LibraryImportFailure(source: .kindle, error: SQLiteError(code: 23, message: "denied"))
         let model = PermissionsModel(accessibilityCheck: { false }, screenRecordingCheck: { false },
-            libraryAccessCheck: { LibraryAccessResult(readableSources: granted ? [.appleBooks, .kindle] : [.appleBooks], failures: granted ? [] : [denied]) },
+            libraryAccessCheck: { LibraryAccessResult(readableSources: access.granted ? [.appleBooks, .kindle] : [.appleBooks], failures: access.granted ? [] : [denied]) },
             libraryRegistrationRequest: {}, librarySettingsOpener: { true }, setupDefaults: defaults())
         model.onLibraryAccessReady = { imports += 1 }
         model.requestLibraryAccess()
@@ -319,7 +327,7 @@ struct LibraryAccessSetupTests {
         #expect(!model.consumeAccessResume())
         await model.verifyLibraryAccess()
         #expect(imports == 1, "Already imported sources are not repeated on activation")
-        granted = true
+        access.granted = true
         await model.verifyLibraryAccess()
         #expect(imports == 2, "Late approval imports the newly readable source")
         model.completeLibrarySetup(importedSources: [.appleBooks, .kindle])

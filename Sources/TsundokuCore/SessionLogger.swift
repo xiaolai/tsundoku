@@ -25,17 +25,23 @@ public final class SessionLogger: @unchecked Sendable {
     }
 
     public func start() {
-        queue.async {
-            guard !self.running else { return }
-            self.running = true
-            let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            timer.schedule(deadline: .now() + 1, repeating: 1.5)
-            timer.setEventHandler { [weak self] in
-                self?.tick()
-            }
-            timer.resume()
-            self.timer = timer
+        queue.async { [weak self] in
+            self?.installTimer()
         }
+    }
+
+    /// Runs on `queue`. The handler captures weakly so the logger does not
+    /// keep itself alive through the timer it owns.
+    private func installTimer() {
+        guard !running else { return }
+        running = true
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 1, repeating: 1.5)
+        timer.setEventHandler { [weak self] in
+            self?.tick()
+        }
+        timer.resume()
+        self.timer = timer
     }
 
     public func stop() {

@@ -373,7 +373,7 @@ final class ReaderTracker: @unchecked Sendable {
             let value,
             CFGetTypeID(value) == AXUIElementGetTypeID()
         else { return nil }
-        return unsafeBitCast(value, to: AXUIElement.self)
+        return unsafeDowncast(value, to: AXUIElement.self)
     }
 
     private func string(_ element: AXUIElement, _ name: String) -> String? {
