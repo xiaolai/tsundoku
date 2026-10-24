@@ -108,12 +108,25 @@ public final class PermissionsModel: ObservableObject {
             return await Task.detached { LibraryAccessProbe.check(kindle: kindle, books: books) }.value
         },
         libraryRegistrationRequest: @escaping @MainActor () async -> Void = {
+            let listing = await FullDiskAccessListingRequest.request()
+            TsundokuDiagnostics.shared.event("library_listing_requested", ["outcome": listing.rawValue])
             let result = await Task.detached { FullDiskAccessRegistration.request() }.value
             TsundokuDiagnostics.shared.event("library_registration_attempted", [
                 "attempted": result.attempted, "directory_reads": result.directoriesRead,
                 "header_bytes_read": result.headerBytesRead, "permission_denials": result.permissionDenials,
                 "missing_targets": result.missingTargets, "other_failures": result.otherFailures,
             ])
+            // The privacy extension caches its list across pane navigation.
+            // Cooperatively close Settings so the subsequent open loads the new
+            // entry. Never force-quit it, operate its controls, or change a grant.
+            if listing != .unavailable, !Task.isCancelled {
+                for settings in NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.systempreferences") {
+                    guard settings.terminate() else { continue }
+                    for _ in 0..<40 where !settings.isTerminated && !Task.isCancelled {
+                        try? await Task.sleep(for: .milliseconds(50))
+                    }
+                }
+            }
         },
         librarySettingsOpener: @escaping () -> Bool = {
             guard let url = URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles") else { return false }
