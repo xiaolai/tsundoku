@@ -2,5 +2,28 @@
   "schema": 1,
   "public_contact_sha256": [
     "a06bab7218e2da5e4126e43c7f2aa1e9ccb8b07fe40cf7ca75b63cdd877e7371"
+  ],
+  "allowed_historical_findings": [
+    {"rule": "internal-host", "object": "27b641ecb874bc9ae4868575fe9aebb5b81704ef"},
+    {"rule": "internal-host", "object": "c0304c4dcfde963e312e9e71fcdbbbb4209b0824"},
+    {"rule": "internal-host", "object": "a224721f80f80cfd69f0d69a168edc46c234cfa5"},
+    {"rule": "internal-host", "object": "31281d4c0b941ee730da87eb05a188037c33f8fb"},
+    {"rule": "internal-host", "object": "18df177a7e2f2b54300292b8bfd0c5aef21daa3b"},
+    {"rule": "internal-host", "object": "f0e49d34c9262d4c2ba071958d359bf7d3f563a5"},
+    {"rule": "internal-host", "object": "291e9410336f129a8495fcc434a438625e3727cc"},
+    {"rule": "internal-host", "object": "5a02b9b22bace37d83edb94130f15b62db492a19"},
+    {"rule": "internal-host", "object": "70621e2bcb804da5c3f13f1e9689f8109634881f"},
+    {"rule": "internal-host", "object": "eb703fc85f41f2cd204caa8365952d7a9dcbd923"},
+    {"rule": "internal-host", "object": "404a6565a67636c0362bb44d72891b0b92da6f6e"},
+    {"rule": "internal-host", "object": "e159e453fc85cb3b6260954d5b78ec1bb071bb90"},
+    {"rule": "internal-host", "object": "56d0d9de161495fd02e4b563187ccc8e9399672a"},
+    {"rule": "internal-host", "object": "45193142b69f6f54961b00f8fb4e4a4b6507b36a"},
+    {"rule": "internal-host", "object": "4af0abfd303cc91a42dfcdc45f79b36256d49479"},
+    {"rule": "internal-host", "object": "e7e53c6cd4ddabe0d25a4161fd3768a17b65a622"},
+    {"rule": "private-doc-link", "object": "5d1d2a3df4d5cf06e9115d6312d34f47c3f13d51"},
+    {"rule": "private-doc-link", "object": "c4be90df24db79672f93cf1c009dc9865ea7006c"},
+    {"rule": "private-doc-link", "object": "054100fc29dd63d90262e71599c05264831ecece"},
+    {"rule": "private-doc-link", "object": "fa8879269a282fc4a0b247e30bf63ae3c49c1b4a"},
+    {"rule": "private-doc-link", "object": "ebc4be380a02a81641c00d1147b859847d078586"}
   ]
 }

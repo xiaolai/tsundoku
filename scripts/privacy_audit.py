@@ -94,7 +94,15 @@ def repository_report(root, run_gitleaks=True):
     root = Path(root).resolve()
     result = []; metadata = bytearray(); checked = set(); forbidden_env = False
     policy = root / '.privacy-policy.json'
-    allowed = json.loads(policy.read_text()).get('public_contact_sha256', []) if policy.exists() else []
+    policy_data = json.loads(policy.read_text()) if policy.exists() else {}
+    allowed = policy_data.get('public_contact_sha256', [])
+    # Exact historical objects only. The HEAD-tree guard below keeps a future
+    # commit from reusing already-published bytes to bypass the rule.
+    allowed_historical = {
+        (row.get('rule'), row.get('object'))
+        for row in policy_data.get('allowed_historical_findings', [])
+        if isinstance(row, dict)
+    }
     commits = git(root, 'rev-list', '--all').decode().splitlines()
     if not commits: result.append(finding('no-history', 'repository'))
     result.extend(scan_bytes(git(root, 'for-each-ref', '--format=%(refname)'), 'ref-names'))
@@ -148,8 +156,24 @@ def repository_report(root, run_gitleaks=True):
     elif run_gitleaks:
         result.append(finding('forbidden-env-not-read', 'history'))
     unique = list({json.dumps(item, sort_keys=True): item for item in result}.values())
+    allowed_count = 0
+    if allowed_historical:
+        head_oids = {
+            line.split()[2]
+            for line in git(root, 'ls-tree', '-r', 'HEAD').decode().splitlines()
+            if line
+        }
+        kept = []
+        for item in unique:
+            if item.get('object') not in head_oids and (
+                item.get('rule'), item.get('object')) in allowed_historical:
+                allowed_count += 1
+            else:
+                kept.append(item)
+        unique = kept
     return {'schema': 1, 'scope': 'all-local-refs-and-tracked-worktree', 'commits': len(commits),
             'checked_objects_and_paths': len(checked), 'gitleaks_ran': run_gitleaks and not forbidden_env,
+            'allowed_historical_findings': allowed_count,
             'passed': not unique, 'findings': unique}
 
 
