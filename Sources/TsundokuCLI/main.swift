@@ -124,6 +124,24 @@ struct TsundokuCLI {
             )
             exit(2)
         }
+        if let action = value("--action", in: arguments),
+            AIAction(rawValue: action) == nil
+        {
+            print(
+                "error: unknown action '\(action)'. Known: "
+                    + AIAction.allCases.map(\.rawValue).joined(
+                        separator: ", "))
+            exit(2)
+        }
+        if let provider = value("--provider", in: arguments),
+            AIProviderOption(rawValue: provider) == nil
+        {
+            print(
+                "error: unknown provider '\(provider)'. Known: "
+                    + AIProviderOption.allCases.map(\.rawValue).joined(
+                        separator: ", "))
+            exit(2)
+        }
         do {
             let live = try KindleLive.currentPage()
             guard !live.text.isEmpty else {
@@ -135,14 +153,10 @@ struct TsundokuCLI {
                 ?? .explain
             let question = value("--question", in: arguments) ?? ""
             var settings = AISettings.defaults
-            if let provider = value("--provider", in: arguments) {
-                switch provider {
-                case "codex": settings.provider = .codexCLI
-                case "http": settings.provider = .http
-                case "apple": settings.provider = .appleOnDevice
-                case "claude": settings.provider = .claudeCLI
-                default: break
-                }
+            if let raw = value("--provider", in: arguments),
+                let provider = AIProviderOption(rawValue: raw)
+            {
+                settings.provider = provider.settingsValue
             }
             if let model = value("--model", in: arguments) {
                 settings.model = model
@@ -160,6 +174,11 @@ struct TsundokuCLI {
                 action: action, pageText: live.text,
                 bookTitle: live.title, question: question,
                 language: settings.language)
+            if live.text.count > AIComposer.passageLimit {
+                print(
+                    "note: the page is longer than 8,000 characters; the "
+                        + "answer covers its first part only.")
+            }
             do {
                 let answer = try await AIService.answer(
                     for: request, settings: settings)
@@ -177,76 +196,107 @@ struct TsundokuCLI {
         }
     }
 
+    /// Everything a capture needs, validated before the archive is opened or
+    /// the reader is touched.
+    private struct CaptureOptions {
+        let pages: Int
+        let asin: String?
+        let source: BookSource
+        let output: URL
+        let pageSize: CapturePageSize
+        let setup: PageSetupRequest
+        let bundleOptions: CaptureBundleOptions
+        let cleanPage: CleanPagePolicy
+    }
+
+    private static func captureOptions(_ arguments: [String])
+        -> CaptureOptions
+    {
+        let pages: Int
+        if let raw = value("--pages", in: arguments) {
+            guard let parsed = Int(raw), parsed > 0 else {
+                print("error: --pages needs a positive integer")
+                exit(2)
+            }
+            pages = parsed
+        } else {
+            pages = 5
+        }
+        let pageSize: CapturePageSize
+        switch value("--page-size", in: arguments)?.lowercased() {
+        case nil, "asdisplayed", "as-displayed":
+            pageSize = .asDisplayed
+        case "a4":
+            pageSize = .a4
+        case let other?:
+            print(
+                "error: unknown --page-size '\(other)'. Use asdisplayed or "
+                    + "a4.")
+            exit(2)
+        }
+        let outputPath =
+            value("--out", in: arguments)
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("TsundokuExports").path
+        let output = URL(fileURLWithPath: outputPath)
+            .appendingPathComponent(
+                "capture-\(Int(Date().timeIntervalSince1970))")
+        let setup = PageSetupRequest(
+            pageSize: pageSize,
+            font: optionalInteger("--font-size", arguments),
+            booksFontSteps: optionalInteger("--text-size", arguments) ?? 0,
+            cropTop: cropValue("--crop-top", arguments) ?? 0,
+            cropBottom: cropValue("--crop-bottom", arguments))
+        let bundleOptions = CaptureBundleOptions(
+            includeCoverPage: !arguments.contains("--no-cover"),
+            writeSidecars: !arguments.contains("--no-sidecars"),
+            copyOriginal: arguments.contains("--copy-original"),
+            pageSize: pageSize.points)
+        return CaptureOptions(
+            pages: pages, asin: value("--asin", in: arguments),
+            source: sourceValue(arguments), output: output,
+            pageSize: pageSize, setup: setup, bundleOptions: bundleOptions,
+            cleanPage: arguments.contains("--clean-page")
+                ? .hidePopularHighlights : .asDisplayed)
+    }
+
+    private static func resolveCaptureBook(
+        _ options: CaptureOptions, archive: Archive
+    ) throws -> Book? {
+        guard let asin = options.asin else { return nil }
+        // An identifier the archive does not know cannot verify what the
+        // reader is showing; resolving its cover or original would attach
+        // another book's metadata to this capture.
+        guard
+            let matched = BookLookup.book(
+                asin: asin, source: options.source,
+                in: try archive.books())
+        else {
+            print(
+                "error: no \(options.source.displayName) book with ASIN "
+                    + "\(asin) in the archive; import it first or capture "
+                    + "without --asin")
+            exit(1)
+        }
+        return matched
+    }
+
     private static func capture(_ arguments: [String]) {
+        let options = captureOptions(arguments)
+        let kind: ReaderKind =
+            options.source == .appleBooks ? .appleBooks : .kindle
         do {
             let archive = try Archive.standard()
-            let asin = value("--asin", in: arguments)
-            let source = sourceValue(arguments)
-            let kind: ReaderKind =
-                source == .appleBooks ? .appleBooks : .kindle
-            let book: Book?
-            if let asin {
-                // An identifier the archive does not know cannot verify what
-                // the reader is showing; resolving its cover or original
-                // would attach another book's metadata to this capture.
-                guard
-                    let matched = BookLookup.book(
-                        asin: asin, source: source,
-                        in: try archive.books())
-                else {
-                    print(
-                        "error: no \(source.displayName) book with ASIN "
-                            + "\(asin) in the archive; import it first or "
-                            + "capture without --asin")
-                    exit(1)
-                }
-                book = matched
-            } else {
-                book = nil
-            }
-            let pages = Int(value("--pages", in: arguments) ?? "5") ?? 5
-            let outputPath =
-                value("--out", in: arguments)
-                ?? FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent("TsundokuExports").path
-            let output = URL(fileURLWithPath: outputPath)
-                .appendingPathComponent(
-                    "capture-\(Int(Date().timeIntervalSince1970))")
+            let book = try resolveCaptureBook(options, archive: archive)
             // Ctrl-C must cancel cooperatively, or the engine never restores
             // the reading position or the Popular Highlights setting.
-            let pageSize: CapturePageSize =
-                value("--page-size", in: arguments)?.lowercased() == "a4"
-                ? .a4 : .asDisplayed
-            let setup = PageSetupRequest(
-                pageSize: pageSize,
-                font: Int(value("--font-size", in: arguments) ?? ""),
-                booksFontSteps: Int(
-                    value("--text-size", in: arguments) ?? "") ?? 0,
-                cropTop: cropValue("--crop-top", arguments) ?? 0,
-                cropBottom: cropValue("--crop-bottom", arguments))
             let flag = CancellationFlag()
-            signal(SIGINT, SIG_IGN)
-            signal(SIGTERM, SIG_IGN)
-            let interrupt = DispatchSource.makeSignalSource(
-                signal: SIGINT, queue: .global())
-            interrupt.setEventHandler { flag.set() }
-            interrupt.resume()
-            let terminate = DispatchSource.makeSignalSource(
-                signal: SIGTERM, queue: .global())
-            terminate.setEventHandler { flag.set() }
-            terminate.resume()
-            defer {
-                interrupt.cancel()
-                terminate.cancel()
-            }
+            let cancelSignals = installCancellationHandlers(flag: flag)
+            defer { cancelSignals() }
             let engine = CaptureEngine(archive: archive)
-            let bundleOptions = CaptureBundleOptions(
-                includeCoverPage: !arguments.contains("--no-cover"),
-                writeSidecars: !arguments.contains("--no-sidecars"),
-                copyOriginal: arguments.contains("--copy-original"),
-                pageSize: pageSize.points)
             let result = try engine.capture(
-                book: book, kind: kind, pageLimit: pages, output: output,
+                book: book, kind: kind, pageLimit: options.pages,
+                output: options.output,
                 progress: { progress in
                     print(
                         "page \(progress.page)"
@@ -256,10 +306,9 @@ struct TsundokuCLI {
                             + " · \(progress.message)")
                 },
                 isCancelled: { flag.isSet },
-                cleanPage: arguments.contains("--clean-page")
-                    ? .hidePopularHighlights : .asDisplayed,
-                pageSetup: setup,
-                bundle: CaptureBundleRequest(options: bundleOptions))
+                cleanPage: options.cleanPage,
+                pageSetup: options.setup,
+                bundle: CaptureBundleRequest(options: options.bundleOptions))
             print("pdf=\(result.pdf.path)")
             print("pages=\(result.pages)")
             print("title=\(result.title)")
@@ -268,11 +317,42 @@ struct TsundokuCLI {
                 print("cleanPage=\(clean.changed ? "changed" : "unchanged")"
                     + " restored=\(clean.restored)")
             }
-            printBundleSummary(at: output)
+            printBundleSummary(at: options.output)
         } catch {
             print("error: \(error)")
             exit(1)
         }
+    }
+
+    /// An optional integer option. A present but malformed value is a usage
+    /// error; silently ignoring it would run a different capture.
+    private static func optionalInteger(
+        _ flag: String, _ arguments: [String]
+    ) -> Int? {
+        guard let raw = value(flag, in: arguments) else { return nil }
+        guard let parsed = Int(raw) else {
+            print("error: \(flag) needs an integer")
+            exit(2)
+        }
+        return parsed
+    }
+
+    /// Route Ctrl-C and SIGTERM into a cooperative cancellation flag so the
+    /// capture engine can restore the reader before exiting. The returned
+    /// closure removes the signal sources.
+    private static func installCancellationHandlers(
+        flag: CancellationFlag
+    ) -> () -> Void {
+        signal(SIGINT, SIG_IGN)
+        signal(SIGTERM, SIG_IGN)
+        let sources = [SIGINT, SIGTERM].map { number in
+            let source = DispatchSource.makeSignalSource(
+                signal: number, queue: .global())
+            source.setEventHandler { flag.set() }
+            source.resume()
+            return source
+        }
+        return { sources.forEach { $0.cancel() } }
     }
 
     /// Report the bundle objects the manifest recorded, without any book text.
@@ -334,6 +414,7 @@ struct TsundokuCLI {
                 }
                 print("restored=\(outcome.restored)")
                 print("reason=\(outcome.reason ?? "none")")
+                if !outcome.restored { exit(1) }
             default:
                 print("usage: tsundoku-cli clean-page status|begin|recover")
                 exit(2)
@@ -367,6 +448,7 @@ struct TsundokuCLI {
             }
             print("restored=\(outcome.restored)")
             print("reason=\(outcome.reason ?? "none")")
+            if !outcome.restored { exit(1) }
         default:
             print("usage: tsundoku-cli page-setup status|recover")
             exit(2)
@@ -376,28 +458,56 @@ struct TsundokuCLI {
     private static func export(_ arguments: [String]) {
         do {
             let archive = try Archive.standard()
-            let format =
-                AnnotationExportFormat(
-                    rawValue: value("--format", in: arguments) ?? "json")
-                ?? .json
+            let format: AnnotationExportFormat
+            if let raw = value("--format", in: arguments)?.lowercased() {
+                guard let parsed = AnnotationExportFormat(rawValue: raw) else {
+                    print(
+                        "error: unknown --format '\(raw)'. Known: "
+                            + AnnotationExportFormat.allCases.map(\.rawValue)
+                                .joined(separator: ", "))
+                    exit(2)
+                }
+                format = parsed
+            } else {
+                format = .json
+            }
             let path =
                 value("--out", in: arguments)
                 ?? FileManager.default.homeDirectoryForCurrentUser
                     .appendingPathComponent(
                         "tsundoku-annotations.\(format.fileExtension)").path
+            // An absent filter exports everything; a present but unknown
+            // value must not silently become "no filter" and export more
+            // than the caller asked for.
             let provenance: AnnotationProvenance?
-            switch value("--provenance", in: arguments) {
-            case "mine": provenance = .user
-            case "popular": provenance = .amazon
-            case "system": provenance = .system
-            default: provenance = nil
+            if let raw = value("--provenance", in: arguments)?.lowercased() {
+                switch raw {
+                case "mine": provenance = .user
+                case "popular": provenance = .amazon
+                case "system": provenance = .system
+                default:
+                    print(
+                        "error: unknown --provenance '\(raw)'. Use mine, "
+                            + "popular or system.")
+                    exit(2)
+                }
+            } else {
+                provenance = nil
             }
             let source: BookSource?
-            switch value("--source", in: arguments)?.lowercased() {
-            case "kindle": source = .kindle
-            case "applebooks", "apple-books", "apple", "books":
-                source = .appleBooks
-            default: source = nil
+            if let raw = value("--source", in: arguments)?.lowercased() {
+                switch raw {
+                case "kindle": source = .kindle
+                case "applebooks", "apple-books", "apple", "books":
+                    source = .appleBooks
+                default:
+                    print(
+                        "error: unknown --source '\(raw)'. Use kindle or "
+                            + "applebooks.")
+                    exit(2)
+                }
+            } else {
+                source = nil
             }
             let url = URL(fileURLWithPath: path)
             try archive.exportAnnotations(
@@ -437,14 +547,26 @@ struct TsundokuCLI {
     private static func track(_ arguments: [String]) {
         do {
             let archive = try Archive.standard()
-            let asin = value("--asin", in: arguments) ?? ""
+            let asin: String
+            if let raw = value("--asin", in: arguments), !raw.isEmpty {
+                asin = raw
+            } else if let current = KindleLive.lastOpenedBookID() {
+                asin = current
+                print("asin=\(asin) (current book)")
+            } else {
+                print(
+                    "error: track needs --asin; Kindle reports no open book")
+                exit(2)
+            }
             let seconds =
                 Double(value("--seconds", in: arguments) ?? "6") ?? 6
             let logger = SessionLogger(archive: archive)
-            logger.setBook(asin.isEmpty ? nil : asin)
+            logger.setBook(asin)
             logger.start()
             Thread.sleep(forTimeInterval: seconds)
-            logger.stop()
+            // No logger can be ticking with a book when this returns, so the
+            // session query below sees the writes the tracking produced.
+            logger.stopAndDrain()
             let sessions = try archive.sessions()
             print("sessions=\(sessions.count)")
             for session in sessions.prefix(5) {
@@ -491,13 +613,7 @@ struct TsundokuCLI {
 
     private static func appleBooks(_ arguments: [String]) {
         do {
-            let paths: BooksPaths
-            if let container = value("--container", in: arguments) {
-                paths = BooksPaths(
-                    container: URL(fileURLWithPath: container))
-            } else {
-                paths = BooksPaths.standard()
-            }
+            let paths = booksPaths(arguments)
             guard paths.exists else {
                 print(
                     "Apple Books stores not found at \(paths.container.path)")
@@ -711,12 +827,38 @@ struct TsundokuCLI {
         }
     }
 
+    /// The CLI's short provider names, mapped to the settings' cases.
+    private enum AIProviderOption: String, CaseIterable {
+        case claude
+        case codex
+        case http
+        case apple
+
+        var settingsValue: AIProviderKind {
+            switch self {
+            case .claude: .claudeCLI
+            case .codex: .codexCLI
+            case .http: .http
+            case .apple: .appleOnDevice
+            }
+        }
+    }
+
+    /// Kindle only when `--source` is absent. An unknown value is a typo, not
+    /// a request to capture the other reader.
     private static func sourceValue(_ arguments: [String]) -> BookSource {
-        switch value("--source", in: arguments)?.lowercased() {
+        guard let raw = value("--source", in: arguments)?.lowercased() else {
+            return .kindle
+        }
+        switch raw {
+        case "kindle":
+            return .kindle
         case "books", "applebooks", "apple-books", "apple":
-            .appleBooks
+            return .appleBooks
         default:
-            .kindle
+            print(
+                "error: unknown --source '\(raw)'. Use kindle or applebooks.")
+            exit(2)
         }
     }
 
@@ -763,13 +905,22 @@ struct TsundokuCLI {
         return value
     }
 
+    /// One flag, exactly one value. A repeated flag is ambiguous and a value
+    /// that looks like another option means the value was forgotten; both are
+    /// usage errors rather than a silent default.
     private static func value(_ flag: String, in arguments: [String])
         -> String?
     {
-        guard let index = arguments.firstIndex(of: flag),
-            arguments.indices.contains(index + 1)
-        else { return nil }
-        return arguments[index + 1]
+        let indices = arguments.indices.filter { arguments[$0] == flag }
+        guard !indices.isEmpty else { return nil }
+        guard indices.count == 1, indices[0] + 1 < arguments.count,
+            !arguments[indices[0] + 1].hasPrefix("--")
+        else {
+            print(
+                "error: \(flag) needs exactly one value and may appear once")
+            exit(2)
+        }
+        return arguments[indices[0] + 1]
     }
 
     /// Prints the local text index the companion uses: a capture's chapters
