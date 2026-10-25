@@ -30,12 +30,16 @@ public final class KindleCaptureSession: ReaderCaptureSession {
     private let settleTimeout: TimeInterval
     private let restoreTimeout: TimeInterval
     private let initialWindow: AXNode.Frame
-    private let pageRect: CGRect
-    private let calibration: PageFrameCalibration
+    private var pageRect: CGRect
+    private var calibration: PageFrameCalibration
+    /// A cover or a plate leaves no text headroom for the page box. A capture
+    /// may start on one (a whole-book capture rewinds first) and calibrate on
+    /// the first page that can take the box.
+    private var needsCalibration = false
     private let opening: PageLocation
     private let pageCrop: PageCrop
     private let openingPageCount: Int?
-    private let openingTextWidth: Double?
+    private var openingTextWidth: Double?
     private var openingMark: PageMark?
     private let pageSetupGuard: KindlePageSetup?
     private var records: [TurnRecord] = []
@@ -93,13 +97,17 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 reason: "full-screen capture is not supported; "
                     + "leave the menu bar visible")
         }
-        let calibration = PageFrame.resolve(
+        var calibration = PageFrame.resolve(
             window: windowRect, text: textRect,
             chrome: first.chromeInsets)
-        guard calibration.status != .refused else {
-            throw ReaderCaptureError.captureFailed(
-                .kindle,
-                reason: calibration.reason ?? "the page box was refused")
+        // Starting on a cover or a plate is not a failed capture: the box is
+        // recalibrated on the first page that can take it, after the rewind
+        // or the front-matter skip has found one.
+        let startsUncalibrated = calibration.status == .refused
+        if startsUncalibrated {
+            calibration = PageFrameCalibration(
+                insets: .measured, status: .unverified,
+                reason: calibration.reason, chrome: nil, headroom: nil)
         }
         let rect = PageFrame.pageRect(
             window: windowRect, insets: calibration.insets)
@@ -109,7 +117,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 reason: "the page frame is too small: "
                     + "\(Int(rect.width))×\(Int(rect.height))")
         }
-        if let page = pageSetupGuard?.pageSize.points {
+        if !startsUncalibrated, let page = pageSetupGuard?.pageSize.points {
             let tolerance = 1.5
             guard
                 abs(rect.width - page.width) <= tolerance,
@@ -143,6 +151,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         self.initialWindow = window
         self.pageRect = rect
         self.calibration = calibration
+        self.needsCalibration = startsUncalibrated
         self.opening = PageLocation(
             pageNumber: first.pageNumber, pageCount: first.pageCount)
         self.pageCrop = pageCrop
@@ -174,6 +183,10 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         guard live.isReading else {
             throw ReaderCaptureError.notReading(
                 .kindle, state: live.state)
+        }
+        if needsCalibration {
+            try calibrate(from: live)
+            needsCalibration = false
         }
         try validate(live)
         let raw = try captureRaw()
@@ -318,6 +331,143 @@ public final class KindleCaptureSession: ReaderCaptureSession {
 
     public var pageSetupOutcome: PageSetupOutcome? {
         pageSetupGuard?.outcome
+    }
+
+    private var storedRewind: RewindReport?
+
+    public var rewindOutcome: RewindReport? { storedRewind }
+
+    /// Returns to the book's first page by turning backward until the reader
+    /// stops moving.
+    ///
+    /// Kindle publishes no page number while its chrome is hidden, so the
+    /// start is confirmed by three consecutive backward presses that change
+    /// neither the text nor the page image — a single dropped key cannot end
+    /// the rewind early.
+    public func rewindToStart() throws -> RewindReport {
+        try checkCancelled()
+        let opening = try readCurrent()
+        guard opening.isReading else {
+            throw ReaderCaptureError.notReading(.kindle, state: opening.state)
+        }
+        var previousText = opening.text
+        var previousHash = (try? captureRaw()).map {
+            ImageFingerprint.detailHash($0)
+        }
+        var turns = 0
+        var unchanged = 0
+        // The location total is the page count when Kindle exposed it; without
+        // it the cap is generous enough for any book a reader would capture.
+        let cap = min(max((openingPageCount ?? 800) + 20, 60), 1_500)
+        while turns < cap {
+            try checkCancelled()
+            try turnBackward()
+            sleep(settleMinimum)
+            let deadline = now().addingTimeInterval(min(settleTimeout, 0.8))
+            var moved = false
+            while now() < deadline {
+                try checkCancelled()
+                guard let live = try? readCurrent(), live.isReading else {
+                    sleep(0.05)
+                    continue
+                }
+                let hash = (try? captureRaw()).map {
+                    ImageFingerprint.detailHash($0)
+                }
+                let textChanged = live.text != previousText
+                let hashChanged =
+                    hash != nil && previousHash != nil && hash != previousHash
+                if textChanged || hashChanged {
+                    previousText = live.text
+                    if let hash { previousHash = hash }
+                    moved = true
+                    break
+                }
+                sleep(0.05)
+            }
+            turns += 1
+            if moved {
+                unchanged = 0
+            } else {
+                unchanged += 1
+                if unchanged >= 3 {
+                    // A cover or a full-page plate leaves no room for the
+                    // chrome crop; step forward to the first page the capture
+                    // box can actually take. The generated cover page stands
+                    // in for the skipped front matter.
+                    var skipped = 0
+                    var current = try? readCurrent()
+                    var currentHash = (try? captureRaw()).map {
+                        ImageFingerprint.detailHash($0)
+                    }
+                    while skipped < 12 {
+                        try checkCancelled()
+                        guard let live = current, live.isReading else {
+                            break
+                        }
+                        if !pageBoxRefused(live) { break }
+                        try turnForward()
+                        // Wait for the page to change before judging the next
+                        // box: a dropped key must not burn a skip.
+                        let deadline = now().addingTimeInterval(
+                            min(settleTimeout, 1.2))
+                        var next: (page: LivePage, hash: UInt64?)?
+                        while now() < deadline {
+                            try checkCancelled()
+                            guard let candidate = try? readCurrent(),
+                                candidate.isReading
+                            else {
+                                sleep(0.05)
+                                continue
+                            }
+                            let hash = (try? captureRaw()).map {
+                                ImageFingerprint.detailHash($0)
+                            }
+                            let changed =
+                                candidate.text != live.text
+                                || (hash != nil && currentHash != nil
+                                    && hash != currentHash)
+                            if changed {
+                                next = (candidate, hash)
+                                break
+                            }
+                            sleep(0.05)
+                        }
+                        guard let next else { break }
+                        current = next.page
+                        currentHash = next.hash
+                        skipped += 1
+                    }
+                    let report = RewindReport(
+                        attempted: true, reachedStart: true, turns: turns,
+                        skippedPages: skipped, method: "backward turns",
+                        reason: nil)
+                    storedRewind = report
+                    return report
+                }
+            }
+        }
+        let report = RewindReport(
+            attempted: true, reachedStart: false, turns: turns,
+            method: "backward turns",
+            reason: "the reader was still moving after \(turns) backward turns")
+        storedRewind = report
+        return report
+    }
+
+    /// Whether the page cannot carry the capture's box: a full-page image or
+    /// a cover has no text headroom for the chrome crop.
+    private func pageBoxRefused(_ live: LivePage) -> Bool {
+        guard let window = live.windowFrame else { return true }
+        let windowRect = CGRect(
+            x: window.x, y: window.y,
+            width: window.width, height: window.height)
+        let textRect = live.pageTextFrame.map {
+            CGRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height)
+        }
+        let frame = PageFrame.resolve(
+            window: windowRect, text: textRect, chrome: live.chromeInsets)
+        return frame.status == .refused
     }
 
     public func restore() -> RestoreReport {
@@ -531,6 +681,62 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 .kindle,
                 reason: "the page changed while its screenshot was taken")
         }
+    }
+
+    /// Fixes the page box from the first page that can take it, after a
+    /// capture started on a cover or a plate.
+    private func calibrate(from live: LivePage) throws {
+        guard let window = live.windowFrame else {
+            throw ReaderCaptureError.captureFailed(
+                .kindle, reason: "the reader window disappeared")
+        }
+        let windowRect = CGRect(
+            x: window.x, y: window.y,
+            width: window.width, height: window.height)
+        let textRect = live.pageTextFrame.map {
+            CGRect(
+                x: $0.x, y: $0.y, width: $0.width, height: $0.height)
+        }
+        let current = PageFrame.resolve(
+            window: windowRect, text: textRect, chrome: live.chromeInsets)
+        guard current.status != .refused else {
+            throw ReaderCaptureError.captureFailed(
+                .kindle,
+                reason: current.reason ?? "the page box was refused")
+        }
+        let rect = PageFrame.pageRect(
+            window: windowRect, insets: current.insets)
+        guard rect.width > 100, rect.height > 100 else {
+            throw ReaderCaptureError.captureFailed(
+                .kindle,
+                reason: "the page frame is too small: "
+                    + "\(Int(rect.width))×\(Int(rect.height))")
+        }
+        if let page = pageSetupGuard?.pageSize.points {
+            let tolerance = 1.5
+            guard
+                abs(rect.width - page.width) <= tolerance,
+                abs(rect.height - page.height) <= tolerance
+            else {
+                throw ReaderCaptureError.captureFailed(
+                    .kindle,
+                    reason: "the layout produced "
+                        + "\(Int(rect.width))×\(Int(rect.height)) points "
+                        + "instead of \(Int(page.width))×"
+                        + "\(Int(page.height)); the window was refused")
+            }
+        }
+        do {
+            try pageCrop.validate(pageHeight: rect.height)
+        } catch {
+            throw ReaderCaptureError.captureFailed(
+                .kindle, reason: "crop: \(error)")
+        }
+        calibration = current
+        pageRect = rect
+        // The cover's text frame (often the whole window) is not the body
+        // column; the width guard follows the first page that can be captured.
+        openingTextWidth = textRect.map { Double($0.width) }
     }
 
     private func validate(_ live: LivePage) throws {

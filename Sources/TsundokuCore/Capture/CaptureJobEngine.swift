@@ -55,6 +55,26 @@ public struct CaptureJobEngine: Sendable {
                     + "reports \(observed)")
         }
 
+        // A whole-book capture starts at the book's first page, never at
+        // whatever page happened to be open. A reader that cannot return
+        // reports it and the capture says so in its manifest.
+        var rewind: RewindReport?
+        if pageLimit == nil {
+            do {
+                rewind = try session.rewindToStart()
+            } catch {
+                throw Self.attach(
+                    restore: nil, clean: nil, to: error, kind: subject.kind)
+            }
+            if rewind?.attempted == true, rewind?.reachedStart == false {
+                throw ReaderCaptureError.captureFailed(
+                    subject.kind,
+                    reason: "could not return to the first page: "
+                        + (rewind?.reason
+                            ?? "the reader did not stop moving"))
+            }
+        }
+
         // The clean-page toggle runs before any page is written, so a refused
         // control aborts before `pages/` exists.
         var cleanGuard: CleanPageGuard?
@@ -403,6 +423,11 @@ public struct CaptureJobEngine: Sendable {
                 "Popular Highlights was not restored"
                     + (cleanRestore.reason.map { ": \($0)" } ?? ""))
         }
+        if rewind?.attempted == false {
+            warnings.append(
+                "This reader cannot return to the first page; the capture "
+                    + "started at the current page.")
+        }
         manifest["complete"] = [
             "requestedRange": verification.structural && completeRequested,
             "structural": verification.structural,
@@ -539,6 +564,9 @@ public struct CaptureJobEngine: Sendable {
             "warnings": [],
         ]
         if !crop.isEmpty { manifest["crop"] = crop }
+        if let rewind = session.rewindOutcome {
+            manifest["rewind"] = rewind.manifest
+        }
         if let pageSetup = session.pageSetupOutcome {
             manifest["pageSetup"] = pageSetup.manifest
         }

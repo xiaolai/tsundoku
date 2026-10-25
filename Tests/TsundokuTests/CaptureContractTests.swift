@@ -67,6 +67,19 @@ private final class FakeSession: ReaderCaptureSession {
     var onRestore: (() -> Void)?
     var pageSetupOutcome: PageSetupOutcome?
     var restoreReport: RestoreReport
+    var rewindReport: RewindReport? = RewindReport(
+        attempted: true, reachedStart: true, turns: 3, method: "fake",
+        reason: nil)
+    var rewindCalls = 0
+
+    func rewindToStart() throws -> RewindReport {
+        rewindCalls += 1
+        return rewindReport ?? RewindReport(
+            attempted: true, reachedStart: true, turns: 0, method: "fake",
+            reason: nil)
+    }
+
+    var rewindOutcome: RewindReport? { rewindReport }
 
     init(
         identity: ObservedIdentity,
@@ -387,6 +400,180 @@ struct CaptureContractTests {
         let all = try manifest(at: result)
         let restore = try #require(all["restore"] as? [String: Any])
         #expect(restore["exact"] as? Bool == false)
+    }
+
+    @Test("a whole-book capture returns to the first page first")
+    func wholeBookRewinds() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = try testSnapshot()
+        let session = FakeSession(
+            identity: page.identity, snapshots: [page],
+            transitions: [.endOfBook(record(terminal: true))])
+        let result = try run(session, archive: archive, directory: directory)
+        #expect(session.rewindCalls == 1)
+        let all = try manifest(at: result)
+        let rewind = try #require(all["rewind"] as? [String: Any])
+        #expect(rewind["reachedStart"] as? Bool == true)
+        #expect(rewind["turns"] as? Int == 3)
+    }
+
+    @Test("a limited capture does not return to the first page")
+    func limitedCaptureDoesNotRewind() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = try testSnapshot()
+        let session = FakeSession(
+            identity: page.identity, snapshots: [page], transitions: [])
+        _ = try run(
+            session, archive: archive, directory: directory, pageLimit: 1)
+        #expect(session.rewindCalls == 0)
+    }
+
+    @Test("a rewind that cannot reach the first page fails the capture")
+    func failedRewindFails() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = try testSnapshot()
+        let session = FakeSession(
+            identity: page.identity, snapshots: [page],
+            transitions: [.endOfBook(record(terminal: true))])
+        session.rewindReport = RewindReport(
+            attempted: true, reachedStart: false, turns: 10,
+            method: "fake", reason: "still moving")
+        #expect(throws: ReaderCaptureError.self) {
+            try run(session, archive: archive, directory: directory)
+        }
+        #expect(session.snapshotCalls == 0)
+    }
+
+    @Test("a Kindle rewind presses back until the page stops changing")
+    func kindleRewinds() throws {
+        let frame = AXNode.Frame(x: 0, y: 0, width: 800, height: 1000)
+        final class Box: @unchecked Sendable {
+            var index: Int
+            init(index: Int) { self.index = index }
+        }
+        let box = Box(index: 2)
+        func page(_ index: Int) -> LivePage {
+            LivePage(
+                state: "readingChromeHidden", text: "page \(index + 1)",
+                title: "A Book", characters: 6, windowFrame: frame,
+                pageTextFrame: nil, endOfBook: false,
+                pageNumber: index + 1, pageCount: 3)
+        }
+        let session = try KindleCaptureSession(
+            subject: CaptureSubject(book: nil, kind: .kindle),
+            cancellation: CancellationFlag(),
+            readPage: { page(box.index) },
+            capture: { _ in try testImage() },
+            turnForward: {},
+            turnBackward: {
+                if box.index > 0 { box.index -= 1 }
+            },
+            escape: {},
+            sleep: { _ in },
+            now: Date.init,
+            isTrusted: { true },
+            isRunning: { true },
+            activate: {},
+            settleMinimum: 0,
+            settleTimeout: 0.05)
+        let report = try session.rewindToStart()
+        #expect(report.reachedStart)
+        #expect(box.index == 0)
+        // Two pages moved, then three presses at the first page confirm it.
+        #expect(report.turns == 5)
+        #expect(session.rewindOutcome == report)
+    }
+
+    @Test("a Kindle rewind steps over a cover it cannot capture")
+    func kindleRewindSkipsCover() throws {
+        let frame = AXNode.Frame(x: 0, y: 0, width: 800, height: 1000)
+        let text = AXNode.Frame(x: 100, y: 100, width: 600, height: 700)
+        final class Box: @unchecked Sendable {
+            var index: Int
+            init(index: Int) { self.index = index }
+        }
+        let box = Box(index: 2)
+        func page(_ index: Int) -> LivePage {
+            // The first page is a full-page cover: its text box leaves no
+            // headroom for the chrome crop, so the capture box is refused.
+            if index == 0 {
+                return LivePage(
+                    state: "readingChromeHidden", text: "", title: "A Book",
+                    characters: 0, windowFrame: frame, pageTextFrame: frame,
+                    endOfBook: false, pageNumber: 1, pageCount: 3,
+                    chromeInsets: CaptureInsets(
+                        top: 54, bottom: 54, left: 52, right: 52))
+            }
+            return LivePage(
+                state: "readingChromeHidden", text: "page \(index + 1)",
+                title: "A Book", characters: 6, windowFrame: frame,
+                pageTextFrame: text, endOfBook: false,
+                pageNumber: index + 1, pageCount: 3)
+        }
+        let session = try KindleCaptureSession(
+            subject: CaptureSubject(book: nil, kind: .kindle),
+            cancellation: CancellationFlag(),
+            readPage: { page(box.index) },
+            capture: { _ in try testImage() },
+            turnForward: {
+                if box.index < 2 { box.index += 1 }
+            },
+            turnBackward: {
+                if box.index > 0 { box.index -= 1 }
+            },
+            escape: {},
+            sleep: { _ in },
+            now: Date.init,
+            isTrusted: { true },
+            isRunning: { true },
+            activate: {},
+            settleMinimum: 0,
+            settleTimeout: 0.05)
+        let report = try session.rewindToStart()
+        #expect(report.reachedStart)
+        #expect(report.skippedPages == 1)
+        #expect(box.index == 1)
+    }
+
+    @Test("a session can start on a cover and calibrate on the first text page")
+    func startingOnACoverCalibrates() throws {
+        let frame = AXNode.Frame(x: 0, y: 0, width: 800, height: 1000)
+        let text = AXNode.Frame(x: 100, y: 100, width: 600, height: 700)
+        final class Box: @unchecked Sendable {
+            var page: LivePage
+            init(_ page: LivePage) { self.page = page }
+        }
+        let cover = LivePage(
+            state: "readingChromeHidden", text: "", title: "A Book",
+            characters: 0, windowFrame: frame, pageTextFrame: frame,
+            endOfBook: false, pageNumber: 1, pageCount: 10,
+            chromeInsets: CaptureInsets(
+                top: 54, bottom: 54, left: 52, right: 52))
+        let body = LivePage(
+            state: "readingChromeHidden", text: "body text", title: "A Book",
+            characters: 9, windowFrame: frame, pageTextFrame: text,
+            endOfBook: false, pageNumber: 2, pageCount: 10)
+        let box = Box(cover)
+        let session = try KindleCaptureSession(
+            subject: CaptureSubject(book: nil, kind: .kindle),
+            cancellation: CancellationFlag(),
+            readPage: { box.page },
+            capture: { _ in try testImage() },
+            turnForward: {},
+            turnBackward: {},
+            escape: {},
+            sleep: { _ in },
+            now: Date.init,
+            isTrusted: { true },
+            isRunning: { true },
+            activate: {})
+        // Starting on the cover must not fail the session.
+        box.page = body
+        let snapshot = try session.snapshot()
+        #expect(snapshot.text == "body text")
     }
 
     @Test("a locked session refuses before creating pages")

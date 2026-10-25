@@ -215,6 +215,46 @@ public struct RestoreReport: Sendable {
     }
 }
 
+/// The result of returning a reader to the book's first page before a
+/// whole-book capture.
+///
+/// A chrome-hidden Kindle publishes no page number, so `reachedStart` means
+/// the reader stopped moving backward — not a verified page 1.
+public struct RewindReport: Sendable, Equatable {
+    public let attempted: Bool
+    public let reachedStart: Bool
+    public let turns: Int
+    /// Front-matter pages without a usable text box that were stepped over to
+    /// reach the first captureable page.
+    public let skippedPages: Int
+    public let method: String
+    public let reason: String?
+
+    public init(
+        attempted: Bool, reachedStart: Bool, turns: Int,
+        skippedPages: Int = 0, method: String, reason: String?
+    ) {
+        self.attempted = attempted
+        self.reachedStart = reachedStart
+        self.turns = turns
+        self.skippedPages = skippedPages
+        self.method = method
+        self.reason = reason
+    }
+
+    public var manifest: [String: Any] {
+        var value: [String: Any] = [
+            "attempted": attempted,
+            "reachedStart": reachedStart,
+            "turns": turns,
+            "skippedPages": skippedPages,
+            "method": method,
+        ]
+        if let reason { value["reason"] = reason }
+        return value
+    }
+}
+
 public enum Termination: Sendable, Equatable {
     case endOfBook
     case pageLimit
@@ -285,8 +325,20 @@ public protocol ReaderCaptureSession: AnyObject {
     func advance(after mark: PageMark) throws -> PageTransition
     func restore() -> RestoreReport
     var pageSetupOutcome: PageSetupOutcome? { get }
+    /// Returns to the book's first page before a whole-book capture.
+    func rewindToStart() throws -> RewindReport
+    var rewindOutcome: RewindReport? { get }
 }
 
 public extension ReaderCaptureSession {
     var pageSetupOutcome: PageSetupOutcome? { nil }
+    /// Readers that cannot page backward report that they did not try; the
+    /// capture then starts at the current page and says so in its manifest.
+    func rewindToStart() throws -> RewindReport {
+        RewindReport(
+            attempted: false, reachedStart: false, turns: 0,
+            method: "unsupported",
+            reason: "this reader cannot return to the first page")
+    }
+    var rewindOutcome: RewindReport? { nil }
 }

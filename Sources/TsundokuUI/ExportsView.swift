@@ -62,6 +62,10 @@ public struct ExportsView: View {
                     }
                 }
                 .disabled(model.capturePhase == .running)
+                .help(
+                    "All Pages first returns to the book's first page, then "
+                        + "captures to the end. 10 and 25 pages start at the "
+                        + "page the reader is showing.")
 
                 DisclosureGroup("Advanced Capture Options") {
                     Picker(
