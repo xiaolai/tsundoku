@@ -159,7 +159,8 @@ ICON="$WORK/AppIcon.icon"
 mkdir -p "$ICON/Assets"
 
 white_layer() { # white_layer <source.svg> <output.png>
-    local src=$1 png=$2 white="$WORK/$(basename "$1")"
+    local src=$1 png=$2 white
+    white="$WORK/$(basename "$1")"
     grep -q 'stroke="#' "$src" || die "$src has no stroke colour to neutralise"
     sed -E 's/stroke="#[0-9A-Fa-f]{6}"/stroke="#FFFFFF"/g' "$src" > "$white"
     local leftover

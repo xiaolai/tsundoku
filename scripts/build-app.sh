@@ -60,14 +60,19 @@ esac
 # SwiftPM links with the deployment target as both minos and sdk, which makes
 # macOS treat the app as a legacy build. Record the real SDK so the system
 # applies the current appearance while the minimum stays at macOS 15.
-swift build -c release --product Tsundoku \
+#
+# Build products stay outside $PWD and $HOME: the prefix maps also rewrite
+# module-cache paths, so a scratch directory under either tree makes the
+# compiler warn that every mapped PCM is missing.
+SCRATCH="${TMPDIR:-/tmp}/tsundoku-release-build"
+swift build -c release --product Tsundoku --scratch-path "$SCRATCH" \
     -Xlinker -platform_version -Xlinker macos \
     -Xlinker "$MIN_VERSION" -Xlinker "$SDK_VERSION" \
     -Xswiftc -debug-prefix-map -Xswiftc "$PWD=/src/tsundoku" \
     -Xswiftc -file-prefix-map -Xswiftc "$PWD=/src/tsundoku" \
     -Xswiftc -debug-prefix-map -Xswiftc "$HOME=/build/user" \
     -Xswiftc -file-prefix-map -Xswiftc "$HOME=/build/user"
-BIN="$(swift build -c release --show-bin-path)"
+BIN="$(swift build -c release --scratch-path "$SCRATCH" --show-bin-path)"
 
 # Assemble into a staging bundle, then replace the destination atomically.
 # A failed build leaves the previous app intact.
