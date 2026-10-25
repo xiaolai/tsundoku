@@ -34,6 +34,20 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    public enum BookWorkspaceSection: String, CaseIterable, Identifiable, Hashable {
+        case annotations
+        case chats
+
+        public var id: String { rawValue }
+
+        public var title: String {
+            switch self {
+            case .annotations: "Annotations"
+            case .chats: "Chats"
+            }
+        }
+    }
+
     public enum AnnotationFilter: String, CaseIterable, Identifiable {
         case mine
         case popular
@@ -107,7 +121,10 @@ public final class AppModel: ObservableObject {
     @Published public var annotationSourceFilter: SourceFilter = .all
     @Published public var annotationBookID: String?
     @Published public var bookWorkspaceID: String?
+    @Published public var bookWorkspaceSection: BookWorkspaceSection = .annotations
     @Published public var savedAINotes: [SavedAINote] = []
+    /// Turns stored per book key (an ASIN when the archive knows the book).
+    @Published public var conversationCounts: [String: Int] = [:]
     @Published public var showSavedAINotes = false
     @Published public var sourceHealth: [BookSource: String] = [:]
     @Published public var sourceLastImport: [BookSource: Date] = [:]
@@ -389,6 +406,25 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// Refreshes the per-book chat counts the library column prints.
+    public func refreshConversationCounts() {
+        guard let archive else { return }
+        Task {
+            do {
+                conversationCounts = try await Task.detached {
+                    try archive.conversationCounts()
+                }.value
+            } catch {
+                post("Could not read chat history: \(error)", seconds: 12)
+            }
+        }
+    }
+
+    public func openChats(for book: Book) {
+        bookWorkspaceID = book.asin
+        bookWorkspaceSection = .chats
+    }
+
     public var ebookCount: Int {
         books.filter(\.isEbook).count
     }
@@ -479,6 +515,7 @@ public final class AppModel: ObservableObject {
                 self.sessions = sessions
                 self.captures = captures
                 self.refreshAINotes()
+                self.refreshConversationCounts()
                 self.counts = counts
                 self.status =
                     "\(counts.books) books · \(counts.annotations) "

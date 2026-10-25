@@ -181,8 +181,15 @@ enum TypographyGate {
                     to the dark appearance. This paragraph exists to show the \
                     panel's contrast.
                     """,
-                provider: "Gate", prompt: "")
+                provider: "Gate", prompt: "",
+                context: AIContext(
+                    bookTitle: "Gate", reader: .kindle,
+                    pageNumber: 12, pageCount: 320,
+                    excerpt: model.pageText))
         ]
+        model.context = AIContext(
+            bookTitle: "Gate", reader: .kindle, pageNumber: 12,
+            pageCount: 320, excerpt: model.pageText)
         model.readerKind = .kindle
         model.theme = CompanionTheme(theme)
         model.phase = .ready

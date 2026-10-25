@@ -58,6 +58,17 @@ public struct LibraryView: View {
                         Text(book.author).foregroundStyle(.secondary).lineLimit(
                             1)
                         Spacer()
+                        Picker(
+                            "", selection: $model.bookWorkspaceSection
+                        ) {
+                            ForEach(AppModel.BookWorkspaceSection.allCases) {
+                                section in
+                                Text(section.title).tag(section)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .fixedSize()
                         IconButton(
                             "Open in Annotations",
                             systemImage: "arrow.up.right.square"
@@ -66,7 +77,13 @@ public struct LibraryView: View {
                             model.showAnnotations(for: book)
                         }
                     }.padding(.horizontal, 16).padding(.vertical, 8)
-                    HighlightsView(model: model, book: book).id(book.asin)
+                    switch model.bookWorkspaceSection {
+                    case .annotations:
+                        HighlightsView(model: model, book: book).id(book.asin)
+                    case .chats:
+                        BookChatsView(model: model, book: book)
+                            .id("chats-\(book.asin)")
+                    }
                 }
                 .navigationTitle(book.title)
             } else {
@@ -132,6 +149,14 @@ public struct LibraryView: View {
                     }
                     .width(85)
 
+                    TableColumn("Messages") { book in
+                        let count = model.conversationCounts[book.asin] ?? 0
+                        Text(count == 0 ? "—" : "\(count)")
+                            .foregroundStyle(
+                                count == 0 ? .secondary : .primary)
+                    }
+                    .width(70)
+
                     TableColumn("Last Read", value: \.lastReadSort) { book in
                         Text(TsundokuFormat.date(book.lastView))
                     }
@@ -141,10 +166,17 @@ public struct LibraryView: View {
                 .scrollContentBackground(.hidden)
                 .contextMenu(forSelectionType: String.self) { ids in
                     Button("Open Annotations") {
+                        model.bookWorkspaceSection = .annotations
+                        model.bookWorkspaceID = ids.first
+                    }
+                    .disabled(ids.count != 1)
+                    Button("Open Chats") {
+                        model.bookWorkspaceSection = .chats
                         model.bookWorkspaceID = ids.first
                     }
                     .disabled(ids.count != 1)
                 } primaryAction: { ids in
+                    model.bookWorkspaceSection = .annotations
                     model.bookWorkspaceID = ids.first
                 }
                 .safeAreaInset(edge: .bottom) {
@@ -304,6 +336,10 @@ struct BookDetailView: View {
                         LabeledContent("Annotations") {
                             Text("\(book.userAnnotationCount)")
                         }
+                        LabeledContent("Messages") {
+                            Text(
+                                "\(model.conversationCounts[book.asin] ?? 0)")
+                        }
                     }
 
                     Section("Actions") {
@@ -311,7 +347,14 @@ struct BookDetailView: View {
                             IconButton(
                                 "Read Annotations", systemImage: "book.pages"
                             ) {
+                                model.bookWorkspaceSection = .annotations
                                 model.bookWorkspaceID = book.asin
+                            }
+                            IconButton(
+                                "Open Chats",
+                                systemImage: "bubble.left.and.bubble.right"
+                            ) {
+                                model.openChats(for: book)
                             }
                             IconButton(
                                 "Ask About the Current Reader Page",
