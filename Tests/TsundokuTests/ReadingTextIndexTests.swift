@@ -108,6 +108,48 @@ struct ReadingTextIndexTests {
                 kind: .kindle, identifier: nil, captures: [record]) == nil)
     }
 
+    @Test("shared front matter does not make two books one identity")
+    func fingerprintNeedsMoreThanFrontMatter() {
+        let first = BookTextIndex(pages: [
+            IndexedPage(page: 1, text: "A Shared Title Page"),
+            IndexedPage(page: 2, text: "A Shared Copyright Page"),
+            IndexedPage(page: 3, text: "Only the first book has this chapter."),
+        ])
+        let second = BookTextIndex(pages: [
+            IndexedPage(page: 1, text: "A Shared Title Page"),
+            IndexedPage(page: 2, text: "A Shared Copyright Page"),
+            IndexedPage(page: 3, text: "Only the second book has this chapter."),
+        ])
+        #expect(first.fingerprint != second.fingerprint)
+    }
+
+    @Test("inline markup does not split a word")
+    func inlineMarkup() {
+        #expect(
+            EPUBBookIndex.plainText(
+                "<p>inter<em>national</em>ization and <strong>more</strong>.")
+                == "internationalization and more.")
+    }
+
+    @Test("a toc nav ignores landmarks and a fragment selects its range")
+    func tocAndFragment() {
+        let html = """
+            <nav epub:type="landmarks"><a href="ch1.xhtml">Start reading</a></nav>
+            <nav epub:type="toc"><a href="ch2.xhtml#x">Chapter Two</a></nav>
+            """
+        let anchors = EPUBBookIndex.anchors(in: html)
+        #expect(anchors.map(\.title) == ["Chapter Two"])
+
+        let body = """
+            <body><h2 id="one">One</h2><p>First chapter text here.</p>\
+            <h2 id="two">Two</h2><p>Second chapter text here.</p></body>
+            """
+        let first = EPUBBookIndex.fragmentText(
+            in: body, fragment: "one", next: "two")
+        #expect(first?.contains("First chapter text") == true)
+        #expect(first?.contains("Second chapter text") == false)
+    }
+
     @Test("an EPUB's navigation supplies the chapter, and DRM is refused")
     func epubNavigationAndDRM() throws {
         let root = try temporaryDirectory("epub")

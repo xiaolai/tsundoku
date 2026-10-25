@@ -173,7 +173,24 @@ public enum KindleLive {
     /// last-opened marker updates whenever a book is opened and is the only
     /// identity available in that state.
     public static func lastOpenedBookID() -> String? {
-        bookIDCache.value(now: Date())
+        // Read on every snapshot. A cache here could pair book A's ASIN with
+        // book B's page text for the cache lifetime; the plist read is cheap
+        // and the follow loop only asks once per poll.
+        readLastOpenedBookID()
+    }
+
+    private static func readLastOpenedBookID() -> String? {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Containers/com.amazon.Lassen/Data/Library/"
+                    + "Preferences/com.amazon.Lassen.plist")
+        guard
+            let data = try? Data(contentsOf: url),
+            let plist = try? PropertyListSerialization.propertyList(
+                from: data, options: [], format: nil) as? [String: Any],
+            let raw = plist["WasLastOpenedBookId"] as? String
+        else { return nil }
+        return KindleLive.asin(fromBookID: raw)
     }
 
     /// Kindle stores `A:B075H364NC-0`; the ten-character ASIN is the middle.
@@ -186,38 +203,6 @@ public enum KindleLive {
             asin.allSatisfy({ $0.isLetter || $0.isNumber })
         else { return nil }
         return asin
-    }
-
-    private static let bookIDCache = BookIDCache()
-
-    private final class BookIDCache: @unchecked Sendable {
-        private let lock = NSLock()
-        private var cached: String?
-        private var readAt = Date.distantPast
-        private let lifetime: TimeInterval = 2
-
-        func value(now: Date) -> String? {
-            lock.lock()
-            defer { lock.unlock() }
-            if now.timeIntervalSince(readAt) < lifetime { return cached }
-            readAt = now
-            cached = Self.read()
-            return cached
-        }
-
-        private static func read() -> String? {
-            let url = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(
-                    "Library/Containers/com.amazon.Lassen/Data/Library/"
-                        + "Preferences/com.amazon.Lassen.plist")
-            guard
-                let data = try? Data(contentsOf: url),
-                let plist = try? PropertyListSerialization.propertyList(
-                    from: data, options: [], format: nil) as? [String: Any],
-                let raw = plist["WasLastOpenedBookId"] as? String
-            else { return nil }
-            return KindleLive.asin(fromBookID: raw)
-        }
     }
 
     /// The scene window's frame in the global top-left AX space.

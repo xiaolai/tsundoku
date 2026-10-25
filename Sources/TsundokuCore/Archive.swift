@@ -546,52 +546,59 @@ public final class Archive: @unchecked Sendable {
         try queue.sync {
             let timestamp = date.timeIntervalSince1970
             let cutoff = timestamp - 300
-            let existing = try database.query(
-                """
-                SELECT id FROM sessions
-                WHERE asin = ? AND ended_at >= ?
-                ORDER BY ended_at DESC LIMIT 1
-                """,
-                [.text(asin), .real(cutoff)])
-            let sessionID: Int64
-            if let identifier = existing.first?.int("id") {
-                sessionID = identifier
-            } else {
+            var inserted = false
+            // A session create plus its page row plus the timestamp update is
+            // one logical write; a failure halfway would leave a session with
+            // no observation.
+            try database.transaction {
+                let existing = try database.query(
+                    """
+                    SELECT id FROM sessions
+                    WHERE asin = ? AND ended_at >= ?
+                    ORDER BY ended_at DESC LIMIT 1
+                    """,
+                    [.text(asin), .real(cutoff)])
+                let sessionID: Int64
+                if let identifier = existing.first?.int("id") {
+                    sessionID = identifier
+                } else {
+                    try database.execute(
+                        """
+                        INSERT INTO sessions (asin, started_at, ended_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        [.text(asin), .real(timestamp), .real(timestamp)])
+                    sessionID = database.lastInsertRowID
+                }
+                let last = try database.query(
+                    """
+                    SELECT text FROM page_observations
+                    WHERE session_id = ? ORDER BY id DESC LIMIT 1
+                    """,
+                    [.integer(sessionID)])
+                if last.first?.string("text") == text {
+                    try database.execute(
+                        "UPDATE sessions SET ended_at = ? WHERE id = ?",
+                        [.real(timestamp), .integer(sessionID)])
+                    return
+                }
                 try database.execute(
                     """
-                    INSERT INTO sessions (asin, started_at, ended_at)
-                    VALUES (?, ?, ?)
+                    INSERT OR IGNORE INTO page_observations
+                    (session_id, asin, page, text, observed_at)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    [.text(asin), .real(timestamp), .real(timestamp)])
-                sessionID = database.lastInsertRowID
-            }
-            let last = try database.query(
-                """
-                SELECT text FROM page_observations
-                WHERE session_id = ? ORDER BY id DESC LIMIT 1
-                """,
-                [.integer(sessionID)])
-            if last.first?.string("text") == text {
+                    [
+                        .integer(sessionID), .text(asin),
+                        page.map { .integer(Int64($0)) } ?? .null,
+                        .text(text), .real(timestamp),
+                    ])
                 try database.execute(
                     "UPDATE sessions SET ended_at = ? WHERE id = ?",
                     [.real(timestamp), .integer(sessionID)])
-                return false
+                inserted = true
             }
-            try database.execute(
-                """
-                INSERT OR IGNORE INTO page_observations
-                (session_id, asin, page, text, observed_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [
-                    .integer(sessionID), .text(asin),
-                    page.map { .integer(Int64($0)) } ?? .null, .text(text),
-                    .real(timestamp),
-                ])
-            try database.execute(
-                "UPDATE sessions SET ended_at = ? WHERE id = ?",
-                [.real(timestamp), .integer(sessionID)])
-            return true
+            return inserted
         }
     }
 
@@ -696,24 +703,36 @@ public final class Archive: @unchecked Sendable {
         let contextJSON = String(decoding: encoded, as: UTF8.self)
         return try queue.sync {
             let now = Date().timeIntervalSince1970
-            try database.execute(
-                """
-                INSERT INTO conversation_turns
-                (conversation_id, action, question, answer, provider, prompt,
-                 context_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    .integer(conversationID), .text(action.rawValue),
-                    .text(question), .text(answer), .text(provider),
-                    .text(prompt), .text(contextJSON), .real(now),
-                ])
-            let id = database.lastInsertRowID
-            try database.execute(
-                "UPDATE conversations SET updated_at = ? WHERE id = ?",
-                [.real(now), .integer(conversationID)])
+            var turnID: Int64 = 0
+            try database.transaction {
+                // A turn without its parent would be invisible and
+                // unreachable; refuse it rather than leaving an orphan.
+                let parent = try database.query(
+                    "SELECT 1 FROM conversations WHERE id = ? LIMIT 1",
+                    [.integer(conversationID)])
+                guard !parent.isEmpty else {
+                    throw ConversationArchiveError.missingConversation(
+                        conversationID)
+                }
+                try database.execute(
+                    """
+                    INSERT INTO conversation_turns
+                    (conversation_id, action, question, answer, provider,
+                     prompt, context_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        .integer(conversationID), .text(action.rawValue),
+                        .text(question), .text(answer), .text(provider),
+                        .text(prompt), .text(contextJSON), .real(now),
+                    ])
+                turnID = database.lastInsertRowID
+                try database.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                    [.real(now), .integer(conversationID)])
+            }
             return ConversationTurn(
-                id: id, conversationID: conversationID, action: action,
+                id: turnID, conversationID: conversationID, action: action,
                 question: question, answer: answer, provider: provider,
                 prompt: prompt, context: context,
                 createdAt: Date(timeIntervalSince1970: now))
@@ -806,22 +825,68 @@ public final class Archive: @unchecked Sendable {
             return
         }
         try queue.sync {
-            try database.execute(
-                "UPDATE conversations SET book_key = ? WHERE book_key = ?",
-                [.text(newKey), .text(oldKey)])
-            if let title, !title.isEmpty {
+            try database.transaction {
                 try database.execute(
-                    """
-                    UPDATE conversations SET book_title = ?
-                    WHERE book_key = ? AND (book_title IS NULL OR book_title = '')
-                    """, [.text(title), .text(newKey)])
+                    "UPDATE conversations SET book_key = ? WHERE book_key = ?",
+                    [.text(newKey), .text(oldKey)])
+                if let title, !title.isEmpty {
+                    try database.execute(
+                        """
+                        UPDATE conversations SET book_title = ?
+                        WHERE book_key = ?
+                          AND (book_title IS NULL OR book_title = '')
+                        """, [.text(title), .text(newKey)])
+                }
+                if let source {
+                    try database.execute(
+                        """
+                        UPDATE conversations SET book_source = ?
+                        WHERE book_key = ? AND book_source IS NULL
+                        """, [.text(source.rawValue), .text(newKey)])
+                }
             }
-            if let source {
+        }
+    }
+
+    /// Files one conversation under a stronger key. Unlike the key-wide
+    /// migration, this cannot move another edition that shares a title key.
+    public func migrateConversation(
+        id: Int64, to newKey: String, title: String? = nil,
+        source: BookSource? = nil
+    ) throws {
+        guard !newKey.isEmpty else { return }
+        try queue.sync {
+            try database.transaction {
                 try database.execute(
-                    """
-                    UPDATE conversations SET book_source = ?
-                    WHERE book_key = ? AND book_source IS NULL
-                    """, [.text(source.rawValue), .text(newKey)])
+                    "UPDATE conversations SET book_key = ? WHERE id = ?",
+                    [.text(newKey), .integer(id)])
+                if let title, !title.isEmpty {
+                    try database.execute(
+                        """
+                        UPDATE conversations SET book_title = ?
+                        WHERE id = ? AND (book_title IS NULL OR book_title = '')
+                        """, [.text(title), .integer(id)])
+                }
+                if let source {
+                    try database.execute(
+                        """
+                        UPDATE conversations SET book_source = ?
+                        WHERE id = ? AND book_source IS NULL
+                        """, [.text(source.rawValue), .integer(id)])
+                }
+            }
+        }
+    }
+
+    public enum ConversationArchiveError: Error, CustomStringConvertible,
+        Sendable
+    {
+        case missingConversation(Int64)
+
+        public var description: String {
+            switch self {
+            case .missingConversation(let id):
+                "No conversation \(id) exists."
             }
         }
     }

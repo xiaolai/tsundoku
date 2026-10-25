@@ -775,11 +775,20 @@ struct TsundokuCLI {
     /// Prints the local text index the companion uses: a capture's chapters
     /// and page match, or a non-DRM EPUB's navigation.
     private static func contextIndex(_ arguments: [String]) {
-        let liveText = value("--text", arguments).flatMap {
-            try? String(contentsOfFile: $0, encoding: .utf8)
+        let liveText: String?
+        if let textPath = value("--text", in: arguments) {
+            do {
+                liveText = try String(
+                    contentsOfFile: textPath, encoding: .utf8)
+            } catch {
+                print("error: cannot read --text file: \(error)")
+                exit(1)
+            }
+        } else {
+            liveText = nil
         }
         do {
-            if let epub = value("--epub", arguments) {
+            if let epub = value("--epub", in: arguments) {
                 let index = try EPUBBookIndex(
                     epubDirectory: URL(fileURLWithPath: epub))
                 print("epub chapters=\(index.chapters.count)")
@@ -793,11 +802,24 @@ struct TsundokuCLI {
                 }
                 return
             }
-            guard
-                let directory = arguments.first(where: {
-                    !$0.hasPrefix("--")
-                })
-            else {
+            // Skip each option and its value; the first bare argument is the
+            // capture directory, never the file named after --text.
+            var positional: [String] = []
+            var cursor = 0
+            while cursor < arguments.count {
+                let argument = arguments[cursor]
+                if argument == "--text" || argument == "--epub" {
+                    cursor += 2
+                    continue
+                }
+                if argument.hasPrefix("--") {
+                    cursor += 1
+                    continue
+                }
+                positional.append(argument)
+                cursor += 1
+            }
+            guard let directory = positional.first else {
                 print("context-index needs a capture directory or --epub")
                 exit(2)
             }
@@ -823,15 +845,6 @@ struct TsundokuCLI {
             print("error: \(error)")
             exit(1)
         }
-    }
-
-    private static func value(_ flag: String, _ arguments: [String])
-        -> String?
-    {
-        guard let index = arguments.firstIndex(of: flag),
-            arguments.indices.contains(index + 1)
-        else { return nil }
-        return arguments[index + 1]
     }
 
     private static func usage() {

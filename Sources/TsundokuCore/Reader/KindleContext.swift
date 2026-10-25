@@ -41,6 +41,9 @@ public struct KindleContext: ReaderContext {
                 .kindle, reason: "\(error)")
         }
 
+        // The AX read is synchronous; a cancel that arrived during it must
+        // not turn into a successful page.
+        if Task.isCancelled { throw ReaderContextError.cancelled }
         guard live.isReading else {
             throw ReaderContextError.unavailable(
                 .kindle,

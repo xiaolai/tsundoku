@@ -44,10 +44,6 @@ public struct AIContext: Codable, Hashable, Sendable {
 
     public static let empty = AIContext()
 
-    public var isEmpty: Bool {
-        bookTitle.isEmpty && excerpt.isEmpty && selection == nil
-    }
-
     public var bookLabel: String {
         bookTitle.isEmpty ? "No book" : bookTitle
     }
@@ -147,10 +143,6 @@ public struct ConversationSummary: Identifiable, Hashable, Sendable {
         self.lastAnswer = lastAnswer
     }
 
-    public var preview: String {
-        let text = lastAnswer ?? firstQuestion
-        return String(text.prefix(160))
-    }
 }
 
 /// Which conversations belong to a library book, and which are only
@@ -161,19 +153,27 @@ public struct ConversationSummary: Identifiable, Hashable, Sendable {
 /// made from this book is the same book under weaker evidence: it is shown
 /// under the book and marked unfiled until the reader files it.
 public enum ConversationFiling {
+    /// One spelling for comparison. Identifier keys are uppercase in the
+    /// archive; title and fingerprint keys are lowercase. Without this, a
+    /// conversation stored as `asset-2` is "filed" but not found by the key
+    /// set, so it disappears from the Chats tab.
+    public static func canonical(_ key: String) -> String {
+        key.contains(":") ? key.lowercased() : key.uppercased()
+    }
+
     public static func keys(
         for book: Book, captureFingerprints: [String]
     ) -> Set<String> {
-        var keys: Set<String> = [book.asin]
+        var keys: Set<String> = [canonical(book.asin)]
         let normalized = ConversationKey.normalize(book.title)
         if !normalized.isEmpty,
             !ReadingIdentityResolver.isPlaceholder(book.title)
         {
-            keys.insert("books:\(normalized)")
-            keys.insert("kindle:\(normalized)")
+            keys.insert(canonical("books:\(normalized)"))
+            keys.insert(canonical("kindle:\(normalized)"))
         }
         for fingerprint in captureFingerprints where !fingerprint.isEmpty {
-            keys.insert("text:\(fingerprint)")
+            keys.insert(canonical("text:\(fingerprint)"))
         }
         return keys
     }
@@ -181,32 +181,18 @@ public enum ConversationFiling {
     public static func isFiled(
         _ conversation: Conversation, under book: Book
     ) -> Bool {
-        conversation.bookKey.caseInsensitiveCompare(book.asin)
-            == .orderedSame
+        canonical(conversation.bookKey) == canonical(book.asin)
+    }
+
+    public static func matches(
+        _ conversation: Conversation, keys: Set<String>
+    ) -> Bool {
+        keys.contains(canonical(conversation.bookKey))
     }
 }
 
-/// The key a conversation is filed under.
-///
-/// A book matched in the archive uses its ASIN (the library can then find its
-/// chats). A live page the archive does not know still gets a stable key from
-/// its reader and title, so its history is kept and shown in the companion,
-/// even though no library row can list it.
+/// Title normalization shared by identity and filing.
 public enum ConversationKey {
-    public static func make(
-        book: Book?, reader: ReaderKind?, title: String,
-        identifier: String? = nil
-    ) -> String {
-        if let book, !book.asin.isEmpty { return book.asin }
-        // Kindle's last-opened ASIN identifies the book even before the
-        // library has imported it; the key then starts matching the book the
-        // moment it is imported.
-        if let identifier, !identifier.isEmpty { return identifier }
-        let source = reader == .appleBooks ? "books" : "kindle"
-        let normalized = normalize(title)
-        return "\(source):\(normalized.isEmpty ? "untitled" : normalized)"
-    }
-
     public static func normalize(_ title: String) -> String {
         title
             .trimmingCharacters(in: .whitespacesAndNewlines)

@@ -97,22 +97,45 @@ public struct BooksContext: ReaderContext {
         else { return nil }
         let application = AXUIElementCreateApplication(app.processIdentifier)
         let source = LiveAXSource()
+        let recorder = AXRecorder(source: source)
         guard let windows = try? source.windows(application) else {
             return nil
         }
-        var parts: [String] = []
-        for window in windows {
-            collectSelection(window, source: source, depth: 0, into: &parts)
-            if parts.count >= 50 { break }
+        // Choose the window by exactly the rule `page()` uses, so the
+        // selection always belongs to the page it is attached to.
+        let recorded = windows.compactMap {
+            window -> (element: AXUIElement, node: AXNode)? in
+            guard let node = try? recorder.capture(window) else { return nil }
+            return (window, node)
         }
+        let focus = focusedWindow(application)
+        guard
+            let best = BooksPageText.bestWindow(
+                recorded.map(\.node), preferredTitle: focus?.title,
+                preferredFrame: focus?.frame),
+            let index = recorded.firstIndex(where: { $0.node == best })
+        else { return nil }
+        var parts: [String] = []
+        var budget = 4_000
+        var visited = Set<CFHashCode>()
+        collectSelection(
+            recorded[index].element, source: source, depth: 0,
+            budget: &budget, visited: &visited, into: &parts)
         return SelectionText.joined(parts)
     }
 
     private func collectSelection(
         _ element: AXUIElement, source: LiveAXSource, depth: Int,
+        budget: inout Int, visited: inout Set<CFHashCode>,
         into parts: inout [String]
     ) {
-        guard depth < 24, parts.count < 50 else { return }
+        guard depth < 24, parts.count < 50, budget > 0,
+            !Task.isCancelled
+        else { return }
+        let identity = CFHash(element)
+        guard !visited.contains(identity) else { return }
+        visited.insert(identity)
+        budget -= 1
         let role = (try? source.string(element, "AXRole")) ?? ""
         if role == "AXStaticText" || role == "AXHeading",
             let selected = try? source.string(element, "AXSelectedText"),
@@ -121,7 +144,9 @@ public struct BooksContext: ReaderContext {
             parts.append(selected)
         }
         for child in (try? source.children(element)) ?? [] {
-            collectSelection(child, source: source, depth: depth + 1, into: &parts)
+            collectSelection(
+                child, source: source, depth: depth + 1,
+                budget: &budget, visited: &visited, into: &parts)
         }
     }
 

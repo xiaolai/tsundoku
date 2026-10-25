@@ -1,5 +1,4 @@
 import AppKit
-import ApplicationServices
 import Foundation
 
 // MARK: - Reader identity

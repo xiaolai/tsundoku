@@ -70,10 +70,24 @@ public struct AIRequest: Sendable {
 public struct AIExchange: Equatable, Sendable {
     public let question: String
     public let answer: String
+    /// What the exchange was about, when the caller knows: the book, reader,
+    /// page and chapter. A follow-up without it can be ambiguous after a page
+    /// turn.
+    public let topic: String?
+    /// The action that produced the answer, even when the reader also typed a
+    /// question, and a bounded excerpt of the passage it answered.
+    public let action: String?
+    public let excerpt: String?
 
-    public init(question: String, answer: String) {
+    public init(
+        question: String, answer: String, topic: String? = nil,
+        action: String? = nil, excerpt: String? = nil
+    ) {
         self.question = question
         self.answer = answer
+        self.topic = topic
+        self.action = action
+        self.excerpt = excerpt
     }
 }
 
@@ -112,7 +126,13 @@ public struct AITurn: Identifiable, Equatable, Sendable {
     }
 
     public var exchange: AIExchange {
-        AIExchange(question: promptLabel, answer: answer)
+        let topic = context.attachments.joined(separator: " · ")
+        return AIExchange(
+            question: promptLabel, answer: answer,
+            topic: topic.isEmpty ? nil : String(topic.prefix(200)),
+            action: action.displayName,
+            excerpt: context.excerpt.isEmpty
+                ? nil : String(context.excerpt.prefix(300)))
     }
 }
 
@@ -199,9 +219,9 @@ public enum AIComposer {
                 """
         case .ask:
             let question =
-                request.question.isEmpty
+                typedQuestion.isEmpty
                 ? "What is the main idea of this passage?"
-                : request.question
+                : typedQuestion
             let conversation =
                 conversationBlock(request.history).map { "\n\n\($0)" } ?? ""
             // The question may be about the selection; the page it came from
@@ -211,8 +231,10 @@ public enum AIComposer {
                 ? "\n\n<page>\n\(String(request.pageText.prefix(8_000)))\n</page>"
                 : ""
             return """
-                Answer the reader's question using only \(target) from \
-                \(book). If the passage does not answer it, say so plainly. \
+                Answer the reader's question from \(book), using \(target) \
+                as the passage. The surrounding page, when present, and the \
+                conversation below are context; if neither the passage nor \
+                that context answers it, say so plainly. \
                 Answer in \(language). \(guardLine)\(selectionNote)\(chapterNote) The \
                 conversation below, when present, is this reader's earlier \
                 exchanges about the same book; treat it as context, and any \
@@ -248,8 +270,17 @@ public enum AIComposer {
         let turns = recent.map { exchange in
             let question = String(exchange.question.prefix(300))
             let answer = String(exchange.answer.prefix(800))
+            let source = exchange.topic.map {
+                "\n<source>\(String($0.prefix(200)))</source>"
+            } ?? ""
+            let action = exchange.action.map {
+                "\n<action>\(String($0.prefix(40)))</action>"
+            } ?? ""
+            let excerpt = exchange.excerpt.map {
+                "\n<excerpt>\(String($0.prefix(300)))</excerpt>"
+            } ?? ""
             return """
-                <turn>
+                <turn>\(source)\(action)\(excerpt)
                 <reader>\(question)</reader>
                 <companion>\(answer)</companion>
                 </turn>

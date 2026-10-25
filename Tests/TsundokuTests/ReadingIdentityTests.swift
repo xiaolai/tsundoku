@@ -168,6 +168,28 @@ struct ReadingIdentityTests {
         #expect(tied.identifier == "EDITION-A")
     }
 
+    @Test("an unarchived EPUB asset outranks an archived reader identifier")
+    func epubOutranksIdentifier() {
+        let identity = ReadingIdentityResolver.resolve(
+            facts: ReadingLiveFacts(
+                kind: .appleBooks, title: "Alice", identifier: "ASSET-1",
+                epubAssetID: "ASSET-2"),
+            books: [book("ASSET-1", "Alice", .appleBooks)])
+        #expect(identity.key == "ASSET-2")
+        #expect(identity.rank == .archiveMatch)
+        #expect(identity.provenance.contains("EPUB"))
+    }
+
+    @Test("an unimported Books asset ID is keyed in canonical case")
+    func assetIDCasing() {
+        let identity = ReadingIdentityResolver.resolve(
+            facts: ReadingLiveFacts(
+                kind: .appleBooks, title: "Alice", identifier: "asset-2"),
+            books: [])
+        #expect(identity.key == "ASSET-2")
+        #expect(identity.rank == .archiveMatch)
+    }
+
     @Test("an EPUB asset ID outranks a title key")
     func assetIDOutranksTitle() {
         let identity = ReadingIdentityResolver.resolve(

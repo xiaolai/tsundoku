@@ -374,6 +374,18 @@ struct TsundokuCoreTests {
         #expect(long.count < 1_200)
     }
 
+    @Test("a turn's exchange names the page it came from")
+    func exchangeCarriesTopic() {
+        let turn = AITurn(
+            action: .ask, question: "Why?", answer: "…", provider: "Test",
+            prompt: "",
+            context: AIContext(
+                bookTitle: "A Book", reader: .kindle, pageNumber: 4,
+                chapter: "Ch. 2"))
+        #expect(turn.exchange.topic?.contains("Page 4") == true)
+        #expect(turn.exchange.topic?.contains("Ch. 2") == true)
+    }
+
     @Test("a turn without a question is labelled by its action")
     func turnLabelFallsBackToTheAction() {
         let turn = AITurn(

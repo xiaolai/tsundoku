@@ -43,16 +43,21 @@ public struct BookTextIndex: Sendable {
     public let pages: [IndexedPage]
     public let chapters: [ChapterMark]
     /// Stable across captures of the same book that start at the same page.
+    ///
+    /// It hashes every page's normalized text plus the page count. A sample
+    /// would let two books that share front matter and a sampled middle page
+    /// collide into one conversation key; the whole capture is only a few
+    /// hundred kilobytes.
     public let fingerprint: String
 
     public init(pages: [IndexedPage]) {
         let sorted = pages.sorted { $0.page < $1.page }
         self.pages = sorted
         self.chapters = Self.chapterMarks(in: sorted)
-        let first = sorted.first(where: {
-            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        })?.text ?? ""
-        self.fingerprint = TextIndexHash.hex(TextIndexHash.fnv(Self.normalize(first)))
+        let body = sorted.map { Self.normalize($0.text) }
+            .joined(separator: "\u{1E}")
+        self.fingerprint = TextIndexHash.hex(
+            TextIndexHash.fnv(body + "\u{1F}" + String(sorted.count)))
     }
 
     public static func load(directory: URL) throws -> BookTextIndex {
@@ -120,7 +125,15 @@ public struct BookTextIndex: Sendable {
         if let prefix = first.firstMatch(
             #"^Ch(?:apter)?\.?\s*\d+"#, options: [.caseInsensitive])
         {
-            return collapse(prefix)
+            let lower = prefix.lowercased()
+            if lower.hasPrefix("ch.") || lower.hasPrefix("ch ") {
+                // Kindle's flattened heading is only "Ch. 1"; the rest of
+                // the line is body text.
+                return collapse(prefix)
+            }
+            // A Books heading may carry its title after the number:
+            // "Chapter 12. The Journey" must not collapse to "Chapter 12".
+            return String(collapse(first).prefix(120))
         }
         guard
             first.firstMatch(
@@ -145,11 +158,9 @@ public struct BookTextIndex: Sendable {
     // MARK: Text normalisation
 
     static func normalize(_ text: String) -> String {
-        text.lowercased()
-            .folding(options: [.diacriticInsensitive], locale: .current)
-            .replacingOccurrences(
-                of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        collapse(
+            text.lowercased().folding(
+                options: [.diacriticInsensitive], locale: .current))
     }
 
     static func collapse(_ text: String) -> String {
@@ -251,11 +262,34 @@ public struct EPUBBookIndex: Sendable {
         }
         var chapters: [Chapter] = []
         var seen = Set<String>()
-        for entry in entries {
-            guard !seen.contains(entry.url.path) else { continue }
-            seen.insert(entry.url.path)
-            guard let html = Self.readText(entry.url) else { continue }
-            let text = Self.plainText(html)
+        var htmlByPath: [String: String] = [:]
+        for (index, entry) in entries.enumerated() {
+            // Two chapters can live in one XHTML file as fragments. Their
+            // identities differ, and each chapter slices its own range; the
+            // old path-only dedupe silently dropped every chapter but the
+            // first.
+            guard !seen.contains(entry.identity) else { continue }
+            seen.insert(entry.identity)
+            let html: String
+            if let cached = htmlByPath[entry.url.path] {
+                html = cached
+            } else {
+                guard let text = Self.readText(entry.url) else { continue }
+                html = text
+                htmlByPath[entry.url.path] = text
+            }
+            let nextFragment = entries.dropFirst(index + 1).first {
+                $0.url.path == entry.url.path && !($0.fragment ?? "").isEmpty
+            }?.fragment
+            let text: String
+            if let fragment = entry.fragment, !fragment.isEmpty,
+                let sliced = Self.fragmentText(
+                    in: html, fragment: fragment, next: nextFragment)
+            {
+                text = sliced
+            } else {
+                text = Self.plainText(html)
+            }
             if !text.isEmpty {
                 chapters.append(Chapter(title: entry.title, text: text))
             }
@@ -295,6 +329,10 @@ public struct EPUBBookIndex: Sendable {
 
     struct NavigationEntry {
         let url: URL
+        /// The href as written, including its fragment. Two chapters in one
+        /// file are two entries, not one.
+        let identity: String
+        let fragment: String?
         let title: String
     }
 
@@ -334,14 +372,72 @@ public struct EPUBBookIndex: Sendable {
     ) -> [NavigationEntry] {
         let base = document.deletingLastPathComponent()
         return entries.compactMap { entry in
-            let path = entry.href.split(separator: "#").first.map(String.init)
-                ?? entry.href
+            let parts = entry.href.split(
+                separator: "#", maxSplits: 1,
+                omittingEmptySubsequences: false)
+            let path = String(parts.first ?? "")
+            let fragment =
+                parts.count > 1 ? String(parts[1]) : nil
             guard
                 let url = try? EPUBPackage.resolve(
                     path, relativeTo: base, root: package.rootURL)
             else { return nil }
-            return NavigationEntry(url: url, title: entry.title)
+            return NavigationEntry(
+                url: url, identity: entry.href,
+                fragment: fragment, title: entry.title)
         }
+    }
+
+    /// The text belonging to one fragment in an XHTML file: from the element
+    /// carrying the fragment's `id`/`name` to the next fragment, or the body's
+    /// end. A missing marker returns nil, and the caller falls back to the
+    /// whole file.
+    static func fragmentText(
+        in html: String, fragment: String, next: String?
+    ) -> String? {
+        guard
+            let start = markerRange(in: html, fragment: fragment)
+        else { return nil }
+        let startIndex = startOfTag(html, at: start.lowerBound)
+        var endIndex = html.endIndex
+        if let next,
+            let nextRange = markerRange(in: html, fragment: next)
+        {
+            endIndex = startOfTag(html, at: nextRange.lowerBound)
+        } else if let bodyEnd = html.range(
+            of: "</body>", options: [.caseInsensitive])
+        {
+            endIndex = bodyEnd.lowerBound
+        }
+        guard startIndex < endIndex else { return nil }
+        return plainText(String(html[startIndex..<endIndex]))
+    }
+
+    private static func markerRange(
+        in html: String, fragment: String
+    ) -> Range<String.Index>? {
+        let escaped = NSRegularExpression.escapedPattern(for: fragment)
+        let pattern = #"(?:id|name)\s*=\s*["']"# + escaped + #"["']"#
+        guard
+            let regex = try? NSRegularExpression(
+                pattern: pattern, options: [.caseInsensitive])
+        else { return nil }
+        return regex.firstMatch(
+            in: html, range: NSRange(html.startIndex..., in: html)
+        ).flatMap { Range($0.range, in: html) }
+    }
+
+    /// The opening `<` of the tag containing `index`.
+    private static func startOfTag(
+        _ html: String, at index: String.Index
+    ) -> String.Index {
+        var current = index
+        while current > html.startIndex {
+            let previous = html.index(before: current)
+            if html[previous] == "<" { return previous }
+            current = previous
+        }
+        return index
     }
 
     private static func readText(_ url: URL) -> String? {
@@ -351,27 +447,53 @@ public struct EPUBBookIndex: Sendable {
     }
 
     static func anchors(in html: String) -> [(href: String, title: String)] {
-        let pattern = #"<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>"#
+        // The navigation document can also carry landmarks and a page list.
+        // Their links are not chapters; reading only the toc nav keeps a
+        // "Start reading" link from replacing the first chapter title.
+        let scoped = tocSection(in: html) ?? html
+        let pattern =
+            #"<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</a>"#
         guard
             let regex = try? NSRegularExpression(
                 pattern: pattern, options: [.caseInsensitive])
         else { return [] }
         return regex.matches(
-            in: html, range: NSRange(html.startIndex..., in: html)
+            in: scoped, range: NSRange(scoped.startIndex..., in: scoped)
         ).compactMap { match in
             guard
-                let hrefRange = Range(match.range(at: 1), in: html),
-                let titleRange = Range(match.range(at: 2), in: html)
+                let hrefRange = Range(match.range(at: 1), in: scoped),
+                let titleRange = Range(match.range(at: 2), in: scoped)
             else { return nil }
-            let title = plainText(String(html[titleRange]))
+            let title = plainText(String(scoped[titleRange]))
             guard !title.isEmpty else { return nil }
-            return (href: String(html[hrefRange]), title: title)
+            return (href: String(scoped[hrefRange]), title: title)
         }
+    }
+
+    /// The inner HTML of the table-of-contents `<nav>`, when the document
+    /// marks one.
+    static func tocSection(in html: String) -> String? {
+        let patterns = [
+            #"<nav\b[^>]*epub:type\s*=\s*["']toc["'][^>]*>([\s\S]*?)</nav>"#,
+            #"<nav\b[^>]*type\s*=\s*["']toc["'][^>]*>([\s\S]*?)</nav>"#,
+        ]
+        for pattern in patterns {
+            guard
+                let regex = try? NSRegularExpression(
+                    pattern: pattern, options: [.caseInsensitive]),
+                let match = regex.firstMatch(
+                    in: html,
+                    range: NSRange(html.startIndex..., in: html)),
+                let range = Range(match.range(at: 1), in: html)
+            else { continue }
+            return String(html[range])
+        }
+        return nil
     }
 
     static func ncxEntries(in xml: String) -> [(href: String, title: String)] {
         let pattern =
-            #"<navPoint\b[\s\S]*?<text>([\s\S]*?)</text>[\s\S]*?<content\b[^>]*src="([^"]+)""#
+            #"<navPoint\b[\s\S]*?<text>([\s\S]*?)</text>[\s\S]*?<content\b[^>]*src\s*=\s*["']([^"']+)["']"#
         guard
             let regex = try? NSRegularExpression(
                 pattern: pattern, options: [.caseInsensitive])
@@ -397,44 +519,53 @@ public struct EPUBBookIndex: Sendable {
             of: "(?is)<(script|style)\\b[^>]*>[\\s\\S]*?</\\1>",
             with: " ", options: .regularExpression)
         text = text.replacingOccurrences(
-            of: "(?is)<(?:br|/p|/div|/h\\d)\\s*/?>",
+            of: "(?is)<(?:br|/p|/div|/h\\d|/li|/tr|/section)\\s*/?>",
             with: "\n", options: .regularExpression)
+        // Inline tags close a word, not a block: removing them without a
+        // separator keeps `inter<em>national</em>ization` one word, while the
+        // block tags above still separate paragraphs.
         text = text.replacingOccurrences(
-            of: "(?is)<[^>]+>", with: " ", options: .regularExpression)
+            of: "(?is)<[^>]+>", with: "", options: .regularExpression)
         text = decodeEntities(text)
         return BookTextIndex.collapse(text)
     }
 
+    /// Decodes every entity reference once, in a single pass.
+    ///
+    /// The old implementation replaced named entities in dictionary order and
+    /// then numeric ones, so `&amp;lt;` could become either `<` or `&lt;`
+    /// depending on iteration order.
     private static func decodeEntities(_ text: String) -> String {
-        var value = text
         let named = [
-            "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"",
-            "&apos;": "'", "&#39;": "'", "&nbsp;": " ", "&mdash;": "—",
-            "&ndash;": "–", "&hellip;": "…", "&rsquo;": "’",
-            "&lsquo;": "‘", "&ldquo;": "“", "&rdquo;": "”",
+            "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'",
+            "nbsp": " ", "mdash": "—", "ndash": "–", "hellip": "…",
+            "rsquo": "’", "lsquo": "‘", "ldquo": "“", "rdquo": "”",
         ]
-        for (entity, replacement) in named {
-            value = value.replacingOccurrences(of: entity, with: replacement)
-        }
-        if let regex = try? NSRegularExpression(
-            pattern: #"&#(x?[0-9a-fA-F]+);"#)
-        {
-            let matches = regex.matches(
-                in: value, range: NSRange(value.startIndex..., in: value))
-            for match in matches.reversed() {
-                guard let range = Range(match.range, in: value),
-                    let numberRange = Range(match.range(at: 1), in: value)
-                else { continue }
-                let raw = String(value[numberRange])
-                let scalarValue =
-                    raw.hasPrefix("x")
-                    ? UInt32(raw.dropFirst(), radix: 16)
-                    : UInt32(raw)
-                if let scalarValue,
-                    let scalar = UnicodeScalar(scalarValue)
-                {
-                    value.replaceSubrange(range, with: String(scalar))
-                }
+        let pattern = #"&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);"#
+        guard
+            let regex = try? NSRegularExpression(pattern: pattern)
+        else { return text }
+        var value = text
+        let matches = regex.matches(
+            in: text, range: NSRange(text.startIndex..., in: text))
+        for match in matches.reversed() {
+            guard
+                let range = Range(match.range, in: value),
+                let bodyRange = Range(match.range(at: 1), in: text)
+            else { continue }
+            let body = String(text[bodyRange])
+            let replacement: String?
+            if body.lowercased().hasPrefix("#x") {
+                replacement = UInt32(body.dropFirst(2), radix: 16)
+                    .flatMap { UnicodeScalar($0).map(String.init) }
+            } else if body.hasPrefix("#") {
+                replacement = UInt32(body.dropFirst())
+                    .flatMap { UnicodeScalar($0).map(String.init) }
+            } else {
+                replacement = named[body.lowercased()]
+            }
+            if let replacement {
+                value.replaceSubrange(range, with: replacement)
             }
         }
         return value

@@ -140,55 +140,52 @@ public enum ReadingIdentityResolver {
             facts.capture?.isExact == true && !isPlaceholder(facts.capture?.title ?? "")
             ? (facts.capture?.title ?? "") : ""
 
-        // Rank 1: an EPUB that contains the page beats any metadata; a
-        // reader-supplied identifier the archive knows is next.
-        for candidate in [epubID, identifier]
-        where !candidate.isEmpty {
-            if let book = books.first(where: {
-                $0.asin.caseInsensitiveCompare(candidate) == .orderedSame
-            }) {
+        // The EPUB that contains the page is the strongest evidence. Resolve
+        // it completely — including its unarchived fallback — before any
+        // reader identifier can claim the page, or a conflicting identifier
+        // the archive happens to know would beat the text.
+        if !epubID.isEmpty {
+            if let book = archiveBook(epubID, in: books) {
                 return ReadingIdentity(
-                    key: book.asin,
-                    title: book.title,
-                    book: book,
+                    key: book.asin, title: book.title, book: book,
                     rank: .archiveMatch,
-                    provenance:
-                        candidate == epubID
-                        ? "archive book matched by EPUB text"
-                        : "archive book matched by reader identifier")
+                    provenance: "archive book matched by EPUB text")
+            }
+            if facts.kind == .appleBooks {
+                return ReadingIdentity(
+                    key: canonicalID(epubID),
+                    title: liveTitle.isEmpty ? captureTitle : liveTitle,
+                    book: nil, rank: .archiveMatch,
+                    provenance: "EPUB asset ID; not in the archive")
             }
         }
         if !identifier.isEmpty {
+            if let book = archiveBook(identifier, in: books) {
+                return ReadingIdentity(
+                    key: book.asin, title: book.title, book: book,
+                    rank: .archiveMatch,
+                    provenance: "archive book matched by reader identifier")
+            }
             switch facts.kind {
             case .appleBooks:
                 // An asset ID the archive has not imported yet is still the
                 // book's real identity; the chat will match the row once the
-                // library is imported.
+                // library is imported. Canonical casing keeps the key stable
+                // across the import.
                 return ReadingIdentity(
-                    key: identifier,
+                    key: canonicalID(identifier),
                     title: liveTitle.isEmpty ? captureTitle : liveTitle,
-                    book: nil,
-                    rank: .archiveMatch,
+                    book: nil, rank: .archiveMatch,
                     provenance: "reader asset ID; not in the archive")
             case .kindle:
                 // Kindle's last-opened ASIN identifies the book even before
                 // its library row exists. The title stays empty unless an
                 // exact capture proves it.
                 return ReadingIdentity(
-                    key: identifier,
-                    title: captureTitle,
-                    book: nil,
-                    rank: .lastOpened,
+                    key: canonicalID(identifier), title: captureTitle,
+                    book: nil, rank: .lastOpened,
                     provenance: "Kindle last-opened ASIN; not in the archive")
             }
-        }
-        if !epubID.isEmpty, facts.kind == .appleBooks {
-            return ReadingIdentity(
-                key: epubID,
-                title: liveTitle.isEmpty ? captureTitle : liveTitle,
-                book: nil,
-                rank: .archiveMatch,
-                provenance: "EPUB asset ID; not in the archive")
         }
 
         // Rank 3: a capture whose text matches the live page. Its metadata is
@@ -233,6 +230,21 @@ public enum ReadingIdentityResolver {
         return ReadingIdentity(
             key: nil, title: "", book: nil, rank: .sessionOnly,
             provenance: "unidentified")
+    }
+
+    private static func archiveBook(
+        _ identifier: String, in books: [Book]
+    ) -> Book? {
+        books.first {
+            $0.asin.caseInsensitiveCompare(identifier) == .orderedSame
+        }
+    }
+
+    /// Asset IDs and ASINs are uppercase in the archives. Canonical casing
+    /// keeps an unimported reader ID keyed exactly like the row that will
+    /// later match it, so the identity improves without a key change.
+    private static func canonicalID(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
     }
 
     private static func trimmed(_ value: String?) -> String {

@@ -68,6 +68,37 @@ struct ConversationStoreTests {
         #expect(summaries.first?.id == newer.id)
     }
 
+    @Test("filing one chat leaves its title-sharing siblings alone")
+    func fileOneConversation() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = try archive.createConversation(
+            bookKey: "books:alice", bookTitle: "Alice",
+            bookSource: .appleBooks)
+        let second = try archive.createConversation(
+            bookKey: "books:alice", bookTitle: "Alice",
+            bookSource: .appleBooks)
+        try archive.migrateConversation(
+            id: first.id, to: "ASSET-1", title: "Alice",
+            source: .appleBooks)
+        #expect(try archive.latestConversation(bookKey: "ASSET-1")?.id == first.id)
+        #expect(
+            try archive.latestConversation(bookKey: "books:alice")?.id
+                == second.id)
+    }
+
+    @Test("a turn cannot be stored without its conversation")
+    func orphanTurnRejected() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(throws: Archive.ConversationArchiveError.self) {
+            try archive.appendConversationTurn(
+                conversationID: 999, action: .ask, question: "Where?",
+                answer: "Nowhere", provider: "p", prompt: "",
+                context: .empty)
+        }
+    }
+
     @Test("chat counts are grouped by book key")
     func countsByBook() throws {
         let (archive, directory) = try temporaryArchive()
@@ -135,6 +166,7 @@ struct ConversationStoreTests {
             id: 2, bookKey: "asset-2", bookTitle: "Alice",
             bookSource: .appleBooks, createdAt: Date(), updatedAt: Date())
         #expect(ConversationFiling.isFiled(filed, under: book))
+        #expect(ConversationFiling.matches(filed, keys: keys))
 
         let placeholder = Book(
             asin: "B9", title: "Kindle", author: "", bookType: 10,
@@ -144,22 +176,11 @@ struct ConversationStoreTests {
         #expect(placeholderKeys == ["B9"])
     }
 
-    @Test("a stable identifier keys a book before the library knows it")
-    func keyUsesAStableIdentifier() {
+    @Test("titles normalize for filing")
+    func titleNormalization() {
         #expect(
-            ConversationKey.make(
-                book: nil, reader: .kindle, title: "Kindle",
-                identifier: "B075H364NC") == "B075H364NC")
-        #expect(
-            ConversationKey.make(
-                book: nil, reader: .kindle, title: "The Math  of Networks")
-                == "kindle:the math of networks")
-        let known = Book(
-            asin: "B9", title: "Known", author: "", bookType: 10,
-            readState: 0)
-        #expect(
-            ConversationKey.make(
-                book: known, reader: .kindle, title: "Known",
-                identifier: "OTHER") == "B9")
+            ConversationKey.normalize("The Math  of Networks")
+                == "the math of networks")
+        #expect(ConversationKey.normalize("  \n ") == "")
     }
 }
