@@ -395,6 +395,22 @@ struct BookExportMetadataTests {
         #expect(metadata.sources["title"] == .kindleMetadataCache)
     }
 
+    @Test("a capture with no library book titles itself from the reader")
+    func metadataWithoutABook() throws {
+        // The Reader picker can capture a Kindle book the library never
+        // imported; the observed title and ASIN carry the bundle.
+        let directory = try temporaryDirectory("kindle-nil-book")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let resolver = BookMetadataResolver(
+            kindlePaths: KindlePaths(container: directory))
+        let metadata = resolver.resolve(
+            book: nil, capturedTitle: "Winning At New Products",
+            identifier: "B0KINDLENIL", source: .kindle)
+        #expect(metadata.title == "Winning At New Products")
+        #expect(metadata.sources["title"] == .observed)
+        #expect(metadata.identifier == "B0KINDLENIL")
+    }
+
     @Test("a Kindle book resolves its cache cover and DRM-free AZW original")
     func kindleMetadata() throws {
         let directory = try temporaryDirectory("kindle-meta")

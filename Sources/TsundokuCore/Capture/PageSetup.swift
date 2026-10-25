@@ -24,6 +24,47 @@ public enum CapturePageSize: String, Sendable, Codable, CaseIterable {
     }
 }
 
+/// Which reader a capture runs against.
+///
+/// `automatic` follows what is actually on screen: the selected book, then a
+/// live Kindle page, then the library filter, then the first ebook. An explicit
+/// choice overrides all of that, so a Mac with only an Apple Books library can
+/// still capture a Kindle book it has open.
+public enum CaptureReader: String, Sendable, Codable, CaseIterable {
+    case automatic
+    case appleBooks
+    case kindle
+
+    public var displayName: String {
+        switch self {
+        case .automatic: "Automatic"
+        case .appleBooks: "Apple Books"
+        case .kindle: "Kindle"
+        }
+    }
+
+    /// The reader a capture will use, from the preference and what is present.
+    public static func resolve(
+        _ preference: CaptureReader, selected: BookSource?,
+        liveReader: ReaderKind?, filter: BookSource?, firstBook: BookSource?
+    ) -> ReaderKind {
+        switch preference {
+        case .appleBooks: return .appleBooks
+        case .kindle: return .kindle
+        case .automatic:
+            if let source = selected { return kind(for: source) }
+            if let liveReader { return liveReader }
+            if let filter { return kind(for: filter) }
+            if let firstBook { return kind(for: firstBook) }
+            return .kindle
+        }
+    }
+
+    private static func kind(for source: BookSource) -> ReaderKind {
+        source == .appleBooks ? .appleBooks : .kindle
+    }
+}
+
 /// What to change before a capture. A nil font keeps the reader's setting.
 public struct PageSetupRequest: Sendable, Equatable {
     public let pageSize: CapturePageSize

@@ -1020,25 +1020,38 @@ public final class AppModel: ObservableObject {
 
     // MARK: - Capture
 
-    /// The book a capture will use. The selected book wins; otherwise the
-    /// source filter chooses the first recent ebook, then the first ebook.
-    public func captureBook() -> Book? {
-        if let selectedBook { return selectedBook }
-        let filterSource = sourceFilter.source
-        return books.first {
-            $0.isEbook
-                && (filterSource == nil || $0.source == filterSource)
-                && $0.lastView != nil
-        } ?? books.first {
-            $0.isEbook
-                && (filterSource == nil || $0.source == filterSource)
+    /// The reader a capture will use, from the reader setting and what is
+    /// present: the selected book, a live Kindle page, the source filter, then
+    /// the first ebook.
+    public var captureKind: ReaderKind {
+        CaptureReader.resolve(
+            settings.captureReader,
+            selected: selectedBook?.source,
+            liveReader: livePage == nil ? nil : .kindle,
+            filter: sourceFilter.source,
+            firstBook: books.first(where: \.isEbook)?.source)
+    }
+
+    /// The book a capture will use: the selected book when it belongs to that
+    /// reader, otherwise the first (recent) ebook from the same reader. Nil
+    /// when the library has no book for it — the live page names the capture.
+    public func captureBook(for kind: ReaderKind) -> Book? {
+        let source: BookSource = kind == .appleBooks ? .appleBooks : .kindle
+        if let selected = selectedBook, selected.source == source {
+            return selected
         }
+        let candidates = books.filter { $0.isEbook && $0.source == source }
+        return candidates.first { $0.lastView != nil } ?? candidates.first
+    }
+
+    public func captureBook() -> Book? {
+        captureBook(for: captureKind)
     }
 
     /// Whether the next capture will use Apple Books. The controls and the
     /// capture itself read this same resolution.
     public var captureTargetIsBooks: Bool {
-        captureBook()?.source == .appleBooks
+        captureKind == .appleBooks
     }
 
     public func startCapture(pages: Int?) {
@@ -1057,7 +1070,8 @@ public final class AppModel: ObservableObject {
                 "Tsundoku is reading Kindle's settings. Try again in a moment."
             return
         }
-        let book = captureBook()
+        let kind = captureKind
+        let book = captureBook(for: kind)
         let title = book?.title ?? livePage?.title ?? "Book"
         let folder = exportFolder.appendingPathComponent(
             "\(slug(title))-\(timestamp())")
@@ -1089,8 +1103,6 @@ public final class AppModel: ObservableObject {
             do {
                 let result = try await Task.detached {
                     let engine = CaptureEngine(archive: archive)
-                    let kind: ReaderKind =
-                        book?.source == .appleBooks ? .appleBooks : .kindle
                     return try engine.capture(
                         book: book,
                         kind: kind,

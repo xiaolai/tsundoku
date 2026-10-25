@@ -46,6 +46,16 @@ public struct ExportsView: View {
                         .lineLimit(2)
                 }
 
+                Picker("Reader", selection: $model.settings.captureReader) {
+                    ForEach(CaptureReader.allCases, id: \.self) { reader in
+                        Text(reader.displayName).tag(reader)
+                    }
+                }
+                .disabled(model.capturePhase == .running)
+                .help(
+                    "Automatic follows the selected book, then the reader that is open. Choose Kindle or Apple Books to capture that reader even when the library has no book from it."
+                )
+
                 Picker("Pages", selection: pageLimit) {
                     ForEach(PageLimit.allCases) { limit in
                         Text(limit.title).tag(limit)
@@ -315,13 +325,17 @@ public struct ExportsView: View {
     }
 
     private var bookLine: String {
-        if let title = model.selectedBook?.title, !title.isEmpty {
+        if let title = model.captureBook()?.title, !title.isEmpty {
             return title
         }
-        if let title = model.livePage?.title, !title.isEmpty {
+        if model.captureKind == .kindle,
+            let title = model.livePage?.title, !title.isEmpty
+        {
             return title
         }
-        return "No book is open in Kindle."
+        return model.captureKind == .appleBooks
+            ? "No Apple Books book is selected."
+            : "No book is open in Kindle."
     }
 
     private func setupLine(_ setup: PageSetupOutcome) -> String {

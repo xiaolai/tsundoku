@@ -178,6 +178,38 @@ struct AIProviderAdoptionTests {
         let json = #"{"provider":"http","httpProfileID":"deepseek","model":"deepseek-chat"}"#
         let settings = try JSONDecoder().decode(AISettings.self, from: Data(json.utf8))
         #expect(settings.httpProfileID == "deepseek")
+        #expect(settings.captureReader == .automatic)
+    }
+
+    @Test func aCaptureReaderFollowsTheSelectionThenWhatIsOpen() {
+        #expect(
+            CaptureReader.resolve(
+                .automatic, selected: .appleBooks, liveReader: .kindle,
+                filter: nil, firstBook: nil) == .appleBooks)
+        #expect(
+            CaptureReader.resolve(
+                .automatic, selected: nil, liveReader: .kindle,
+                filter: .appleBooks, firstBook: .appleBooks) == .kindle)
+        #expect(
+            CaptureReader.resolve(
+                .automatic, selected: nil, liveReader: nil,
+                filter: .appleBooks, firstBook: .kindle) == .appleBooks)
+        #expect(
+            CaptureReader.resolve(
+                .automatic, selected: nil, liveReader: nil, filter: nil,
+                firstBook: .appleBooks) == .appleBooks)
+        #expect(
+            CaptureReader.resolve(
+                .automatic, selected: nil, liveReader: nil, filter: nil,
+                firstBook: nil) == .kindle)
+        #expect(
+            CaptureReader.resolve(
+                .kindle, selected: .appleBooks, liveReader: .appleBooks,
+                filter: .appleBooks, firstBook: .appleBooks) == .kindle)
+        #expect(
+            CaptureReader.resolve(
+                .appleBooks, selected: .kindle, liveReader: .kindle,
+                filter: .kindle, firstBook: .kindle) == .appleBooks)
     }
 
     @Test func aKnownProfileSuppliesItsAddressAndAuth() {

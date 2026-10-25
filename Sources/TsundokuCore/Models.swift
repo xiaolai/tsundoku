@@ -334,6 +334,8 @@ public struct AISettings: Codable, Sendable, Equatable {
     public var cleanPageDuringCapture: Bool
     /// The PDF page size. `a4` resizes the reader's window for the capture.
     public var capturePageSize: CapturePageSize
+    /// Which reader a capture runs against. Default automatic.
+    public var captureReader: CaptureReader
     /// The Aa font size for the capture; nil keeps the reader's setting.
     public var captureFontSize: Int?
     /// Apple Books' relative text-size steps for the capture; 0 keeps it.
@@ -358,6 +360,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         sessionLogging: Bool = false,
         cleanPageDuringCapture: Bool = true,
         capturePageSize: CapturePageSize = .asDisplayed,
+        captureReader: CaptureReader = .automatic,
         captureFontSize: Int? = nil,
         booksFontSteps: Int = 0,
         captureCropTop: Int = 0,
@@ -376,6 +379,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.sessionLogging = sessionLogging
         self.cleanPageDuringCapture = cleanPageDuringCapture
         self.capturePageSize = capturePageSize
+        self.captureReader = captureReader
         self.captureFontSize = captureFontSize
         self.booksFontSteps = booksFontSteps
         self.captureCropTop = captureCropTop
@@ -389,7 +393,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         case provider, model, endpoint, language, sessionLogging
         case httpProfileID
         case cleanPageDuringCapture
-        case capturePageSize, captureFontSize, booksFontSteps
+        case capturePageSize, captureReader, captureFontSize, booksFontSteps
         case captureCropTop, booksCropBottom, kindleCropBottom
         case includeCoverPage, writeSidecars
     }
@@ -430,6 +434,10 @@ public struct AISettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(
                 CapturePageSize.self, forKey: .capturePageSize)
             ?? defaults.capturePageSize
+        captureReader =
+            try container.decodeIfPresent(
+                CaptureReader.self, forKey: .captureReader)
+            ?? defaults.captureReader
         captureFontSize =
             try container.decodeIfPresent(
                 Int.self, forKey: .captureFontSize)
