@@ -181,6 +181,15 @@ final class CompanionWindow {
 
     private static let animationDuration: TimeInterval = 0.2
 
+    private static func timingFunction(_ curve: CompanionDrawer.Motion.Curve)
+        -> CAMediaTimingFunction
+    {
+        switch curve {
+        case .easeOut: CAMediaTimingFunction(name: .easeOut)
+        case .easeInEaseOut: CAMediaTimingFunction(name: .easeInEaseOut)
+        }
+    }
+
     /// Opens the panel from its reader-facing edge: the window starts as a
     /// sliver on that edge and grows to the panel while the hosted content
     /// keeps its final layout, so the panel is revealed rather than reflowed.
@@ -198,9 +207,10 @@ final class CompanionWindow {
             window.invalidateShadow()
             return
         }
+        let motion = CompanionDrawer.motion(for: anchor)
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = Self.animationDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            context.duration = motion.duration
+            context.timingFunction = Self.timingFunction(motion.curve)
             window.animator().setFrame(panel, display: true)
         } completionHandler: { [weak self] in
             MainActor.assumeIsolated { self?.window.invalidateShadow() }
@@ -221,9 +231,10 @@ final class CompanionWindow {
             completion()
             return
         }
+        let motion = CompanionDrawer.motion(for: anchor)
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = Self.animationDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            context.duration = motion.duration
+            context.timingFunction = Self.timingFunction(motion.curve)
             window.animator().setFrame(start, display: true)
         } completionHandler: { [weak self] in
             MainActor.assumeIsolated {

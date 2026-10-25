@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 /// The geometry of the drawer-style panel animation.
 ///
@@ -53,6 +54,34 @@ public enum CompanionDrawer {
             CGRect(
                 x: panel.minX, y: panel.minY, width: panel.width,
                 height: minimum)
+        }
+    }
+
+    /// How the drawer moves for an anchor. A side drawer is a short horizontal
+    /// reveal; a vertical drawer travels the panel's full height from the
+    /// reader's edge and gets slightly more time and an ease-in-out so it does
+    /// not begin with a snap.
+    public struct Motion: Equatable, Sendable {
+        public enum Curve: String, Sendable {
+            case easeOut
+            case easeInEaseOut
+        }
+
+        public let duration: TimeInterval
+        public let curve: Curve
+
+        public init(duration: TimeInterval, curve: Curve) {
+            self.duration = duration
+            self.curve = curve
+        }
+    }
+
+    public static func motion(for anchor: Anchor) -> Motion {
+        switch anchor {
+        case .leading, .trailing:
+            Motion(duration: 0.2, curve: .easeOut)
+        case .top, .bottom:
+            Motion(duration: 0.26, curve: .easeInEaseOut)
         }
     }
 }

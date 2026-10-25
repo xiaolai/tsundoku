@@ -59,4 +59,19 @@ struct CompanionDrawerTests {
         #expect(start.width > 0)
         #expect(start.height == panel.height)
     }
+
+    @Test func aSideDrawerUsesAShortEaseOut() {
+        #expect(
+            CompanionDrawer.motion(for: .leading)
+                == CompanionDrawer.Motion(duration: 0.2, curve: .easeOut))
+        #expect(CompanionDrawer.motion(for: .trailing).curve == .easeOut)
+    }
+
+    @Test func aVerticalDrawerGetsMoreTimeAndAnEaseInOut() {
+        let vertical = CompanionDrawer.motion(for: .top)
+        #expect(vertical.curve == .easeInEaseOut)
+        #expect(vertical.duration > CompanionDrawer.motion(for: .leading).duration)
+        #expect(
+            CompanionDrawer.motion(for: .bottom).curve == .easeInEaseOut)
+    }
 }
