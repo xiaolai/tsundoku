@@ -6,11 +6,12 @@ import Testing
 @Suite("Reader theme and sampling policy")
 struct ReaderThemeTests {
     private func key(
-        kind: ReaderKind = .appleBooks, pid: pid_t = 1, width: CGFloat = 800,
+        kind: ReaderKind = .appleBooks, pid: pid_t = 1,
+        windowNumber: UInt32? = 7, width: CGFloat = 800,
         height: CGFloat = 600, title: String = "A Book"
     ) -> StyleSampleKey {
         StyleSampleKey(
-            kind: kind, pid: pid,
+            kind: kind, pid: pid, windowNumber: windowNumber,
             frame: CGRect(x: 0, y: 0, width: width, height: height),
             title: title)
     }
@@ -48,6 +49,47 @@ struct ReaderThemeTests {
         #expect(abs(theme.blue - 216.0 / 255) < 0.01)
     }
 
+    @Test func aBoundarySplitBackgroundStillReadsAsOneColour() throws {
+        // 239 and 240 land on either side of a quantisation boundary; all
+        // eight channel combinations must merge back into one theme.
+        var histogram = ColourHistogram()
+        for red in [UInt8(239), 240] {
+            for green in [UInt8(239), 240] {
+                for blue in [UInt8(239), 240] {
+                    for _ in 0..<125 {
+                        histogram.add(red: red, green: green, blue: blue)
+                    }
+                }
+            }
+        }
+        let theme = try #require(histogram.theme(sampled: 1000))
+        #expect(theme.share > 0.99)
+        #expect(abs(theme.red - 239.5 / 255) < 0.01)
+        #expect(theme.isDark == false)
+    }
+
+    @Test func aSplitBackgroundOutweighsASmallerDistantColour() throws {
+        // 1,000 background pixels split across eight neighbouring bins, plus
+        // 126 black pixels. No single bin wins, but the merged background does.
+        var histogram = ColourHistogram()
+        for red in [UInt8(239), 240] {
+            for green in [UInt8(239), 240] {
+                for blue in [UInt8(239), 240] {
+                    for _ in 0..<125 {
+                        histogram.add(red: red, green: green, blue: blue)
+                    }
+                }
+            }
+        }
+        for _ in 0..<126 {
+            histogram.add(red: 0, green: 0, blue: 0)
+        }
+        let theme = try #require(histogram.theme(sampled: 1126))
+        #expect(theme.share > 0.88)
+        #expect(abs(theme.red - 239.5 / 255) < 0.01)
+        #expect(theme.isDark == false)
+    }
+
     @Test func aBusyPictureHasNoTheme() {
         var histogram = ColourHistogram()
         for index in 0..<1000 {
@@ -59,6 +101,13 @@ struct ReaderThemeTests {
         #expect(histogram.theme(sampled: 1000) == nil)
     }
 
+    @Test func aTieBetweenDistantColoursIsNoTheme() {
+        var histogram = ColourHistogram()
+        for _ in 0..<500 { histogram.add(red: 0, green: 0, blue: 0) }
+        for _ in 0..<500 { histogram.add(red: 255, green: 255, blue: 255) }
+        #expect(histogram.theme(sampled: 1000) == nil)
+    }
+
     @Test func aTinySampleIsRefused() {
         var histogram = ColourHistogram()
         for _ in 0..<500 { histogram.add(red: 255, green: 255, blue: 255) }
@@ -67,12 +116,27 @@ struct ReaderThemeTests {
 
     // MARK: Policy
 
-    @Test func theSameSurfaceReusesItsSample() {
+    private let now = Date(timeIntervalSince1970: 1_000)
+
+    @Test func theSameFreshSurfaceReusesItsSample() {
         #expect(
             StyleSamplePolicy.decide(
-                now: Date(timeIntervalSince1970: 100),
-                lastAttempt: Date(timeIntervalSince1970: 99.5),
-                key: key(), cachedKey: key(), hasSample: true) == .reuse)
+                now: now,
+                lastAttempt: now.addingTimeInterval(-0.5),
+                key: key(), cachedKey: key(),
+                cachedAt: now.addingTimeInterval(-5), hasSample: true)
+                == .reuse)
+    }
+
+    @Test func anAgedSampleIsMeasuredAgain() {
+        // A reader can change its font or theme without resizing the window.
+        #expect(
+            StyleSamplePolicy.decide(
+                now: now,
+                lastAttempt: now.addingTimeInterval(-120),
+                key: key(), cachedKey: key(),
+                cachedAt: now.addingTimeInterval(-61), hasSample: true)
+                == .sample)
     }
 
     @Test func aDifferentBookWaitsOutTheInterval() {
@@ -80,35 +144,37 @@ struct ReaderThemeTests {
         let other = key(title: "Another Book")
         #expect(
             StyleSamplePolicy.decide(
-                now: Date(timeIntervalSince1970: 100),
-                lastAttempt: Date(timeIntervalSince1970: 99.5),
-                key: other, cachedKey: cached, hasSample: true) == .wait)
+                now: now, lastAttempt: now.addingTimeInterval(-0.5),
+                key: other, cachedKey: cached,
+                cachedAt: now.addingTimeInterval(-5), hasSample: true)
+                == .wait)
         #expect(
             StyleSamplePolicy.decide(
-                now: Date(timeIntervalSince1970: 100.75),
-                lastAttempt: Date(timeIntervalSince1970: 99.5),
-                key: other, cachedKey: cached, hasSample: true) == .sample)
+                now: now, lastAttempt: now.addingTimeInterval(-0.75),
+                key: other, cachedKey: cached,
+                cachedAt: now.addingTimeInterval(-5), hasSample: true)
+                == .sample)
     }
 
-    @Test func aResizedWindowIsANewSurface() {
-        let cached = key(width: 800)
-        #expect(cached != key(width: 1000))
+    @Test func aResizedOrReidentifiedWindowIsANewSurface() {
+        #expect(key(width: 800) != key(width: 1000))
+        #expect(key(windowNumber: 7) != key(windowNumber: 8))
+        #expect(key(windowNumber: nil) != key(windowNumber: 7))
     }
 
     @Test func aMissingSampleIsNeverReused() {
         #expect(
             StyleSamplePolicy.decide(
-                now: Date(timeIntervalSince1970: 100),
-                lastAttempt: Date(timeIntervalSince1970: 99.9),
-                key: key(), cachedKey: key(), hasSample: false) == .wait)
+                now: now, lastAttempt: now.addingTimeInterval(-0.1),
+                key: key(), cachedKey: key(), cachedAt: nil, hasSample: false)
+                == .wait)
     }
 
     @Test func theFirstAttemptSamples() {
         #expect(
             StyleSamplePolicy.decide(
-                now: Date(timeIntervalSince1970: 100),
-                lastAttempt: .distantPast, key: key(), cachedKey: nil,
-                hasSample: false) == .sample)
+                now: now, lastAttempt: .distantPast, key: key(),
+                cachedKey: nil, cachedAt: nil, hasSample: false) == .sample)
     }
 
     @Test func aReaderSwitchIsANewSurface() {

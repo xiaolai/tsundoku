@@ -66,8 +66,7 @@ final class CompanionController {
     func stop() {
         removeInputMonitors()
         reorderWork?.cancel()
-        panelModel?.cancel()
-        panelModel = nil
+        cancelPanelModel()
         window.hide()
     }
 
@@ -83,8 +82,8 @@ final class CompanionController {
             cancelPanelModel()
         }
         if output.presentation == .panel {
-            preparePanelModelIfNeeded()
-            if snapshot != previousReader, let reader {
+            let prepared = preparePanelModelIfNeeded()
+            if !prepared, snapshot != previousReader, let reader {
                 refreshReaderStyle(for: reader)
             }
         }
@@ -302,12 +301,16 @@ final class CompanionController {
         }
     }
 
-    private func preparePanelModelIfNeeded() {
-        guard let reader else { return }
+    /// Creates the panel model for the current reader. Returns whether a new
+    /// model was created: its fresh sample is started here, so the caller must
+    /// not start a second one.
+    @discardableResult
+    private func preparePanelModelIfNeeded() -> Bool {
+        guard let reader else { return false }
         let identity = ReaderIdentity(
             kind: reader.kind, pid: reader.pid,
             windowNumber: reader.windowNumber, title: reader.title)
-        if panelModel != nil, panelIdentity == identity { return }
+        if panelModel != nil, panelIdentity == identity { return false }
         cancelPanelModel()
         let app = appModelFactory()
         onAppModelCreated?()
@@ -317,9 +320,12 @@ final class CompanionController {
         panelModel = model
         panelIdentity = identity
         model.loadPage()
-        refreshReaderStyle(for: reader)
+        // Reopening the panel is the moment a reader's font or theme change
+        // becomes visible; the cache must not answer for the old appearance.
+        refreshReaderStyle(for: reader, force: true)
         TsundokuDiagnostics.shared.event(
             "ai_panel_model_created", ["reader": reader.kind.rawValue])
+        return true
     }
 
     private func cancelPanelModel() {
@@ -331,9 +337,12 @@ final class CompanionController {
         panelIdentity = nil
     }
 
-    /// Sample the reader's type for the answer text. The sampler caches per
-    /// book window and size, so repeated calls are cheap.
-    private func refreshReaderStyle(for reader: ReaderSnapshot) {
+    /// Sample the reader's type for the answer text. The sampler reuses a
+    /// fresh sample for the same surface; `force` is used when the panel
+    /// opens or the match settings change.
+    private func refreshReaderStyle(
+        for reader: ReaderSnapshot, force: Bool = false
+    ) {
         let settings = settings.settings
         guard settings.matchReaderTypography || settings.matchReaderTheme else {
             styleGeneration += 1
@@ -348,7 +357,8 @@ final class CompanionController {
         styleTask?.cancel()
         styleTask = Task { [weak self] in
             guard let self else { return }
-            let sampled = await self.styleSampler.sample(for: reader)
+            let sampled = await self.styleSampler.sample(
+                for: reader, force: force)
             guard !Task.isCancelled, generation == self.styleGeneration
             else { return }
             let style = settings.matchReaderTypography

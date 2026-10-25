@@ -6,27 +6,23 @@ import TsundokuCore
 import TsundokuUI
 
 /// `--typography-gate`: prove the measurer on a window whose type and colours
-/// are known before the fact, then prove the panel paints the measured theme.
+/// are known before the fact, then prove the panel paints each measured theme.
 ///
 /// The page is drawn with 20 pt type on a 26 pt pitch, first black on white
 /// then white on black; the capture path, the crop, the row profile and the
-/// colour histogram are the same code the product runs. The panel check hosts
-/// the real `CompanionPanelView` with the measured dark theme and asserts the
-/// captured background. The gate exits non-zero unless every check passes.
+/// colour histogram are the same code the product runs. Each panel check hosts
+/// the real `CompanionPanelView` with a measured theme under the opposite host
+/// appearance and asserts the captured background, so a panel that ignores the
+/// theme cannot pass. The gate exits non-zero unless every check passes.
 @MainActor
 enum TypographyGate {
     static let pointSize: CGFloat = 20
     static let linePitch: CGFloat = 26
     static let lineCount = 12
-    /// Where the panel screenshot lands, for the record beside the numbers.
-    static let panelPath = "/tmp/tsundoku-typography-panel.png"
 
     static func run() {
         Task { @MainActor in
-            let (pages, panel) = await measure()
-            let report = GateReport(
-                pages: pages, panel: panel,
-                pass: pages.allSatisfy(\.passed) && panel.passed)
+            let report = await measure()
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             if let data = try? encoder.encode(report),
@@ -40,7 +36,7 @@ enum TypographyGate {
 
     private struct GateReport: Encodable {
         let pages: [GateResult]
-        let panel: PanelResult
+        let panels: [PanelResult]
         let pass: Bool
     }
 
@@ -56,13 +52,14 @@ enum TypographyGate {
     }
 
     private struct PanelResult: Encodable {
-        let expectedDark: Bool
-        let capturedDark: Bool
+        let page: String
+        let expectedRgb: [Int]
+        let capturedRgb: [Int]
         let passed: Bool
         let note: String?
     }
 
-    private static func measure() async -> ([GateResult], PanelResult) {
+    private static func measure() async -> GateReport {
         let window = NSWindow(
             contentRect: NSRect(x: 120, y: 120, width: 640, height: 480),
             styleMask: [.titled], backing: .buffered, defer: false)
@@ -73,31 +70,36 @@ enum TypographyGate {
         window.orderFrontRegardless()
         defer { window.orderOut(nil) }
 
-        let light = await capture(
+        let light = await pageResult(
             window: window, view: view, page: "light",
             background: .white, ink: .black, dark: false)
-        let darkSample = await sample(
-            window: window, view: view,
-            background: .black, ink: .white)
-        let dark = result(
-            page: "dark", sample: darkSample, dark: true)
-        let panel = await panelCheck(from: darkSample?.theme)
-        return ([light, dark], panel)
+        let dark = await pageResult(
+            window: window, view: view, page: "dark",
+            background: .black, ink: .white, dark: true)
+        var panels: [PanelResult] = []
+        let stamp = String(UUID().uuidString.prefix(8))
+        if let theme = light.theme {
+            panels.append(
+                await panelCheck(
+                    theme: theme, page: "light", dark: false, stamp: stamp))
+        }
+        if let theme = dark.theme {
+            panels.append(
+                await panelCheck(
+                    theme: theme, page: "dark", dark: true, stamp: stamp))
+        }
+        let pass =
+            light.result.passed && dark.result.passed
+            && panels.count == 2 && panels.allSatisfy(\.passed)
+        return GateReport(
+            pages: [light.result, dark.result], panels: panels, pass: pass)
     }
 
-    private static func capture(
+    /// A measured page plus the raw theme the panel check needs.
+    private static func pageResult(
         window: NSWindow, view: GatePageView, page: String,
         background: NSColor, ink: NSColor, dark: Bool
-    ) async -> GateResult {
-        let sampled = await sample(
-            window: window, view: view, background: background, ink: ink)
-        return result(page: page, sample: sampled, dark: dark)
-    }
-
-    private static func sample(
-        window: NSWindow, view: GatePageView,
-        background: NSColor, ink: NSColor
-    ) async -> WindowTextSampler.Sample? {
+    ) async -> (result: GateResult, theme: ReaderTheme?) {
         view.background = background
         view.ink = ink
         view.needsDisplay = true
@@ -106,52 +108,64 @@ enum TypographyGate {
         do {
             guard let window = try await shareableWindow(
                 number: window.windowNumber)
-            else { return nil }
-            return try await WindowTextSampler.sample(of: window)
+            else {
+                return (failure(page, "window_not_found"), nil)
+            }
+            let sample = try await WindowTextSampler.sample(of: window)
+            let theme = sample.theme
+            let pitch = sample.measurement?.pitch ?? 0
+            let bands = sample.measurement?.bands ?? 0
+            guard let theme else {
+                return (failure(page, "no_theme"), nil)
+            }
+            let rgb = [
+                Int((theme.red * 255).rounded()),
+                Int((theme.green * 255).rounded()),
+                Int((theme.blue * 255).rounded()),
+            ]
+            let colourMatches = dark
+                ? rgb.allSatisfy { $0 <= 38 }
+                : rgb.allSatisfy { $0 >= 217 }
+            let passed =
+                abs(pitch - linePitch) <= 1
+                && bands >= 10
+                && theme.share >= 0.5
+                && theme.isDark == dark
+                && colourMatches
+            return (
+                GateResult(
+                    page: page, pitch: Double(pitch), bands: bands,
+                    share: theme.share, dark: theme.isDark, rgb: rgb,
+                    passed: passed, note: nil),
+                theme
+            )
         } catch {
-            return nil
+            return (failure(page, String(describing: error)), nil)
         }
     }
 
-    private static func result(
-        page: String, sample: WindowTextSampler.Sample?, dark: Bool
-    ) -> GateResult {
-        let failure: (String) -> GateResult = { note in
-            GateResult(
-                page: page, pitch: 0, bands: 0, share: 0, dark: false,
-                rgb: [0, 0, 0], passed: false, note: note)
-        }
-        guard let sample else { return failure("window_or_capture_failed") }
-        let pitch = sample.measurement?.pitch ?? 0
-        let bands = sample.measurement?.bands ?? 0
-        guard let theme = sample.theme else { return failure("no_theme") }
-        let rgb = [
+    private static func failure(_ page: String, _ note: String) -> GateResult {
+        GateResult(
+            page: page, pitch: 0, bands: 0, share: 0, dark: false,
+            rgb: [0, 0, 0], passed: false, note: note)
+    }
+
+    /// Host the product's panel with the measured theme under the opposite
+    /// host appearance, then compare the captured background with the measured
+    /// colour. The screenshot is kept for the record; a failure to write it
+    /// fails the check rather than leaving stale evidence behind.
+    private static func panelCheck(
+        theme: ReaderTheme, page: String, dark: Bool, stamp: String
+    ) async -> PanelResult {
+        let expected = [
             Int((theme.red * 255).rounded()),
             Int((theme.green * 255).rounded()),
             Int((theme.blue * 255).rounded()),
         ]
-        let colourMatches = dark
-            ? rgb.allSatisfy { $0 <= 38 }
-            : rgb.allSatisfy { $0 >= 217 }
-        let passed =
-            abs(pitch - linePitch) <= 1
-            && bands >= 10
-            && theme.share >= 0.5
-            && theme.isDark == dark
-            && colourMatches
-        return GateResult(
-            page: page, pitch: Double(pitch), bands: bands,
-            share: theme.share, dark: theme.isDark, rgb: rgb,
-            passed: passed, note: nil)
-    }
-
-    /// Host the product's panel with the measured dark theme and check that
-    /// the captured background is dark. The screenshot is kept for the record.
-    private static func panelCheck(from theme: ReaderTheme?) async -> PanelResult {
-        guard let theme, theme.isDark else {
-            return PanelResult(
-                expectedDark: true, capturedDark: false, passed: false,
-                note: "no_dark_theme_measured")
+        let failure: (String) -> PanelResult = { note in
+            PanelResult(
+                page: page, expectedRgb: expected, capturedRgb: [],
+                passed: false, note: note)
         }
         let model = AIPanelModel(app: nil)
         model.bookTitle = "Typography gate"
@@ -176,6 +190,9 @@ enum TypographyGate {
         window.contentView = host
         window.isOpaque = false
         window.backgroundColor = .clear
+        // The panel must follow the page, not the host: a dark page is proven
+        // under a light appearance and a light page under a dark one.
+        window.appearance = NSAppearance(named: dark ? .aqua : .darkAqua)
         window.orderFrontRegardless()
         defer { window.orderOut(nil) }
         try? await Task.sleep(for: .milliseconds(800))
@@ -183,57 +200,64 @@ enum TypographyGate {
         do {
             guard let shareable = try await shareableWindow(
                 number: window.windowNumber)
-            else {
-                return PanelResult(
-                    expectedDark: true, capturedDark: false, passed: false,
-                    note: "panel_window_not_found")
+            else { return failure("panel_window_not_found") }
+            let captured = try await WindowTextSampler.capture(shareable)
+            guard let pixel = self.pixel(captured.image, x: captured.image.width / 2, y: 6)
+            else { return failure("pixel_unreadable") }
+            guard pixel.alpha >= 250 else {
+                return failure("pixel_transparent")
             }
-            let image = try await WindowTextSampler.capture(shareable)
-            save(image, to: panelPath)
-            let corner = pixel(image, x: image.width / 2, y: 6)
-            let luminance =
-                0.299 * Double(corner.0) / 255
-                + 0.587 * Double(corner.1) / 255
-                + 0.114 * Double(corner.2) / 255
-            let capturedDark = luminance < ReaderTheme.darkThreshold
+            let capturedRGB = [Int(pixel.red), Int(pixel.green), Int(pixel.blue)]
+            // A fresh path per run: a failure can never leave the previous
+            // run's screenshot looking like this run's evidence.
+            let path = "/tmp/tsundoku-typography-panel-\(page)-\(stamp).png"
+            guard save(captured.image, to: path) else {
+                return failure("panel_screenshot_not_saved")
+            }
+            let matches = zip(expected, capturedRGB).allSatisfy {
+                abs($0 - $1) <= 10
+            }
             return PanelResult(
-                expectedDark: true, capturedDark: capturedDark,
-                passed: capturedDark, note: panelPath)
+                page: page, expectedRgb: expected, capturedRgb: capturedRGB,
+                passed: matches, note: path)
         } catch {
-            return PanelResult(
-                expectedDark: true, capturedDark: false, passed: false,
-                note: String(describing: error))
+            return failure(String(describing: error))
         }
     }
 
+    /// The pixel at a point, or nil when it cannot be read. Alpha is returned
+    /// with the colour: a transparent pixel is not a background.
     private static func pixel(_ image: CGImage, x: Int, y: Int)
-        -> (UInt8, UInt8, UInt8)
+        -> (red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8)?
     {
-        // CGImage pixel space has its origin at the top left, matching the
-        // screen coordinates the gate samples elsewhere.
         guard
             let cropped = image.cropping(
                 to: CGRect(x: x, y: y, width: 1, height: 1))
-        else { return (0, 0, 0) }
+        else { return nil }
         var pixel = [UInt8](repeating: 0, count: 4)
-        guard
-            let context = CGContext(
-                data: &pixel, width: 1, height: 1, bitsPerComponent: 8,
-                bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { return (0, 0, 0) }
-        context.draw(cropped, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-        return (pixel[0], pixel[1], pixel[2])
+        let drawn = pixel.withUnsafeMutableBytes { buffer -> Bool in
+            guard
+                let context = CGContext(
+                    data: buffer.baseAddress, width: 1, height: 1,
+                    bitsPerComponent: 8, bytesPerRow: 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.draw(cropped, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            return true
+        }
+        guard drawn else { return nil }
+        return (pixel[0], pixel[1], pixel[2], pixel[3])
     }
 
-    private static func save(_ image: CGImage, to path: String) {
+    private static func save(_ image: CGImage, to path: String) -> Bool {
         guard
             let destination = CGImageDestinationCreateWithURL(
                 URL(fileURLWithPath: path) as CFURL, "public.png" as CFString,
                 1, nil)
-        else { return }
+        else { return false }
         CGImageDestinationAddImage(destination, image, nil)
-        CGImageDestinationFinalize(destination)
+        return CGImageDestinationFinalize(destination)
     }
 
     private static func shareableWindow(number: Int) async throws -> SCWindow? {

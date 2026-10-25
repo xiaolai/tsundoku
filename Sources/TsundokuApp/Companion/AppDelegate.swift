@@ -34,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var hotKeyTestArmed = false
     private var appliedHotKey: CompanionHotKey?
     private var appliedLaunchAtLogin: Bool?
+    private var appliedMatchTypography: Bool?
+    private var appliedMatchTheme: Bool?
     private var hotKeyTestTimeout: Task<Void, Never>?
     private var feedbackTask: Task<Void, Never>?
     /// Set when this delegate opened Settings with a route; the Settings scene
@@ -328,7 +330,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         _ new: CompanionSettings, userInitiated: Bool
     ) {
         guard companion != nil else { return }
-        companion?.refreshStyleForCurrentReader()
+        // Only the two match settings affect the sample; refreshing on every
+        // settings write would cancel a pending sample for nothing.
+        let styleChanged =
+            (appliedMatchTypography != new.matchReaderTypography)
+            || (appliedMatchTheme != new.matchReaderTheme)
+        if appliedMatchTypography != nil, styleChanged {
+            companion?.refreshStyleForCurrentReader()
+        }
+        appliedMatchTypography = new.matchReaderTypography
+        appliedMatchTheme = new.matchReaderTheme
         guard !CommandLine.arguments.contains("--no-system-integrations") else { return }
         if appliedHotKey != new.hotKey {
             let status = hotKey.install(new.hotKey)

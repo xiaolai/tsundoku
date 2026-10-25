@@ -11,7 +11,7 @@ import TsundokuCore
 /// and discarded; nothing is written or sent.
 @MainActor
 enum WindowTextSampler {
-    struct Sample {
+    struct Sample: Sendable {
         let measurement: LinePitch.Measurement?
         let theme: ReaderTheme?
         let imageWidth: Int
@@ -24,49 +24,93 @@ enum WindowTextSampler {
         let sampledPixels: Int
     }
 
-    static func sample(of window: SCWindow) async throws -> Sample {
-        let image = try await capture(window)
-        return profile(image, pointWidth: window.frame.width)
+    enum Failure: Error, CustomStringConvertible {
+        case drawFailed
+
+        var description: String {
+            switch self {
+            case .drawFailed:
+                "the captured image could not be drawn into a pixel buffer"
+            }
+        }
     }
 
-    static func capture(_ window: SCWindow) async throws -> CGImage {
+    static func sample(of window: SCWindow) async throws -> Sample {
+        let captured = try await capture(window)
+        guard let drawn = draw(captured.image) else {
+            throw Failure.drawFailed
+        }
+        let pointWidth = captured.pointWidth
+        // The per-pixel pass is pure arithmetic over a copied buffer; running
+        // it on the main actor would stall the panel for a large window.
+        return await Task.detached(priority: .userInitiated) {
+            scan(
+                pixels: drawn.pixels, width: drawn.width, height: drawn.height,
+                pointWidth: pointWidth)
+        }.value
+    }
+
+    /// The window's own display scale decides the capture size, and the
+    /// filter's content rect gives the point width the profile divides by.
+    /// `NSScreen.main` describes whichever screen holds the focused window,
+    /// which need not be the captured one.
+    static func capture(_ window: SCWindow) async throws
+        -> (image: CGImage, pointWidth: CGFloat)
+    {
         let filter = SCContentFilter(desktopIndependentWindow: window)
+        let rawScale = CGFloat(filter.pointPixelScale)
+        let scale = rawScale > 0 ? rawScale : 1
+        let content = filter.contentRect
         let configuration = SCStreamConfiguration()
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        configuration.width = Int(window.frame.width * scale)
-        configuration.height = Int(window.frame.height * scale)
+        configuration.width = Int((content.width * scale).rounded())
+        configuration.height = Int((content.height * scale).rounded())
         configuration.showsCursor = false
         configuration.capturesAudio = false
-        return try await SCScreenshotManager.captureImage(
+        let image = try await SCScreenshotManager.captureImage(
             contentFilter: filter, configuration: configuration)
+        return (image, content.width)
+    }
+
+    /// Draws the image into an RGBA buffer. The context is created and used
+    /// inside `withUnsafeMutableBytes`: handing `&pixels` to `CGContext` would
+    /// leave the context writing through a pointer whose lifetime ended at the
+    /// call.
+    private static func draw(_ image: CGImage)
+        -> (pixels: [UInt8], width: Int, height: Int)?
+    {
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return nil }
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard
+                let context = CGContext(
+                    data: buffer.baseAddress, width: width, height: height,
+                    bitsPerComponent: 8, bytesPerRow: width * 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.draw(
+                image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return drawn ? (pixels, width, height) : nil
     }
 
     /// The page's text column, minus the chrome bands at the top and bottom,
     /// reduced to one mean per row plus a colour histogram.
-    static func profile(_ image: CGImage, pointWidth: CGFloat) -> Sample {
-        let width = image.width
-        let height = image.height
+    nonisolated static func scan(
+        pixels: [UInt8], width: Int, height: Int, pointWidth: CGFloat
+    ) -> Sample {
         let empty = Sample(
             measurement: nil, theme: nil, imageWidth: width,
             imageHeight: height, rows: 0, rowMin: 0, rowMax: 0,
             rowP75: 0, rowMode: 0, sampledPixels: 0)
         guard width > 60, height > 60, pointWidth > 0 else { return empty }
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        guard
-            let context = CGContext(
-                data: &pixels, width: width, height: height,
-                bitsPerComponent: 8, bytesPerRow: width * 4,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { return empty }
-        context.draw(
-            image, in: CGRect(x: 0, y: 0, width: width, height: height))
-
         let x0 = width * 12 / 100
         let x1 = width * 88 / 100
         let y0 = height * 8 / 100
         let y1 = height * 92 / 100
-        guard x1 > x0, y1 > y0 else { return empty }
         var rowMeans: [Double] = []
         rowMeans.reserveCapacity(y1 - y0)
         var histogram = ColourHistogram()
@@ -87,7 +131,7 @@ enum WindowTextSampler {
                 histogram.add(red: red, green: green, blue: blue)
                 sampled += 1
             }
-            rowMeans.append(count == 0 ? 0 : sum / Double(count))
+            rowMeans.append(sum / Double(count))
         }
         let scale = CGFloat(width) / pointWidth
         let sorted = rowMeans.sorted()

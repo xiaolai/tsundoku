@@ -30,7 +30,6 @@ struct ReaderStyleTests {
         let measurement = try #require(
             LinePitch.measure(rowMeans: profile(), scale: 1))
         #expect(measurement.pitch == 20)
-        #expect(measurement.inkHeight == 8)
     }
 
     @Test func darkPageReadsTheSameAsLight() throws {
@@ -44,7 +43,6 @@ struct ReaderStyleTests {
         let measurement = try #require(
             LinePitch.measure(rowMeans: profile(pitch: 40, band: 16), scale: 2))
         #expect(measurement.pitch == 20)
-        #expect(measurement.inkHeight == 8)
     }
 
     @Test func noiseAndParagraphGapsKeepTheModalPitch() throws {
@@ -64,6 +62,18 @@ struct ReaderStyleTests {
         let measurement = try #require(
             LinePitch.measure(rowMeans: values, scale: 1))
         #expect(measurement.pitch == 20)
+    }
+
+    @Test func aGapBeyondTheOutlierFactorIsDiscarded() throws {
+        // Pitches 20, 21, 22, 23, 40, 40: the two paragraph gaps must not pull
+        // the median up. A window of ±35 % around 23 rejects them, leaving 22.
+        var values = [Double](repeating: 245, count: 400)
+        for start in [10, 30, 51, 73, 96, 136, 176] {
+            for y in start..<(min(start + 8, 400)) { values[y] = 60 }
+        }
+        let measurement = try #require(
+            LinePitch.measure(rowMeans: values, scale: 1))
+        #expect(measurement.pitch == 22)
     }
 
     @Test func tooLittleTextIsNotASample() {
@@ -121,15 +131,54 @@ struct ReaderStyleTests {
         #expect(AXFontFace.parse(font: ["AXFontName": "X", "AXFontSize": 500]) == nil)
     }
 
-    @Test func theBodyFaceIsTheOneCoveringMostCharacters() {
-        let face = AXFontFace.bodyFace(from: [
-            AXFontSample(family: "Charter Bold", size: 34.68, characters: 40),
-            AXFontSample(family: "Charter Roman", size: 23.12, characters: 3200),
-            AXFontSample(family: "Menlo Regular", size: 15.23, characters: 180),
+    @Test func anEmptyFontNameFallsBackToTheFamily() {
+        let parsed = AXFontFace.parse(font: [
+            "AXFontName": "", "AXFontFamily": "Georgia", "AXFontSize": 17,
         ])
+        #expect(parsed?.family == "Georgia")
+    }
+
+    @Test func implausibleSamplesAreRejected() {
+        #expect(
+            AXFontSample(family: "X", size: .nan, characters: 10) == nil)
+        #expect(
+            AXFontSample(family: "X", size: .infinity, characters: 10) == nil)
+        #expect(AXFontSample(family: "X", size: 1_000, characters: 10) == nil)
+        #expect(AXFontSample(family: "", size: 12, characters: 10) == nil)
+        #expect(AXFontSample(family: "X", size: 12, characters: 0) == nil)
+    }
+
+    @Test func theBodyFaceIsTheOneCoveringMostCharacters() throws {
+        let bold = try #require(
+            AXFontSample(family: "Charter Bold", size: 34.68, characters: 40))
+        let roman = try #require(
+            AXFontSample(family: "Charter Roman", size: 23.12, characters: 3200))
+        let menlo = try #require(
+            AXFontSample(family: "Menlo Regular", size: 15.23, characters: 180))
+        let face = AXFontFace.bodyFace(from: [bold, roman, menlo])
         #expect(face?.family == "Charter Roman")
         #expect(face?.size == 23.12)
         #expect(AXFontFace.bodyFace(from: []) == nil)
+    }
+
+    @Test func aRoundedBucketKeepsTheDominantExactSize() throws {
+        let common = try #require(
+            AXFontSample(family: "Georgia", size: 17.92, characters: 3_000))
+        let outlier = try #require(
+            AXFontSample(family: "Georgia", size: 18.4, characters: 1))
+        let face = AXFontFace.bodyFace(from: [outlier, common])
+        #expect(face?.size == 17.92)
+    }
+
+    @Test func equalWeightsResolveByFirstAppearance() throws {
+        let first = try #require(
+            AXFontSample(family: "Georgia", size: 17, characters: 500))
+        let second = try #require(
+            AXFontSample(family: "Georgia", size: 17.92, characters: 500))
+        #expect(
+            AXFontFace.bodyFace(from: [first, second])?.size == 17)
+        #expect(
+            AXFontFace.bodyFace(from: [second, first])?.size == 17.92)
     }
 
     // MARK: Settings

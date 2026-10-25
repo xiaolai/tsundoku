@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-/// Line pitch and ink height read from a row-darkness profile of a page.
+/// Line pitch read from a row-brightness profile of a page.
 ///
 /// The profile is the mean luminance of each image row across the text
 /// column. Text lines appear as runs whose mean departs from the page's
@@ -13,22 +13,19 @@ public enum LinePitch {
     public struct Measurement: Equatable, Sendable {
         /// Baseline to baseline, in points.
         public let pitch: CGFloat
-        /// The median height of a text band, in points. Not a font size: it is
-        /// the ink extent of the row, which depends on the glyphs present.
-        public let inkHeight: CGFloat
         public let bands: Int
 
-        public init(pitch: CGFloat, inkHeight: CGFloat, bands: Int) {
+        public init(pitch: CGFloat, bands: Int) {
             self.pitch = pitch
-            self.inkHeight = inkHeight
             self.bands = bands
         }
     }
 
     /// A line of type is between 8 and 70 points tall on a reading surface.
     static let pitchRange: ClosedRange<CGFloat> = 8...70
-    /// Paragraph gaps are longer than this multiple of the median pitch and
-    /// are discarded rather than averaged in.
+    /// A pitch this far from the median, in either direction, is a paragraph
+    /// gap or an artefact rather than a line, and is discarded rather than
+    /// averaged in.
     static let outlierFactor: CGFloat = 1.35
 
     /// `rowMeans` are in 0…255; `scale` converts image pixels to points.
@@ -50,19 +47,11 @@ public enum LinePitch {
         guard pitches.count >= 5 else { return nil }
         var median = medianValue(pitches)
         let refined = pitches.filter {
-            abs($0 - median) <= median * outlierFactor
+            $0 >= median / outlierFactor && $0 <= median * outlierFactor
         }
         guard refined.count >= max(3, pitches.count / 2) else { return nil }
         median = medianValue(refined)
-
-        // Ink height comes from the unsmoothed profile, so the smoothing
-        // radius does not pad every band.
-        let rawBands = detectBands(rowMeans, background: background)
-        let heights = rawBands.map { $0.end - $0.start + 1 }.sorted()
-        let ink =
-            heights.isEmpty
-            ? median : CGFloat(heights[heights.count / 2]) / scale
-        return Measurement(pitch: median, inkHeight: ink, bands: bands.count)
+        return Measurement(pitch: median, bands: bands.count)
     }
 
     private static func smooth(_ values: [Double], radius: Int) -> [Double] {
@@ -96,15 +85,6 @@ public enum LinePitch {
             bands.append((begin, values.count - 1))
         }
         return bands
-    }
-
-    static func percentile(_ values: [Double], _ fraction: Double) -> Double {
-        let sorted = values.sorted()
-        guard !sorted.isEmpty else { return 0 }
-        let index = min(
-            sorted.count - 1,
-            max(0, Int(Double(sorted.count - 1) * fraction)))
-        return sorted[index]
     }
 
     /// The page's own level: the most common row luminance, averaged within

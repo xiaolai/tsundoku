@@ -93,6 +93,8 @@ public struct CompanionPanelView: View {
     let compact: Bool
     let onActivate: () -> Void
     let onClose: () -> Void
+    /// The appearance this view inherited; a nil theme keeps it unchanged.
+    @Environment(\.colorScheme) private var inheritedColorScheme
 
     public init(
         model: AIPanelModel, compact: Bool,
@@ -109,44 +111,37 @@ public struct CompanionPanelView: View {
         let shape = RoundedRectangle(
             cornerRadius: CompanionMetrics.cornerRadius,
             style: .continuous)
-        panelContent
-            // The companion is a window, not a translucent HUD. An opaque
-            // system window background keeps long answers readable over a
-            // page view, and the window itself supplies the native shadow.
-            // When the page's colours are known, the panel takes them instead.
-            .background(
-                model.theme?.background
-                    ?? Color(nsColor: .windowBackgroundColor),
-                in: shape)
-            .overlay(
-                shape.strokeBorder(
-                    model.theme.map {
-                        $0.isDark
-                            ? Color.white.opacity(0.12)
-                            : Color.black.opacity(0.12)
-                    } ?? Color(nsColor: .separatorColor).opacity(0.6),
-                    lineWidth: 0.5)
-            )
-            .clipShape(shape)
-    }
-
-    /// The page's direction drives the panel's semantic colours: a dark page
-    /// gives light text, a light or sepia page keeps dark text. With no theme,
-    /// the system's own appearance is inherited.
-    @ViewBuilder private var panelContent: some View {
-        if let theme = model.theme {
-            content.environment(
-                \.colorScheme, theme.isDark ? .dark : .light)
-        } else {
-            content
-        }
-    }
-
-    private var content: some View {
+        // One unconditional structure: the page's direction drives the
+        // panel's semantic colours (a dark page gives light text, a light or
+        // sepia page keeps dark text), and no theme keeps the inherited
+        // appearance. Branching on the theme would replace the whole subtree
+        // and could recreate a text field while the reader is typing.
         AIPanelView(
             model: model, compact: compact, onActivate: onActivate,
             onClose: onClose
         )
+        .environment(
+            \.colorScheme,
+            model.theme.map { $0.isDark ? .dark : .light }
+                ?? inheritedColorScheme)
+        // The companion is a window, not a translucent HUD. An opaque
+        // system window background keeps long answers readable over a
+        // page view, and the window itself supplies the native shadow.
+        // When the page's colours are known, the panel takes them instead.
+        .background(
+            model.theme?.background
+                ?? Color(nsColor: .windowBackgroundColor),
+            in: shape)
+        .overlay(
+            shape.strokeBorder(
+                model.theme.map {
+                    $0.isDark
+                        ? Color.white.opacity(0.12)
+                        : Color.black.opacity(0.12)
+                } ?? Color(nsColor: .separatorColor).opacity(0.6),
+                lineWidth: 0.5)
+        )
+        .clipShape(shape)
     }
 }
 

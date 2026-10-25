@@ -449,15 +449,17 @@ public enum BooksLive {
         var samples: [AXFontSample] = []
         var visited = Set<CFHashCode>()
         func walk(_ element: AXUIElement, _ depth: Int) {
-            guard depth < 24, visited.insert(CFHash(element)).inserted,
-                samples.count < 80
+            // Bounded in both directions: a deep tree of textless nodes costs
+            // no more than 400 AX reads, and no more than 120 runs are kept.
+            guard depth < 24, visited.count < 400,
+                visited.insert(CFHash(element)).inserted,
+                samples.count < 120
             else { return }
             let text = stringAttribute(element, kAXValueAttribute) ?? ""
-            if text.count >= 20, let face = fontFace(of: element) {
+            let length = (text as NSString).length
+            if length >= 20 {
                 samples.append(
-                    AXFontSample(
-                        family: face.family, size: face.size,
-                        characters: text.count))
+                    contentsOf: fontSamples(of: element, available: length))
             }
             for child in children(element) { walk(child, depth + 1) }
         }
@@ -465,13 +467,26 @@ public enum BooksLive {
         return AXFontFace.bodyFace(from: samples)
     }
 
-    private static func fontFace(of element: AXUIElement)
-        -> (family: String, size: CGFloat)?
+    /// The live Books reader's body face, looked up and read off the main
+    /// actor: every step is a cross-process Accessibility call, and a slow
+    /// tree must not stall the panel.
+    public static func liveBodyFace() async -> (family: String, size: CGFloat)?
     {
-        // The range is bounded: only the first run is needed, and a page-sized
-        // attributed string is expensive to build.
-        var range = CFRange(location: 0, length: 64)
-        guard let value = AXValueCreate(.cfRange, &range) else { return nil }
+        guard let window = try? readerWindow() else { return nil }
+        return bodyFace(in: window)
+    }
+
+    /// Every attributed run in the element's first 64 UTF-16 units, each
+    /// weighted by the characters it covers in that excerpt. A leading bold
+    /// word cannot outvote the body when the body covers more of the excerpt,
+    /// and a short element is never asked for a range it does not have.
+    private static func fontSamples(of element: AXUIElement, available: Int)
+        -> [AXFontSample]
+    {
+        let length = min(64, available)
+        guard length > 0 else { return [] }
+        var range = CFRange(location: 0, length: length)
+        guard let value = AXValueCreate(.cfRange, &range) else { return [] }
         var out: CFTypeRef?
         guard
             AXUIElementCopyParameterizedAttributeValue(
@@ -480,20 +495,21 @@ public enum BooksLive {
                 value, &out) == .success,
             let attributed = out as? NSAttributedString,
             attributed.length > 0
-        else { return nil }
-        var face: (family: String, size: CGFloat)?
+        else { return [] }
+        var samples: [AXFontSample] = []
         attributed.enumerateAttribute(
             NSAttributedString.Key("AXFont"),
             in: NSRange(location: 0, length: attributed.length)
-        ) { value, _, stop in
-            if let font = value as? [String: Any],
-                let parsed = AXFontFace.parse(font: font)
-            {
-                face = parsed
-                stop.pointee = true
-            }
+        ) { value, range, _ in
+            guard let font = value as? [String: Any],
+                let parsed = AXFontFace.parse(font: font),
+                let sample = AXFontSample(
+                    family: parsed.family, size: parsed.size,
+                    characters: range.length)
+            else { return }
+            samples.append(sample)
         }
-        return face
+        return samples
     }
 
     /// Recognise text in a captured spread. Only used for measurement and the

@@ -1,5 +1,3 @@
-import Foundation
-
 /// The reading page's own colours, measured from the same capture that
 /// supplies the pitch.
 ///
@@ -37,6 +35,11 @@ public struct ReaderTheme: Equatable, Sendable {
 ///
 /// The quantisation is five bits per channel: enough to tell white, sepia and
 /// black apart, coarse enough that antialiasing and dithering stay in one bin.
+/// Dominance is judged on each bin merged with its immediate neighbours, not
+/// on the raw bins: a background sitting on a quantisation boundary (239 and
+/// 240 land in different bins) splits into equal parts that no single bin
+/// wins. A tie between merged colours that are not neighbours is no theme at
+/// all: the page has no dominant level.
 public struct ColourHistogram: Sendable {
     private struct Bin {
         var count = 0
@@ -54,8 +57,7 @@ public struct ColourHistogram: Sendable {
     public init() {}
 
     public mutating func add(red: UInt8, green: UInt8, blue: UInt8) {
-        let key =
-            (Int(red) >> 3) << 10 | (Int(green) >> 3) << 5 | (Int(blue) >> 3)
+        let key = ColourHistogram.key(red: red, green: green, blue: blue)
         var bin = bins[key] ?? Bin()
         bin.count += 1
         bin.red += Int(red)
@@ -64,18 +66,70 @@ public struct ColourHistogram: Sendable {
         bins[key] = bin
     }
 
+    static func key(red: UInt8, green: UInt8, blue: UInt8) -> Int {
+        (Int(red) >> 3) << 10 | (Int(green) >> 3) << 5 | (Int(blue) >> 3)
+    }
+
+    static func components(_ key: Int) -> (red: Int, green: Int, blue: Int) {
+        ((key >> 10) & 31, (key >> 5) & 31, key & 31)
+    }
+
     /// The dominant colour as a theme, or nil when no colour dominates.
     public func theme(sampled: Int) -> ReaderTheme? {
-        guard sampled >= Self.minimumPixels,
-            let winner = bins.max(by: { $0.value.count < $1.value.count })?.value
-        else { return nil }
-        let share = Double(winner.count) / Double(sampled)
-        guard share >= Self.minimumShare else { return nil }
-        let count = Double(winner.count)
+        guard sampled >= Self.minimumPixels, !bins.isEmpty else { return nil }
+        // For every cell of the quantised cube, the total of the occupied bins
+        // within one index on each channel. One pass over the bins fills the
+        // 27 cells each bin belongs to; no quadratic scan over bins.
+        var counts: [Int: Int] = [:]
+        var sums: [Int: (red: Int, green: Int, blue: Int)] = [:]
+        for (key, bin) in bins {
+            let parts = ColourHistogram.components(key)
+            for redOffset in -1...1 {
+                let red = parts.red + redOffset
+                guard (0..<32).contains(red) else { continue }
+                for greenOffset in -1...1 {
+                    let green = parts.green + greenOffset
+                    guard (0..<32).contains(green) else { continue }
+                    for blueOffset in -1...1 {
+                        let blue = parts.blue + blueOffset
+                        guard (0..<32).contains(blue) else { continue }
+                        let cell = red << 10 | green << 5 | blue
+                        counts[cell, default: 0] += bin.count
+                        var sum = sums[cell] ?? (0, 0, 0)
+                        sum.red += bin.red
+                        sum.green += bin.green
+                        sum.blue += bin.blue
+                        sums[cell] = sum
+                    }
+                }
+            }
+        }
+        guard let bestCount = counts.values.max() else { return nil }
+        let winners = counts.filter { $0.value == bestCount }
+        guard let first = winners.min(by: { $0.key < $1.key }) else {
+            return nil
+        }
+        // Cells two indices apart still share at least one neighbour, so all
+        // of a single colour's winning cells are the same colour. A tie
+        // between colours further apart means there is no dominant level, and
+        // letting hashing decide would make the panel's appearance unstable.
+        let center = ColourHistogram.components(first.key)
+        for key in winners.keys {
+            let parts = ColourHistogram.components(key)
+            guard abs(parts.red - center.red) <= 2,
+                abs(parts.green - center.green) <= 2,
+                abs(parts.blue - center.blue) <= 2
+            else { return nil }
+        }
+        let share = Double(bestCount) / Double(sampled)
+        guard share >= Self.minimumShare, let sum = sums[first.key] else {
+            return nil
+        }
+        let count = Double(bestCount)
         return ReaderTheme(
-            red: Double(winner.red) / count / 255,
-            green: Double(winner.green) / count / 255,
-            blue: Double(winner.blue) / count / 255,
+            red: Double(sum.red) / count / 255,
+            green: Double(sum.green) / count / 255,
+            blue: Double(sum.blue) / count / 255,
             share: share)
     }
 }
