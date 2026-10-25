@@ -185,7 +185,8 @@ final class ReaderStyleSampler {
             [
                 "rows": rowMeans.count,
                 "min": sorted.first ?? 0,
-                "background": sorted[Int(Double(sorted.count) * 0.75)],
+                "row_mode": LinePitch.backgroundLevel(rowMeans),
+                "row_p75": sorted[Int(Double(sorted.count) * 0.75)],
                 "max": sorted.last ?? 0,
             ])
         return LinePitch.measure(rowMeans: rowMeans, scale: scale)

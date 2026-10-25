@@ -109,8 +109,10 @@ public enum LinePitch {
 
     /// The page's own level: the most common row luminance, averaged within
     /// its bin. A percentile would follow the text on a dark page, where the
-    /// rows carrying glyphs can outnumber the empty ones.
-    static func backgroundLevel(_ values: [Double]) -> Double {
+    /// rows carrying glyphs can outnumber the empty ones. The sampler reports
+    /// it alongside a percentile so a profile can be read without guessing
+    /// which direction is ink.
+    public static func backgroundLevel(_ values: [Double]) -> Double {
         var counts: [Int: Int] = [:]
         for value in values { counts[Int(value / 4), default: 0] += 1 }
         guard let winning = counts.max(by: { $0.value < $1.value })?.key
