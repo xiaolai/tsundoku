@@ -382,4 +382,62 @@ struct TsundokuCoreTests {
         #expect(turn.promptLabel == "Summarize")
         #expect(turn.exchange.question == "Summarize")
     }
+
+    @Test("a selection replaces the page as the passage")
+    func selectionReplacesThePage() {
+        let page = String(repeating: "page text ", count: 100)
+        let request = AIRequest(
+            action: .explain, pageText: page, bookTitle: "A Book",
+            selection: "the selected words", pageNumber: 12, pageCount: 300)
+        let prompt = AIComposer.prompt(
+            for: request, settings: AISettings.defaults)
+        #expect(prompt.contains("the selected words"))
+        #expect(prompt.contains("selected passage"))
+        #expect(prompt.contains("page 12 of 300"))
+        #expect(!prompt.contains("page text page text"))
+    }
+
+    @Test("an ask keeps the page behind its selection")
+    func askKeepsThePageBehindASelection() {
+        let request = AIRequest(
+            action: .ask, pageText: "The whole page's words.",
+            bookTitle: "A Book", question: "What does this mean?",
+            selection: "The selected words.", pageNumber: 3)
+        let prompt = AIComposer.prompt(
+            for: request, settings: AISettings.defaults)
+        #expect(prompt.contains("<passage>\nThe selected words.\n</passage>"))
+        #expect(prompt.contains("<page>\nThe whole page's words.\n</page>"))
+        #expect(prompt.contains("What does this mean?"))
+    }
+
+    @Test("a page without a selection is still sent unchanged")
+    func pageWithoutSelectionIsUnchanged() {
+        let request = AIRequest(
+            action: .translate, pageText: "Only the page.",
+            bookTitle: "A Book")
+        let prompt = AIComposer.prompt(
+            for: request, settings: AISettings.defaults)
+        #expect(prompt.contains("<passage>\nOnly the page.\n</passage>"))
+        #expect(!prompt.contains("<page>"))
+        #expect(!prompt.contains("selected passage"))
+    }
+
+    @Test("a quick action keeps the reader's typed request")
+    func quickActionKeepsTypedRequest() {
+        let request = AIRequest(
+            action: .explain, pageText: "Passage", bookTitle: "A Book",
+            question: "Focus on the metaphor")
+        let prompt = AIComposer.prompt(
+            for: request, settings: AISettings.defaults)
+        #expect(prompt.contains("The reader's request: Focus on the metaphor"))
+    }
+
+    @Test("Kindle's last-opened book id yields its ASIN")
+    func kindleBookIDParsing() {
+        #expect(
+            KindleLive.asin(fromBookID: "A:B075H364NC-0") == "B075H364NC")
+        #expect(KindleLive.asin(fromBookID: "B075H364NC") == "B075H364NC")
+        #expect(KindleLive.asin(fromBookID: "A:short-0") == nil)
+        #expect(KindleLive.asin(fromBookID: "") == nil)
+    }
 }
