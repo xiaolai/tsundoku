@@ -140,6 +140,13 @@ class SignedResourceEnvelopeTests(unittest.TestCase):
             self.assertNotIn(token, str(report))
 
 
+class SubmodulePolicyTests(unittest.TestCase):
+    def test_only_reviewed_submodules_are_expected(self):
+        self.assertFalse(audit.unexpected_submodule('vendor/kindle-toolkit'))
+        self.assertFalse(audit.unexpected_submodule('vendor/sayso'))
+        self.assertTrue(audit.unexpected_submodule('vendor/other'))
+
+
 class HistoricalFindingPolicyTests(unittest.TestCase):
     def test_exact_historical_findings_are_allowed_only_outside_head(self):
         findings = [{'rule': 'internal-host', 'object': 'old'}]

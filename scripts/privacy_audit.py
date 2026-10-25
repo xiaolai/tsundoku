@@ -27,6 +27,15 @@ PRIVATE_SUFFIXES = ('.p8', '.token', '.jsonl', '.pem', '.key', '.p12', '.pfx', '
                     '.db-wal', '.db-shm', '.epub', '.pdf', '.mobi', '.azw', '.azw3', '.kfx', '.bundle',
                     '.dmg', '.zip', '.tar', '.tgz', '.gz', '.log', '.xcuserstate')
 
+# Submodules whose URL was reviewed when it was added. A new one is a finding,
+# not a default: a dependency the public repository pins deserves a look at
+# where it comes from.
+EXPECTED_SUBMODULES = frozenset({'vendor/kindle-toolkit', 'vendor/sayso'})
+
+
+def unexpected_submodule(name):
+    return name not in EXPECTED_SUBMODULES
+
 
 def private_path(name):
     parts = Path(name).parts
@@ -148,7 +157,7 @@ def repository_report(root, run_gitleaks=True):
                     result.append(finding('escaping-symlink', name, oid))
             if kind == 'blob':
                 result.extend(scan_bytes(git(root, 'cat-file', 'blob', oid), name, oid))
-            elif kind == 'commit' and name != 'vendor/kindle-toolkit':
+            elif kind == 'commit' and unexpected_submodule(name):
                 result.append(finding('unexpected-submodule', name, oid))
     for row in git(root, 'for-each-ref', '--format=%(objecttype) %(objectname) %(refname)', 'refs/tags').decode().splitlines():
         kind, oid, name = row.split(' ', 2)
