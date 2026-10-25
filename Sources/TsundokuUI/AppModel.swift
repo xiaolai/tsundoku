@@ -139,6 +139,10 @@ public final class AppModel: ObservableObject {
     @Published public var status = "Starting…"
     @Published public var notice: String?
     @Published public var isImporting = false
+    /// The import currently running. Completion is observable, so a caller
+    /// waits for the work itself rather than polling `isImporting` against a
+    /// clock; a slow disk must not read as a failed import.
+    public private(set) var importTask: Task<Void, Never>?
     @Published public private(set) var permissionAccessibility = AXIsProcessTrusted()
     @Published public private(set) var permissionScreen = CGPreflightScreenCaptureAccess()
     @Published public private(set) var permissionCheckResult: String?
@@ -568,7 +572,7 @@ public final class AppModel: ObservableObject {
         importError = nil
         importFailures = []
         status = "Reading local stores…"
-        Task {
+        let task = Task {
             var totalBooks = 0
             var totalAnnotations = 0
             var totalUser = 0
@@ -685,6 +689,18 @@ public final class AppModel: ObservableObject {
                 self.importRequestedAfterCurrentRun = false
                 self.importLibrary(announce: false)
             }
+        }
+        importTask = task
+    }
+
+    /// Awaits the running import and any import queued behind it.
+    ///
+    /// There is no deadline: the work signals its own completion, so a loaded
+    /// machine delays the answer instead of failing the wait. A test that
+    /// calls this and then asserts a post-condition cannot race the import.
+    public func awaitImportCompletion() async {
+        while isImporting, let task = importTask {
+            await task.value
         }
     }
 

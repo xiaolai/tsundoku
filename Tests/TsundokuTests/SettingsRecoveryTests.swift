@@ -3,7 +3,9 @@ import Testing
 @testable import TsundokuCore
 @testable import TsundokuUI
 
-@MainActor struct SettingsRecoveryTests {
+@MainActor
+@Suite(.timeLimit(.minutes(1)))
+struct SettingsRecoveryTests {
     @Test func captureReturnRestoresOnlyCaptureOptionsAndDoesNotStart() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -72,7 +74,9 @@ import Testing
         permissions.requestLibraryAccess()
         for _ in 0..<100 where permissions.libraryRegistrationInProgress { await Task.yield() }
         await permissions.verifyLibraryAccess()
-        for _ in 0..<200 where !model.hasCompletedImport { try await Task.sleep(for: .milliseconds(10)) }
+        // The import signals its own completion; a fixed 2 s budget was a
+        // false-failure race under parallel load.
+        await model.awaitImportCompletion()
         #expect(model.hasCompletedImport)
         #expect(try model.archive?.counts().books == 1)
         #expect(!permissions.librarySetupPending)

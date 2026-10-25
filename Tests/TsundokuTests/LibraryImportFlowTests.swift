@@ -5,12 +5,14 @@ import Testing
 @testable import TsundokuUI
 
 @MainActor
+@Suite(.timeLimit(.minutes(1)))
 struct LibraryImportFlowTests {
-    private func waitForImport(_ model: AppModel) async throws {
-        let deadline = Date().addingTimeInterval(5)
-        while model.isImporting && Date() < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+    /// Waits for the import's own completion signal. A wall-clock deadline
+    /// here is the flake: under parallel load the import can outlast it while
+    /// still finishing normally, and the test then reports a failure that never
+    /// happened.
+    private func waitForImport(_ model: AppModel) async {
+        await model.awaitImportCompletion()
         #expect(!model.isImporting, "Import must complete")
     }
 
@@ -39,14 +41,14 @@ struct LibraryImportFlowTests {
         _ = try archive.importAll(books: [Book(asin: "OLD", title: "Existing book", author: "Fixture", bookType: 10, readState: 0)], annotations: [])
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: library.path)
         model.importLibrary(announce: false)
-        try await waitForImport(model)
+        await waitForImport(model)
         #expect(model.importFailures.count == 1)
         #expect(model.importFailures.first?.source == .appleBooks)
         #expect(model.importFailures.first?.accessDenied == true)
         #expect(try archive.counts().books == 1)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: library.path)
         model.importLibrary(announce: false)
-        try await waitForImport(model)
+        await waitForImport(model)
         #expect(model.importError == nil)
         #expect(model.importFailures.isEmpty)
         #expect(try archive.counts().books == 2)
@@ -78,7 +80,7 @@ struct LibraryImportFlowTests {
             booksPaths: BooksPaths(container: root.appendingPathComponent("missing")), recoverReaderSettings: false)
         #expect(!model.hasCompletedImport)
         model.importLibrary(announce: false)
-        try await waitForImport(model)
+        await waitForImport(model)
         #expect(model.hasCompletedImport)
         #expect(model.emptyLibraryMessage == "No local Kindle or Apple Books stores found.")
     }
@@ -95,7 +97,7 @@ struct LibraryImportFlowTests {
         model.importLibrary(announce: false)
         model.requestLibraryImport()
         model.requestLibraryImport()
-        try await waitForImport(model)
+        await waitForImport(model)
         #expect(starts == 2, "Access granted during import must be retried once, rather than dropped or duplicated")
     }
 
@@ -141,7 +143,7 @@ struct LibraryImportFlowTests {
             try db.execute("CREATE TRIGGER reject_source_meta BEFORE INSERT ON meta WHEN NEW.key LIKE 'last_import_source_%' BEGIN SELECT RAISE(ABORT, 'fixture metadata failure'); END")
         }
         model.importLibrary(announce: false)
-        try await waitForImport(model)
+        await waitForImport(model)
         #expect(try model.archive?.counts().books == 1)
         #expect(model.importFailures.isEmpty)
         #expect(model.lastImportResult?.contains("1 books") == true)
