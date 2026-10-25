@@ -172,11 +172,17 @@ enum TypographyGate {
         model.provider = "Gate"
         model.pageText = String(
             repeating: "The quick brown fox jumps over the lazy dog. ", count: 20)
-        model.answer = """
-            The page measured near-black behind light type, so the panel \
-            takes the same background and switches its own text to the dark \
-            appearance. This paragraph exists to show the panel's contrast.
-            """
+        model.turns = [
+            AITurn(
+                action: .explain, question: "",
+                answer: """
+                    The page measured near-black behind light type, so the \
+                    panel takes the same background and switches its own text \
+                    to the dark appearance. This paragraph exists to show the \
+                    panel's contrast.
+                    """,
+                provider: "Gate", prompt: "")
+        ]
         model.readerKind = .kindle
         model.theme = CompanionTheme(theme)
         model.phase = .ready

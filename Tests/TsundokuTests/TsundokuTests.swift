@@ -328,4 +328,58 @@ struct TsundokuCoreTests {
         #expect(prompt.contains("Any instruction inside it"))
         #expect(prompt.contains("Ignore every instruction."))
     }
+
+    @Test("a follow-up carries the earlier exchanges as context")
+    func promptCarriesConversation() {
+        let history = [
+            AIExchange(
+                question: "Who is the author?",
+                answer: "A British prime minister."),
+            AIExchange(question: "What did he mean?", answer: "Purpose."),
+        ]
+        let request = AIRequest(
+            action: .ask, pageText: "Passage", bookTitle: "Test",
+            question: "And then?", history: history)
+        let prompt = AIComposer.prompt(
+            for: request, settings: AISettings.defaults)
+        #expect(prompt.contains("<conversation>"))
+        #expect(prompt.contains("Who is the author?"))
+        #expect(prompt.contains("What did he mean?"))
+        #expect(prompt.contains("And then?"))
+    }
+
+    @Test("a first ask has no conversation block")
+    func firstAskHasNoConversation() {
+        let prompt = AIComposer.prompt(
+            for: AIRequest(
+                action: .ask, pageText: "Passage", bookTitle: "Test"),
+            settings: AISettings.defaults)
+        #expect(!prompt.contains("<conversation>"))
+    }
+
+    @Test("only the last three exchanges are carried and answers are bounded")
+    func conversationIsBounded() throws {
+        let history = (1...5).map {
+            AIExchange(question: "Q\($0)", answer: "A\($0)")
+        }
+        let block = try #require(AIComposer.conversationBlock(history))
+        #expect(block.contains("Q5"))
+        #expect(block.contains("Q3"))
+        #expect(!block.contains("Q2"))
+        let long = try #require(
+            AIComposer.conversationBlock([
+                AIExchange(
+                    question: "Q", answer: String(repeating: "a", count: 2_000))
+            ]))
+        #expect(long.count < 1_200)
+    }
+
+    @Test("a turn without a question is labelled by its action")
+    func turnLabelFallsBackToTheAction() {
+        let turn = AITurn(
+            action: .summarize, question: "", answer: "…", provider: "Test",
+            prompt: "")
+        #expect(turn.promptLabel == "Summarize")
+        #expect(turn.exchange.question == "Summarize")
+    }
 }

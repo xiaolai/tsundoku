@@ -16,7 +16,9 @@ public final class AIPanelModel: ObservableObject {
 
     @Published public var pageText = ""
     @Published public var bookTitle = ""
-    @Published public var answer = ""
+    /// The conversation for this book, oldest first. A new model is created
+    /// when the reader window changes; a page turn keeps the conversation.
+    @Published public var turns: [AITurn] = []
     /// The reader's typography, when it could be sampled; nil keeps the
     /// panel's own body style.
     @Published public var textStyle: CompanionTextStyle?
@@ -34,7 +36,10 @@ public final class AIPanelModel: ObservableObject {
     @Published public var phase: Phase = .idle
     @Published public var provider = ""
     @Published public var error: String?
-    @Published public var saved = false
+    /// The turn whose answer was written to the archive. `saved` is derived
+    /// from the latest turn, so a new answer is unsaved even after an earlier
+    /// one was saved.
+    @Published public var savedTurnID: UUID?
     @Published public var readerKind: ReaderKind?
     @Published public var source: ReaderTextSource?
     @Published public var pageIdentifier: String?
@@ -75,6 +80,15 @@ public final class AIPanelModel: ObservableObject {
 
     public var characterCount: Int { pageText.count }
 
+    /// The latest answer, for copy, save and the footer's state.
+    public var answer: String { turns.last?.answer ?? "" }
+
+    /// Whether the latest turn's answer has been saved.
+    public var saved: Bool {
+        guard let savedTurnID else { return false }
+        return savedTurnID == turns.last?.id
+    }
+
     public var readerLabel: String {
         let name = readerKind?.displayName ?? "Reader"
         return "\(name) · Page · \(characterCount.formatted()) characters"
@@ -87,7 +101,7 @@ public final class AIPanelModel: ObservableObject {
     }
 
     public var canSave: Bool {
-        submittedRequest != nil && !answer.isEmpty && !saved
+        turns.last != nil && !saved
     }
 
     public var transmissionLabel: String {
@@ -111,15 +125,16 @@ public final class AIPanelModel: ObservableObject {
         pageGeneration += 1
         answerGeneration += 1
         let generation = pageGeneration
+        // The conversation belongs to a book, not a page. A reload of the same
+        // book keeps it; a load that names a different book clears it below.
+        let previousBook = bookTitle
         pageText = ""
         bookTitle = ""
         readerKind = nil
         source = nil
         pageIdentifier = nil
         phase = .loadingPage
-        answer = ""
         error = nil
-        saved = false
         saveError = nil
         failureKind = nil
         submittedRequest = nil
@@ -134,6 +149,11 @@ public final class AIPanelModel: ObservableObject {
                     let self, !Task.isCancelled,
                     generation == self.pageGeneration
                 else { return }
+                if !previousBook.isEmpty, !page.title.isEmpty,
+                    page.title != previousBook
+                {
+                    self.clearConversation()
+                }
                 self.pageText = page.text
                 self.bookTitle = page.title
                 self.readerKind = page.kind
@@ -179,27 +199,27 @@ public final class AIPanelModel: ObservableObject {
         let settings = app?.settings ?? .defaults
         let request = AIRequest(
             action: action, pageText: pageText, bookTitle: bookTitle,
-            question: question, language: settings.language)
+            question: question, language: settings.language,
+            history: turns.suffix(3).map(\.exchange))
         answerTask?.cancel()
         answerGeneration += 1
         let generation = answerGeneration
         phase = .loadingAnswer
-        answer = ""
         error = nil
-        saved = false
         saveError = nil
         failureKind = nil
         provider = settings.provider.displayName
         submittedRequest = request
         submittedOnDevice = settings.provider == .appleOnDevice
-        submittedPrompt = AIComposer.prompt(
-            for: request, settings: settings)
+        let prompt = AIComposer.prompt(for: request, settings: settings)
+        submittedPrompt = prompt
         TsundokuDiagnostics.shared.event(
             "ai_request_started",
             [
                 "action": action.rawValue,
                 "characters": pageText.count,
                 "provider": settings.provider.rawValue,
+                "turns": turns.count,
             ])
         answerTask = Task { [weak self] in
             do {
@@ -209,7 +229,19 @@ public final class AIPanelModel: ObservableObject {
                     let self, !Task.isCancelled,
                     generation == self.answerGeneration
                 else { return }
-                self.answer = result.text
+                let turn = AITurn(
+                    action: request.action,
+                    question: request.question.trimmingCharacters(
+                        in: .whitespacesAndNewlines),
+                    answer: result.text,
+                    provider: result.provider,
+                    prompt: prompt)
+                self.turns.append(turn)
+                if self.question.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == turn.question
+                {
+                    self.question = ""
+                }
                 self.provider = result.provider
                 self.phase = .ready
             } catch {
@@ -257,14 +289,30 @@ public final class AIPanelModel: ObservableObject {
         pageGeneration += 1
         answerGeneration += 1
         phase = .idle
-        answer = ""
         error = nil
-        saved = false
         saveError = nil
         failureKind = nil
         submittedRequest = nil
         submittedPrompt = nil
         TsundokuDiagnostics.shared.event("ai_work_cancelled")
+    }
+
+    /// Starts a fresh conversation about the same page: the transcript and the
+    /// saved marker go, the page text stays, and any answer in flight is
+    /// discarded.
+    public func clearConversation() {
+        answerTask?.cancel()
+        answerTask = nil
+        answerGeneration += 1
+        turns = []
+        savedTurnID = nil
+        error = nil
+        saveError = nil
+        failureKind = nil
+        submittedRequest = nil
+        submittedPrompt = nil
+        if phase != .loadingPage { phase = .idle }
+        TsundokuDiagnostics.shared.event("ai_conversation_cleared")
     }
 
     public func copy() {
@@ -274,11 +322,9 @@ public final class AIPanelModel: ObservableObject {
     }
 
     public func save() {
-        guard
-            !answer.isEmpty, let archive = app?.archive,
-            let request = submittedRequest,
-            let prompt = submittedPrompt
-        else { return }
+        guard let turn = turns.last, let archive = app?.archive else {
+            return
+        }
         guard let asin = pageIdentifier ?? matchedBook()?.asin else {
             saveError =
                 "This page could not be matched to a single archived book. "
@@ -288,11 +334,11 @@ public final class AIPanelModel: ObservableObject {
         do {
             try archive.saveAISNote(
                 asin: asin, position: nil,
-                kind: request.action.rawValue, prompt: prompt,
-                answer: answer, provider: provider,
+                kind: turn.action.rawValue, prompt: turn.prompt,
+                answer: turn.answer, provider: turn.provider,
                 source: readerKind.map { $0 == .kindle ? .kindle : .appleBooks }
             )
-            saved = true
+            savedTurnID = turn.id
             app?.refreshAINotes()
             saveError = nil
         } catch {
@@ -370,6 +416,16 @@ public struct AIPanelView: View {
             if !model.provider.isEmpty {
                 Text(model.provider).font(.caption).foregroundStyle(.secondary)
                     .lineLimit(1)
+            }
+            if !model.turns.isEmpty {
+                Button {
+                    model.clearConversation()
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .help("Clear this conversation")
+                .accessibilityLabel("Clear conversation")
             }
             Button {
                 model.loadPage()
@@ -489,35 +545,10 @@ public struct AIPanelView: View {
                 }
             }
             Group {
-                switch model.phase {
-                case .loadingPage:
-                    Text("Reading the current page…")
-                        .foregroundStyle(.secondary)
-                case .loadingAnswer:
-                    Text("Asking \(model.provider)…")
-                        .foregroundStyle(.secondary)
-                case .failed:
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(model.error ?? "Something went wrong.")
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                        IconButton("Try Again", systemImage: "arrow.clockwise")
-                        { model.retry() }
-                        .controlSize(compact ? .small : .regular)
-                    }
-                case .ready:
-                    ScrollView {
-                        MarkdownText(text: model.answer, style: model.textStyle)
-                            .textSelection(.enabled)
-                            .frame(
-                                maxWidth: .infinity, alignment: .leading)
-                    }
-                case .idle:
-                    Text(
-                        model.pageText.isEmpty
-                            ? "Reload the page to begin." : "Choose an action."
-                    )
-                    .foregroundStyle(.secondary)
+                if model.turns.isEmpty {
+                    emptyAnswerSection
+                } else {
+                    transcript
                 }
             }
             .frame(
@@ -525,6 +556,103 @@ public struct AIPanelView: View {
                 alignment: .topLeading)
         }
         .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// The panel before a conversation exists: one status line, not a
+    /// transcript with nothing in it.
+    @ViewBuilder private var emptyAnswerSection: some View {
+        switch model.phase {
+        case .loadingPage:
+            Text("Reading the current page…")
+                .foregroundStyle(.secondary)
+        case .loadingAnswer:
+            Text("Asking \(model.provider)…")
+                .foregroundStyle(.secondary)
+        case .failed:
+            failureView
+        case .ready, .idle:
+            Text(
+                model.pageText.isEmpty
+                    ? "Reload the page to begin." : "Choose an action."
+            )
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var failureView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(model.error ?? "Something went wrong.")
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            IconButton("Try Again", systemImage: "arrow.clockwise") {
+                model.retry()
+            }
+            .controlSize(compact ? .small : .regular)
+        }
+    }
+
+    /// Every exchange about this book, oldest first, the newest at the
+    /// bottom; a new answer scrolls itself into view.
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(model.turns) { turn in
+                        if turn.id != model.turns.first?.id { separator }
+                        turnView(turn)
+                    }
+                    if model.phase == .loadingAnswer {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Asking \(model.provider)…")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if model.phase == .failed { failureView }
+                }
+                .padding(.vertical, 2)
+            }
+            .onChange(of: model.turns.count) { _, _ in
+                guard let last = model.turns.last else { return }
+                withAnimation(.easeOut(duration: 0.15)) {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
+        }
+    }
+
+    private var separator: some View {
+        Rectangle()
+            .fill(dividerColor)
+            .frame(height: 0.5)
+    }
+
+    /// The same hairline the panel's border uses, so a themed panel keeps one
+    /// set of separators instead of system grey on black.
+    private var dividerColor: Color {
+        model.theme.map {
+            $0.isDark
+                ? Color.white.opacity(0.14) : Color.black.opacity(0.12)
+        } ?? Color(nsColor: .separatorColor).opacity(0.6)
+    }
+
+    private func turnView(_ turn: AITurn) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: turn.action.symbolName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(turn.promptLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            MarkdownText(text: turn.answer, style: model.textStyle)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .id(turn.id)
     }
 
     private var footer: some View {
