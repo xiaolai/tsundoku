@@ -56,6 +56,7 @@ public struct KindleContext: ReaderContext {
             kind: .kindle,
             source: .accessibility,
             pageNumber: live.pageNumber,
-            pageCount: live.pageCount)
+            pageCount: live.pageCount,
+            identifier: live.bookID)
     }
 }

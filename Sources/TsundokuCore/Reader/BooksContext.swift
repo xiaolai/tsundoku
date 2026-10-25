@@ -67,7 +67,7 @@ public struct BooksContext: ReaderContext {
         if !text.isEmpty {
             return ReaderPage(
                 text: text, title: title, kind: .appleBooks,
-                source: .accessibility)
+                source: .accessibility, selection: selectedText())
         }
 
         guard let frame = BooksPageText.rect(window.frame) else {
@@ -81,7 +81,50 @@ public struct BooksContext: ReaderContext {
         if Task.isCancelled { throw ReaderContextError.cancelled }
         return ReaderPage(
             text: recognized, title: title, kind: .appleBooks,
-            source: .ocr)
+            source: .ocr, selection: selectedText())
+    }
+
+    /// Reads the current selection from the live window's text nodes.
+    ///
+    /// Books sets `AXSelectedText` on selected `AXStaticText` nodes, not on
+    /// the web area, and a selection can span several nodes. They are joined
+    /// in tree order. Empty or unreadable nodes contribute nothing.
+    public func selectedText() -> String? {
+        guard AXIsProcessTrusted() else { return nil }
+        guard
+            let app = NSRunningApplication.runningApplications(
+                withBundleIdentifier: bundleID).first
+        else { return nil }
+        let application = AXUIElementCreateApplication(app.processIdentifier)
+        let source = LiveAXSource()
+        guard let windows = try? source.windows(application) else {
+            return nil
+        }
+        var parts: [String] = []
+        for window in windows {
+            collectSelection(window, source: source, depth: 0, into: &parts)
+            if parts.count >= 50 { break }
+        }
+        let text = parts.joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    private func collectSelection(
+        _ element: AXUIElement, source: LiveAXSource, depth: Int,
+        into parts: inout [String]
+    ) {
+        guard depth < 24, parts.count < 50 else { return }
+        let role = (try? source.string(element, "AXRole")) ?? ""
+        if role == "AXStaticText" || role == "AXHeading",
+            let selected = try? source.string(element, "AXSelectedText"),
+            !selected.isEmpty
+        {
+            parts.append(selected)
+        }
+        for child in (try? source.children(element)) ?? [] {
+            collectSelection(child, source: source, depth: depth + 1, into: &parts)
+        }
     }
 
     private func displayTitle(_ window: AXNode) -> String {

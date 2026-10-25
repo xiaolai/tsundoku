@@ -13,6 +13,10 @@ public struct LivePage: Sendable, Equatable {
     public let endOfBook: Bool
     public let pageNumber: Int?
     public let pageCount: Int?
+    /// The open book's ASIN, read from Kindle's own last-opened state. The
+    /// reading view exposes no title while its chrome is hidden, so this is
+    /// what keeps a conversation filed under the right book.
+    public let bookID: String?
     public let chromeInsets: CaptureInsets?
     public let observedAt: Date
 
@@ -28,6 +32,7 @@ public struct LivePage: Sendable, Equatable {
         endOfBook: Bool,
         pageNumber: Int?,
         pageCount: Int?,
+        bookID: String? = nil,
         chromeInsets: CaptureInsets? = nil,
         observedAt: Date = Date()
     ) {
@@ -40,6 +45,7 @@ public struct LivePage: Sendable, Equatable {
         self.endOfBook = endOfBook
         self.pageNumber = pageNumber
         self.pageCount = pageCount
+        self.bookID = bookID
         self.chromeInsets = chromeInsets
         self.observedAt = observedAt
     }
@@ -151,11 +157,66 @@ public enum KindleLive {
                 endOfBook: tree.isEndOfBook,
                 pageNumber: number?.current,
                 pageCount: number?.total,
+                bookID: lastOpenedBookID(),
                 chromeInsets: chrome)
         } catch let error as KindleLiveError {
             throw error
         } catch {
             throw KindleLiveError.readFailed("\(error)")
+        }
+    }
+
+    /// The ASIN of the book Kindle opened last, from its own preferences.
+    ///
+    /// The reading view removes the book's title together with the chrome, so
+    /// the Accessibility tree says only "Kindle" for most of a session. The
+    /// last-opened marker updates whenever a book is opened and is the only
+    /// identity available in that state.
+    public static func lastOpenedBookID() -> String? {
+        bookIDCache.value(now: Date())
+    }
+
+    /// Kindle stores `A:B075H364NC-0`; the ten-character ASIN is the middle.
+    static func asin(fromBookID raw: String) -> String? {
+        let tail =
+            raw.split(separator: ":").last.map(String.init) ?? raw
+        let asin =
+            tail.split(separator: "-").first.map(String.init) ?? tail
+        guard asin.count == 10,
+            asin.allSatisfy({ $0.isLetter || $0.isNumber })
+        else { return nil }
+        return asin
+    }
+
+    private static let bookIDCache = BookIDCache()
+
+    private final class BookIDCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cached: String?
+        private var readAt = Date.distantPast
+        private let lifetime: TimeInterval = 2
+
+        func value(now: Date) -> String? {
+            lock.lock()
+            defer { lock.unlock() }
+            if now.timeIntervalSince(readAt) < lifetime { return cached }
+            readAt = now
+            cached = Self.read()
+            return cached
+        }
+
+        private static func read() -> String? {
+            let url = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(
+                    "Library/Containers/com.amazon.Lassen/Data/Library/"
+                        + "Preferences/com.amazon.Lassen.plist")
+            guard
+                let data = try? Data(contentsOf: url),
+                let plist = try? PropertyListSerialization.propertyList(
+                    from: data, options: [], format: nil) as? [String: Any],
+                let raw = plist["WasLastOpenedBookId"] as? String
+            else { return nil }
+            return KindleLive.asin(fromBookID: raw)
         }
     }
 

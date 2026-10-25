@@ -70,6 +70,9 @@ public struct ReaderPage: Equatable, Sendable {
     public let pageNumber: Int?
     public let pageCount: Int?
     public let identifier: String?
+    /// The reader's selection on this page, when it exposes one. Apple Books
+    /// does; Kindle does not.
+    public let selection: String?
 
     public init(
         text: String,
@@ -78,7 +81,8 @@ public struct ReaderPage: Equatable, Sendable {
         source: ReaderTextSource,
         pageNumber: Int? = nil,
         pageCount: Int? = nil,
-        identifier: String? = nil
+        identifier: String? = nil,
+        selection: String? = nil
     ) {
         self.text = text
         self.title = title
@@ -87,6 +91,7 @@ public struct ReaderPage: Equatable, Sendable {
         self.pageNumber = pageNumber
         self.pageCount = pageCount
         self.identifier = identifier
+        self.selection = selection
     }
 }
 
@@ -125,6 +130,14 @@ public enum ReaderContextError: Error, CustomStringConvertible, Sendable {
 public protocol ReaderContext: Sendable {
     var kind: ReaderKind { get }
     func page() throws -> ReaderPage
+    /// The reader's current selection, when the reader exposes one through
+    /// Accessibility. Kindle's selection popover does not expose the words;
+    /// Apple Books sets `AXSelectedText` on each selected text node.
+    func selectedText() -> String?
+}
+
+public extension ReaderContext {
+    func selectedText() -> String? { nil }
 }
 
 public enum ReaderContextLocator {
