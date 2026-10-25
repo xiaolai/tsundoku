@@ -188,6 +188,7 @@ final class CompanionController {
         let generation = presentationGeneration
         let previous = lastSurface
         lastSurface = output.presentation
+        let animation = settings.settings.panelAnimation
         switch output.presentation {
         case .hidden:
             window.hide()
@@ -196,20 +197,50 @@ final class CompanionController {
                 window.hide()
                 break
             }
-            if previous != .trigger {
-                window.setContent(
-                    AnyView(
-                        CompanionTriggerView { [weak self] in
-                            self?.showPanel()
-                        }),
-                    shape: .circle)
-                hostedModel = nil
+            if previous == .panel, animation == .outward, !reduceMotion {
+                // Collapse the drawer with the panel still in place, then swap
+                // in the trigger at its own frame.
+                let anchor = CompanionDrawer.anchor(
+                    panel: layout.panelFrame, reader: layout.readerFrame)
+                window.setLevel(layout.mode.isOverlay ? .floating : .normal)
+                window.collapseDrawer(
+                    anchor: anchor, reduceMotion: reduceMotion
+                ) { [weak self] in
+                    guard let self, generation == self.presentationGeneration,
+                        self.output.presentation == .trigger
+                    else { return }
+                    self.window.clearDrawerAnchor()
+                    self.window.setContent(
+                        AnyView(
+                            CompanionTriggerView { [weak self] in
+                                self?.showPanel()
+                            }),
+                        shape: .circle)
+                    self.hostedModel = nil
+                    self.window.setFrame(
+                        layout.triggerFrame, animated: false,
+                        reduceMotion: true)
+                    self.window.show()
+                }
+            } else {
+                if previous != .trigger {
+                    window.setContent(
+                        AnyView(
+                            CompanionTriggerView { [weak self] in
+                                self?.showPanel()
+                            }),
+                        shape: .circle)
+                    hostedModel = nil
+                }
+                window.clearDrawerAnchor()
+                window.setFrame(
+                    layout.triggerFrame,
+                    animated: animation != .none && animated
+                        && previous != .hidden,
+                    reduceMotion: reduceMotion)
+                window.setLevel(layout.mode.isOverlay ? .floating : .normal)
+                window.show()
             }
-            window.setFrame(
-                layout.triggerFrame, animated: animated && previous != .hidden,
-                reduceMotion: reduceMotion)
-            window.setLevel(layout.mode.isOverlay ? .floating : .normal)
-            window.show()
         case .panel:
             guard let layout = output.layout, let model = panelModel else {
                 window.hide()
@@ -234,10 +265,23 @@ final class CompanionController {
                 hostedModel = model
             }
             lastMode = layout.mode
-            window.setFrame(
-                layout.panelFrame, animated: animated && previous != .hidden,
-                reduceMotion: reduceMotion)
             window.setLevel(layout.mode.isOverlay ? .floating : .normal)
+            if previous == .trigger, animation == .outward, !reduceMotion {
+                // The panel opens from the edge nearest the reader, full
+                // height (or width) from the first frame.
+                let anchor = CompanionDrawer.anchor(
+                    panel: layout.panelFrame, reader: layout.readerFrame)
+                window.openDrawer(
+                    to: layout.panelFrame, anchor: anchor, animated: animated,
+                    reduceMotion: reduceMotion)
+            } else {
+                window.clearDrawerAnchor()
+                window.setFrame(
+                    layout.panelFrame,
+                    animated: animation != .none && animated
+                        && previous != .hidden,
+                    reduceMotion: reduceMotion)
+            }
             window.show()
         }
         if output.presentation != .panel && previous == .panel {
@@ -248,6 +292,11 @@ final class CompanionController {
             [
                 "presentation": output.presentation.rawValue,
                 "mode": output.layout?.mode.rawValue ?? "none",
+                "panel_animation": animation.rawValue,
+                "drawer_anchor": output.layout.map {
+                    CompanionDrawer.anchor(
+                        panel: $0.panelFrame, reader: $0.readerFrame).rawValue
+                } ?? "",
                 "panel_frame": dictionary(output.layout?.panelFrame),
                 "trigger_frame": dictionary(output.layout?.triggerFrame),
                 "reader_frame": dictionary(output.layout?.readerFrame),

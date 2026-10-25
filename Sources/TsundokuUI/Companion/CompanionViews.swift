@@ -170,6 +170,16 @@ public struct CompanionSettingsSection: View {
                     Text(placement.displayName).tag(placement)
                 }
             }
+            Picker("Panel animation", selection: $store.settings.panelAnimation)
+            {
+                ForEach(CompanionSettings.PanelAnimation.allCases, id: \.self) {
+                    style in
+                    Text(style.displayName).tag(style)
+                }
+            }
+            .help(
+                "A drawer opens from the edge of the reader beside the panel; "
+                    + "the direction follows the panel's placement.")
             Toggle("Start at login", isOn: $store.settings.launchAtLogin)
             Toggle(
                 "Match the reader's typography",

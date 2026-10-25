@@ -37,8 +37,35 @@ enum CompanionHitShape {
 final class CompanionHitView: NSView {
     var hitShape: CompanionHitShape = .roundedRect(
         radius: CompanionMetrics.cornerRadius)
+    /// While the window grows as a drawer, the hosted content keeps its final
+    /// size and stays pinned to this edge, so the window reveals it instead of
+    /// reflowing it.
+    var contentAnchor: CompanionDrawer.Anchor?
+    var contentSize: CGSize?
 
     override var isOpaque: Bool { false }
+
+    override func layout() {
+        super.layout()
+        layoutContent()
+    }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        layoutContent()
+    }
+
+    private func layoutContent() {
+        guard let hosting = subviews.first else { return }
+        guard let anchor = contentAnchor, let size = contentSize else {
+            hosting.frame = bounds
+            return
+        }
+        hosting.frame = CGRect(
+            x: anchor == .trailing ? bounds.width - size.width : 0,
+            y: anchor == .top ? bounds.height - size.height : 0,
+            width: size.width, height: size.height)
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local: NSPoint
@@ -98,18 +125,13 @@ final class CompanionWindow {
         container.layer?.backgroundColor = NSColor.clear.cgColor
 
         hosting = NSHostingView(rootView: AnyView(EmptyView()))
-        hosting.translatesAutoresizingMaskIntoConstraints = false
+        hosting.translatesAutoresizingMaskIntoConstraints = true
+        hosting.autoresizingMask = []
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
         hosting.layer?.isOpaque = false
+        hosting.frame = container.bounds
         container.addSubview(hosting)
-        NSLayoutConstraint.activate([
-            hosting.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            hosting.trailingAnchor.constraint(
-                equalTo: container.trailingAnchor),
-            hosting.topAnchor.constraint(equalTo: container.topAnchor),
-            hosting.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
         window.contentView = container
         clearBackgrounds()
     }
@@ -144,7 +166,7 @@ final class CompanionWindow {
             return
         }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.2
+            context.duration = Self.animationDuration
             context.timingFunction = CAMediaTimingFunction(
                 name: .easeOut)
             window.animator().setFrame(frame, display: true)
@@ -153,6 +175,80 @@ final class CompanionWindow {
             // animation ends; the closure itself carries no actor annotation.
             MainActor.assumeIsolated { self?.window.invalidateShadow() }
         }
+    }
+
+    // MARK: - Drawer
+
+    private static let animationDuration: TimeInterval = 0.2
+
+    /// Opens the panel from its reader-facing edge: the window starts as a
+    /// sliver on that edge and grows to the panel while the hosted content
+    /// keeps its final layout, so the panel is revealed rather than reflowed.
+    /// Reduce Motion jumps straight to the panel.
+    func openDrawer(
+        to panel: CGRect, anchor: CompanionDrawer.Anchor, animated: Bool,
+        reduceMotion: Bool
+    ) {
+        setDrawerAnchor(anchor, contentSize: panel.size)
+        window.setFrame(
+            CompanionDrawer.start(of: panel, anchor: anchor), display: true)
+        window.invalidateShadow()
+        guard animated, !reduceMotion else {
+            window.setFrame(panel, display: true)
+            window.invalidateShadow()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.animationDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().setFrame(panel, display: true)
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated { self?.window.invalidateShadow() }
+        }
+    }
+
+    /// Closes the panel into its reader-facing edge with the panel content
+    /// still in place, then runs `completion` so the caller can swap in the
+    /// trigger at its own frame.
+    func collapseDrawer(
+        anchor: CompanionDrawer.Anchor, reduceMotion: Bool,
+        completion: @escaping @MainActor () -> Void
+    ) {
+        let start = CompanionDrawer.start(of: window.frame, anchor: anchor)
+        guard !reduceMotion else {
+            window.setFrame(start, display: true)
+            window.invalidateShadow()
+            completion()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.animationDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().setFrame(start, display: true)
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                self?.window.invalidateShadow()
+                completion()
+            }
+        }
+    }
+
+    private func setDrawerAnchor(
+        _ anchor: CompanionDrawer.Anchor, contentSize: CGSize
+    ) {
+        container.contentAnchor = anchor
+        container.contentSize = contentSize
+        container.needsLayout = true
+        container.layoutSubtreeIfNeeded()
+    }
+
+    /// Restores the normal layout, where the content fills the window.
+    func clearDrawerAnchor() {
+        guard container.contentAnchor != nil else { return }
+        container.contentAnchor = nil
+        container.contentSize = nil
+        container.needsLayout = true
+        container.layoutSubtreeIfNeeded()
     }
 
     func show() {

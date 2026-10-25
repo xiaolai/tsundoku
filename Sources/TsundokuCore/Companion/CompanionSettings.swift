@@ -170,10 +170,30 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
         }
     }
 
+    /// How the panel appears and disappears. The direction is never part of
+    /// this choice: a drawer always opens from the edge nearest the reader.
+    public enum PanelAnimation: String, Codable, CaseIterable, Sendable {
+        /// Full height (or width) opens outward from the reader-facing edge.
+        case outward
+        /// The window grows from the trigger's frame to the panel's frame.
+        case fromTrigger
+        case none
+
+        public var displayName: String {
+            switch self {
+            case .outward: "Grow from the edge"
+            case .fromTrigger: "Grow from the button"
+            case .none: "None"
+            }
+        }
+    }
+
     public var panelPlacement: PanelPlacement
     public var triggerPlacement: TriggerPlacement
     public var launchAtLogin: Bool
     public var hotKey: CompanionHotKey
+    /// How the panel opens and closes; the direction follows its placement.
+    public var panelAnimation: PanelAnimation
     /// Follow the reading surface's type in the panel's answer text. Off
     /// keeps the panel's own body style.
     public var matchReaderTypography: Bool
@@ -186,6 +206,7 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
         triggerPlacement: TriggerPlacement = .auto,
         launchAtLogin: Bool = false,
         hotKey: CompanionHotKey = .defaultShortcut,
+        panelAnimation: PanelAnimation = .outward,
         matchReaderTypography: Bool = true,
         matchReaderTheme: Bool = true
     ) {
@@ -193,12 +214,14 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
         self.triggerPlacement = triggerPlacement
         self.launchAtLogin = launchAtLogin
         self.hotKey = hotKey
+        self.panelAnimation = panelAnimation
         self.matchReaderTypography = matchReaderTypography
         self.matchReaderTheme = matchReaderTheme
     }
 
     private enum CodingKeys: String, CodingKey {
         case panelPlacement, triggerPlacement, launchAtLogin, hotKey
+        case panelAnimation
         case matchReaderTypography
         case matchReaderTheme
     }
@@ -223,6 +246,10 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
             try container.decodeIfPresent(
                 CompanionHotKey.self, forKey: .hotKey)
             ?? defaults.hotKey
+        panelAnimation =
+            try container.decodeIfPresent(
+                PanelAnimation.self, forKey: .panelAnimation)
+            ?? defaults.panelAnimation
         matchReaderTypography =
             try container.decodeIfPresent(
                 Bool.self, forKey: .matchReaderTypography)

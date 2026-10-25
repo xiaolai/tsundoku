@@ -191,11 +191,13 @@ struct ReaderStyleTests {
                 as? [String: Any])
         object.removeValue(forKey: "matchReaderTypography")
         object.removeValue(forKey: "matchReaderTheme")
+        object.removeValue(forKey: "panelAnimation")
         let legacy = try JSONSerialization.data(withJSONObject: object)
         let decoded = try JSONDecoder().decode(
             CompanionSettings.self, from: legacy)
         #expect(decoded.panelPlacement == .side)
         #expect(decoded.matchReaderTypography)
         #expect(decoded.matchReaderTheme)
+        #expect(decoded.panelAnimation == .outward)
     }
 }
