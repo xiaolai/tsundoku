@@ -92,6 +92,14 @@ public final class AIPanelModel: ObservableObject {
     private var historyTask: Task<Void, Never>?
     private var legacyMigrationTask: Task<Void, Never>?
     private var followTask: Task<Void, Never>?
+    /// The page number the *reader* exposed, as opposed to the captured page
+    /// number the local index resolved. Kindle hides its page number, so
+    /// comparing against `context.pageNumber` would see every follow as a
+    /// turn.
+    private var livePageNumber: Int?
+    /// How many settled page turns the follow loop has adopted, for tests and
+    /// diagnostics.
+    @Published public private(set) var followedTurns = 0
     /// How often the open panel checks the reader for a page turn, and how
     /// long it lets a page settle before moving the chips.
     public var followInterval: Duration = .milliseconds(600)
@@ -281,6 +289,8 @@ public final class AIPanelModel: ObservableObject {
         readerKind = nil
         source = nil
         pageIdentifier = nil
+        livePageNumber = nil
+        followedTurns = 0
         context = .empty
         phase = .loadingPage
         error = nil
@@ -302,6 +312,7 @@ public final class AIPanelModel: ObservableObject {
                 self.readerKind = page.kind
                 self.source = page.source
                 self.pageIdentifier = page.identifier
+                self.livePageNumber = page.pageNumber
                 // Kindle hides the title with its chrome; its last-opened
                 // ASIN identifies the book when the app can read Kindle's
                 // container, and the archive supplies the title. Without
@@ -582,6 +593,12 @@ public final class AIPanelModel: ObservableObject {
             // The page did not move, but a selection can change without one.
             if first.selection != context.selection {
                 context.selection = first.selection
+                TsundokuDiagnostics.shared.event(
+                    "selection_refreshed",
+                    [
+                        "characters": first.selection?.count ?? 0,
+                        "page": first.pageNumber ?? -1,
+                    ])
             }
             return
         }
@@ -601,7 +618,7 @@ public final class AIPanelModel: ObservableObject {
 
     private func samePage(_ page: ReaderPage) -> Bool {
         page.text == pageText && page.identifier == pageIdentifier
-            && page.pageNumber == context.pageNumber
+            && page.pageNumber == livePageNumber
     }
 
     /// Adopts the settled page. A turn within a book keeps its conversation;
@@ -613,6 +630,8 @@ public final class AIPanelModel: ObservableObject {
         readerKind = page.kind
         source = page.source
         pageIdentifier = page.identifier
+        livePageNumber = page.pageNumber
+        followedTurns += 1
         if phase == .failed, failureKind == .page {
             phase = .idle
             error = nil
@@ -654,6 +673,7 @@ public final class AIPanelModel: ObservableObject {
                 "page": page.pageNumber ?? -1,
                 "book_changed": bookChanged,
                 "book_key": identity.key ?? "unidentified",
+                "selection": page.selection?.count ?? 0,
             ])
     }
 
@@ -677,6 +697,12 @@ public final class AIPanelModel: ObservableObject {
                 self.bookTitle == book
             else { return }
             self.context.selection = selected
+            TsundokuDiagnostics.shared.event(
+                "selection_refreshed",
+                [
+                    "characters": selected?.count ?? 0,
+                    "page": self.context.pageNumber ?? -1,
+                ])
         }
     }
 
@@ -1816,6 +1842,13 @@ final class ComposerTextView: NSTextView {
     var onActivate: (() -> Void)?
     var onSubmit: (() -> Void)?
     var onEscape: (() -> Void)?
+
+    /// The panel is a borderless `.nonactivatingPanel` with
+    /// `becomesKeyOnlyIfNeeded`; without this, the first click that should
+    /// focus the composer is swallowed by the window and never reaches
+    /// `mouseDown`, so the app never activates and the first keystroke goes
+    /// to the reader.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
         if !NSApp.isActive {

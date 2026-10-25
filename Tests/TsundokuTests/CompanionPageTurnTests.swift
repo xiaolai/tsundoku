@@ -121,6 +121,54 @@ struct CompanionPageTurnTests {
         }
     }
 
+    @Test("a page that did not move is not re-adopted on every follow")
+    func stationaryPageIsNotATurn() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsundoku-stationary-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        // Kindle hides its own page number; the local index supplies one.
+        let hidden = ReaderPage(
+            text: String(repeating: "preface words ", count: 20),
+            title: "Kindle", kind: .kindle, source: .accessibility,
+            identifier: "B0ASIN0001")
+        let reader = SteppingReader(
+            kind: .kindle,
+            pages: [
+                hidden,
+                ReaderPage(
+                    text: String(repeating: "first chapter words ", count: 20),
+                    title: "Kindle", kind: .kindle, source: .accessibility,
+                    identifier: "B0ASIN0001"),
+            ])
+        let panel = AIPanelModel(
+            app: model, context: reader,
+            contextResolver: { _, _, _ in
+                ReadingContextResolver.Result(
+                    chapter: "Ch. 1", pageNumber: 7, fingerprint: nil,
+                    capture: nil)
+            },
+            answerProvider: { _, _ in
+                AIAnswer(text: "answer", provider: "test")
+            })
+        panel.followInterval = .seconds(3_600)
+        panel.followDebounce = .zero
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+        #expect(panel.context.pageNumber == 7)
+
+        await panel.followPageOnce()
+        await panel.followPageOnce()
+        #expect(panel.followedTurns == 0, "a stationary page is not a turn")
+
+        reader.show(1)
+        await panel.followPageOnce()
+        #expect(panel.followedTurns == 1)
+    }
+
     @Test("a sent turn keeps the page it was sent with")
     func sentTurnCaptionIsStable() async throws {
         let directory = FileManager.default.temporaryDirectory
