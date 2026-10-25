@@ -291,6 +291,7 @@ public final class AIPanelModel: ObservableObject {
         answerGeneration += 1
         conversationGeneration += 1
         selectionGeneration += 1
+        let historyWasLoading = historyLoading
         historyLoading = false
         let generation = pageGeneration
         let previousKey = bookKey
@@ -356,6 +357,9 @@ public final class AIPanelModel: ObservableObject {
                     self.error =
                         "This page exposes no text. Image pages need a "
                         + "screenshot or a vision model."
+                    if historyWasLoading, self.bookKey == previousKey {
+                        self.loadConversationHistory()
+                    }
                     return
                 }
                 self.phase = .idle
@@ -365,6 +369,10 @@ public final class AIPanelModel: ObservableObject {
                     self.turns = []
                     self.conversationID = nil
                     self.conversations = []
+                    self.loadConversationHistory()
+                } else if historyWasLoading {
+                    // The reload invalidated the in-flight history load; the
+                    // same book still needs its stored turns.
                     self.loadConversationHistory()
                 }
                 self.resolveLocalContext(page: page)
@@ -382,6 +390,12 @@ public final class AIPanelModel: ObservableObject {
                 self.failureKind = .page
                 self.phase = .failed
                 self.error = "\(error)"
+                if historyWasLoading, self.bookKey == previousKey {
+                    // The reload invalidated the in-flight history load even
+                    // though this page failed; a same-book Retry still needs
+                    // the stored turns.
+                    self.loadConversationHistory()
+                }
             }
         }
     }
@@ -434,7 +448,7 @@ public final class AIPanelModel: ObservableObject {
                 // EPUB text proved: without an asset ID in this result, the
                 // live identifier is a conflict, not an improvement.
                 let currentIsEPUB =
-                    self.identity?.provenance.contains("EPUB") == true
+                    self.identity?.evidence == .archiveEPUB
                 let conflictingWithEPUB =
                     result.assetID == nil && currentIsEPUB
                     && improved.rank == self.identity?.rank
@@ -545,6 +559,15 @@ public final class AIPanelModel: ObservableObject {
             return
         }
         let previous = identity
+        // Equal evidence pointing at a different key is a conflict, not an
+        // improvement — except that EPUB text outranks a reader identifier
+        // at the same rank, which is how a duplicate edition is selected.
+        if let previous, previous.rank == improved.rank,
+            previous.key != improved.key,
+            improved.evidence != .archiveEPUB
+        {
+            return
+        }
         identity = improved
         guard let key = improved.key else {
             if bookTitle.isEmpty, !improved.title.isEmpty {
@@ -555,6 +578,8 @@ public final class AIPanelModel: ObservableObject {
         }
         if bookKey != key, let previousKey = previous?.key,
             improved.rank < (previous?.rank ?? .sessionOnly)
+                || (improved.rank == previous?.rank
+                    && improved.evidence == .archiveEPUB)
         {
             do {
                 try archive?.migrateConversations(
@@ -601,28 +626,27 @@ public final class AIPanelModel: ObservableObject {
         guard let archive else { return }
         let title = context.bookTitle
         let source = context.bookSource
+        let generation = conversationGeneration
+        let turns = pending.map {
+            NewConversationTurn(
+                action: $0.action, question: $0.question, answer: $0.answer,
+                provider: $0.provider, prompt: $0.prompt, context: $0.context)
+        }
         beginPersistence()
         Task { [weak self] in
             let stored = await Task.detached { () -> Conversation? in
-                do {
-                    let conversation = try archive.createConversation(
-                        bookKey: key, bookTitle: title, bookSource: source)
-                    for turn in pending {
-                        try archive.appendConversationTurn(
-                            conversationID: conversation.id,
-                            action: turn.action, question: turn.question,
-                            answer: turn.answer, provider: turn.provider,
-                            prompt: turn.prompt, context: turn.context)
-                    }
-                    return conversation
-                } catch {
-                    return nil
-                }
+                // The conversation and every turn are one transaction; a
+                // failure leaves no partially saved thread behind.
+                try? archive.createConversation(
+                    bookKey: key, bookTitle: title, bookSource: source,
+                    turns: turns)
             }.value
             guard let self else { return }
             self.endPersistence()
             if let stored {
-                if self.bookKey == key {
+                if self.bookKey == key,
+                    generation == self.conversationGeneration
+                {
                     self.conversationID = stored.id
                 }
             } else {
@@ -756,10 +780,14 @@ public final class AIPanelModel: ObservableObject {
         // next page; that is not a new book, and must not clear the chat.
         let identity: ReadingIdentity
         if let current = self.identity,
-            liveIdentity.rank > current.rank
+            (liveIdentity.rank == .sessionOnly
+                && current.rank != .sessionOnly)
                 || (liveIdentity.rank == .archiveMatch
-                    && current.provenance.contains("EPUB"))
+                    && current.evidence == .archiveEPUB)
         {
+            // A page with no identity at all is not evidence of a new book;
+            // keep what the local text proved. An explicit new ASIN or title
+            // is a book change and falls through.
             identity = current
         } else {
             identity = liveIdentity
@@ -1265,10 +1293,9 @@ public final class AIPanelModel: ObservableObject {
     /// A Books page has no ASIN in the Accessibility tree. The title
     /// identifies the imported book only when exactly one source book matches;
     /// otherwise the note is refused rather than filed under a guess.
-    private func matchedBook(for page: ReaderPage? = nil) -> Book? {
+    private func matchedBook() -> Book? {
         guard let app else { return nil }
-        let identifier = page?.identifier ?? pageIdentifier
-        if let identifier, !identifier.isEmpty,
+        if let identifier = pageIdentifier, !identifier.isEmpty,
             let book = app.books.first(where: { $0.asin == identifier })
         {
             return book
@@ -1276,9 +1303,8 @@ public final class AIPanelModel: ObservableObject {
         guard let readerKind else { return nil }
         let source: BookSource =
             readerKind == .kindle ? .kindle : .appleBooks
-        let title = page?.title ?? bookTitle
         let matches = app.books.filter {
-            $0.source == source && $0.title == title
+            $0.source == source && $0.title == bookTitle
         }
         return matches.count == 1 ? matches[0] : nil
     }

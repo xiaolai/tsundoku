@@ -19,11 +19,11 @@ struct BookChatsView: View {
     @State private var turnsGeneration = 0
     @State private var incompleteCaptures = false
 
-    private var liveBookMatches: Bool {
-        if let id = model.livePage?.bookID, !id.isEmpty {
-            return id == book.asin
-        }
-        return model.livePage?.title == book.title
+    /// `livePage` tracks Kindle only, so it cannot decide whether an Apple
+    /// Books book is open. The companion itself chooses the frontmost reader;
+    /// this view only needs to know that the companion exists.
+    private var companionAvailable: Bool {
+        model.openCompanion != nil
     }
 
     private func summary(_ id: Int64?) -> ConversationSummary? {
@@ -55,8 +55,8 @@ struct BookChatsView: View {
                         id: selected.id, to: book.asin, title: book.title,
                         source: book.source)
                 }.value
-                await loadSummaries()
-                selectedID = selected.id
+                // The count change below reloads the summaries; calling
+                // loadSummaries here would run the query twice.
                 model.refreshConversationCounts()
             } catch {
                 self.error = "Could not file this chat: \(error)"
@@ -83,6 +83,14 @@ struct BookChatsView: View {
                 return
             }
             Task { await loadTurns(id) }
+        }
+        .onChange(of: model.conversationCounts) { _, _ in
+            // The companion can store an answer while this view is open;
+            // refresh both the list and the selected transcript.
+            Task {
+                await loadSummaries()
+                if let id = selectedID { await loadTurns(id) }
+            }
         }
     }
 
@@ -198,13 +206,13 @@ struct BookChatsView: View {
                     }
                     IconButton(
                         "Open in Companion", systemImage: "sparkles",
-                        tooltip: liveBookMatches
-                            ? "Open the reading companion for this book"
-                            : "Open this book in the reader first; the companion answers from the live page."
+                        tooltip: companionAvailable
+                            ? "Open the companion for the current reader page"
+                            : "The reading companion is not available yet."
                     ) {
                         model.showAIPanel()
                     }
-                    .disabled(!liveBookMatches)
+                    .disabled(!companionAvailable)
                     .controlSize(.small)
                 }
                 ForEach(turns) { turn in
