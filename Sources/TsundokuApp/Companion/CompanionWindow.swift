@@ -264,8 +264,23 @@ final class CompanionWindow {
 
     func show() {
         clearBackgrounds()
+        window.alphaValue = 1
         window.orderFrontRegardless()
         window.invalidateShadow()
+    }
+
+    /// Fades the trigger in after the drawer collapses, instead of popping it
+    /// into place at the edge.
+    func fadeIn() {
+        clearBackgrounds()
+        window.alphaValue = 0
+        window.orderFrontRegardless()
+        window.invalidateShadow()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().alphaValue = 1
+        }
     }
 
     /// SwiftUI and AppKit can each paint an opaque backing behind a borderless

@@ -220,7 +220,7 @@ final class CompanionController {
                     self.window.setFrame(
                         layout.triggerFrame, animated: false,
                         reduceMotion: true)
-                    self.window.show()
+                    self.window.fadeIn()
                 }
             } else {
                 if previous != .trigger {
