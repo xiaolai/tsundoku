@@ -144,7 +144,9 @@ public struct SettingsView: View {
                     )
                     .disabled(providerState.testing)
 
-                    if !providerState.signInStatus.isEmpty {
+                    if model.settings.provider == .codexCLI,
+                        !providerState.signInStatus.isEmpty
+                    {
                         Text(providerState.signInStatus)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -180,9 +182,7 @@ public struct SettingsView: View {
                                 .lineLimit(2)
                     }
                     .onChange(of: model.settings.provider) { _, provider in
-                        if provider != .codexCLI {
-                            providerState.cancelSignIn()
-                        }
+                        providerState.clearSignIn()
                         if provider == .http {
                             providerState.loadKeyIfNeeded(
                                 profileID: model.settings.httpProfileID)
@@ -196,6 +196,7 @@ public struct SettingsView: View {
                         providerState.invalidateTest()
                     }
                     .onChange(of: model.settings.endpoint) { _, _ in
+                        providerState.invalidateCatalogue()
                         providerState.invalidateTest()
                     }
                 }

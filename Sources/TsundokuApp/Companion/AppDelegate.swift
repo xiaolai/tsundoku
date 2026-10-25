@@ -52,6 +52,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                     saves += 1
                     return saves == 1 ? -1 : 0
                 },
+                // The fixture writes nothing, so it must delete nothing: the
+                // default would remove the reader's real legacy Keychain key.
+                forgetLegacyKey: {},
                 connectionTest: { _ in "Connected · Fixture" })
         } else {
             providerState = ProviderSettingsState()

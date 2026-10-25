@@ -32,6 +32,8 @@ import TsundokuCore
     private let modelFetch:
         (AIProviderProfile, URL, String?) async throws -> [AIModel]
     private var generation = 0
+    private var modelGeneration = 0
+    private var signInGeneration = 0
     private var testTask: Task<Void, Never>?
     private var signInTask: Task<Void, Never>?
     private var modelTask: Task<Void, Never>?
@@ -74,8 +76,7 @@ import TsundokuCore
         draftKey = savedKey
         keyStatus = ""
         invalidateTest()
-        models = []
-        modelStatus = ""
+        invalidateCatalogue()
     }
 
     public func saveKey(profileID: String) {
@@ -134,6 +135,8 @@ import TsundokuCore
     /// the CLI.
     public func signIn(settings: AISettings) {
         guard settings.provider == .codexCLI, !signingIn else { return }
+        signInGeneration += 1
+        let generation = signInGeneration
         signingIn = true
         signInStatus = "Opening the browser…"
         signInTask = Task { [weak self] in
@@ -143,7 +146,9 @@ import TsundokuCore
                     settings: settings,
                     onLine: { [weak self] line in
                         Task { @MainActor in
-                            guard let self, self.signingIn else { return }
+                            guard let self, self.signingIn,
+                                self.signInGeneration == generation
+                            else { return }
                             let text = line.trimmingCharacters(
                                 in: .whitespacesAndNewlines)
                             if !text.isEmpty {
@@ -151,53 +156,79 @@ import TsundokuCore
                             }
                         }
                     })
+                guard
+                    !Task.isCancelled, self.signInGeneration == generation
+                else { return }
                 self.signInStatus = "Signed in."
                 self.invalidateTest()
             } catch {
-                guard !Task.isCancelled else { return }
+                guard
+                    !Task.isCancelled, self.signInGeneration == generation
+                else { return }
                 self.signInStatus = AIProviderFailure.message(
                     for: error, provider: .codexCLI)
             }
+            guard self.signInGeneration == generation else { return }
             self.signingIn = false
             self.signInTask = nil
         }
     }
 
-    /// Stop a pending sign-in and its child; switching away from the provider
-    /// must not leave `codex login` running for up to five minutes.
-    public func cancelSignIn() {
-        guard signingIn else { return }
+    /// Stop a pending sign-in and its child, and drop any feedback from an
+    /// earlier one; switching away from the provider must not leave
+    /// `codex login` running for up to five minutes, nor show its outcome for
+    /// a provider that never signed in.
+    public func clearSignIn() {
+        signInGeneration += 1
         signInTask?.cancel()
         signInTask = nil
         signingIn = false
         signInStatus = ""
     }
 
+    /// A catalogue belongs to the service and address it was fetched from:
+    /// changing either discards the list and cancels its fetch, so a late
+    /// response cannot populate another service's menu.
+    public func invalidateCatalogue() {
+        modelGeneration += 1
+        modelTask?.cancel()
+        modelTask = nil
+        loadingModels = false
+        models = []
+        modelStatus = ""
+    }
+
     /// The service's own model list, a configuration aid, not an answer.
     public func loadModels(settings: AISettings) {
-        guard !loadingModels, settings.provider == .http else { return }
-        guard let base = AIService.httpBaseURL(settings) else {
+        guard settings.provider == .http else { return }
+        guard let base = AIService.httpBaseURL(settings).map(AIService.httpBase)
+        else {
             modelStatus = "Set the endpoint first."
             return
         }
-        modelTask?.cancel()
+        invalidateCatalogue()
+        let generation = modelGeneration
         loadingModels = true
-        modelStatus = ""
         let profile = AIService.httpProfile(settings)
         let key = loadedProfileID == profile.id ? savedKey : loadKey(profile.id)
         modelTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let list = try await self.modelFetch(profile, base, key)
-                guard !Task.isCancelled else { return }
+                guard
+                    !Task.isCancelled, self.modelGeneration == generation
+                else { return }
                 self.models = list
                 self.modelStatus =
                     list.isEmpty
                     ? "The service listed no models." : "\(list.count) models"
             } catch {
-                guard !Task.isCancelled else { return }
+                guard
+                    !Task.isCancelled, self.modelGeneration == generation
+                else { return }
                 self.modelStatus = AIProviderFailure.modelsMessage(for: error)
             }
+            guard self.modelGeneration == generation else { return }
             self.loadingModels = false
             self.modelTask = nil
         }

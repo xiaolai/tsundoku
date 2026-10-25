@@ -369,7 +369,9 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.provider = provider
         self.model = model
         self.endpoint = endpoint
-        self.httpProfileID = httpProfileID
+        // An id this build does not know would resolve to `custom` at request
+        // time while the window kept the unknown id; normalise it once.
+        self.httpProfileID = AIService.normalizedProfileID(httpProfileID)
         self.language = language
         self.sessionLogging = sessionLogging
         self.cleanPageDuringCapture = cleanPageDuringCapture
@@ -407,10 +409,10 @@ public struct AISettings: Codable, Sendable, Equatable {
         endpoint =
             try container.decodeIfPresent(String.self, forKey: .endpoint)
             ?? defaults.endpoint
-        httpProfileID =
+        httpProfileID = AIService.normalizedProfileID(
             try container.decodeIfPresent(
                 String.self, forKey: .httpProfileID)
-            ?? defaults.httpProfileID
+            ?? defaults.httpProfileID)
         language =
             try container.decodeIfPresent(String.self, forKey: .language)
             ?? defaults.language

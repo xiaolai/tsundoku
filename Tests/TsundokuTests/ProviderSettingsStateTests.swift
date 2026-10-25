@@ -172,15 +172,79 @@ struct AIProviderAdoptionTests {
 
     @Test func anEmptyModelIsRefusedRatherThanGuessed() {
         let settings = AISettings(provider: .http, model: "", httpProfileID: "deepseek")
-        #expect(throws: AIProviderError.self) {
+        #expect(throws: AIProviderConfigurationError.modelRequired("DeepSeek")) {
             try AIService.provider(for: settings)
         }
     }
 
-    @Test func claudeStructuredOutputBecomesPlainText() {
-        #expect(AIService.ClaudeAnswerProvider.answerText(#"{"answer":"a sentence"}"#) == "a sentence")
-        #expect(AIService.ClaudeAnswerProvider.answerText("plain text") == "plain text")
-        #expect(AIService.ClaudeAnswerProvider.answerText(#"{"other":1}"#) == #"{"other":1}"#)
+    @Test func claudeStructuredOutputBecomesPlainText() throws {
+        #expect(try AIService.ClaudeAnswerProvider.answerText(#"{"answer":"a sentence"}"#) == "a sentence")
+        #expect(try AIService.ClaudeAnswerProvider.answerText("plain text") == "plain text")
+        #expect(try AIService.ClaudeAnswerProvider.answerText(#"{"other":1}"#) == #"{"other":1}"#)
+    }
+
+    @Test func aBlankClaudeAnswerIsRefused() {
+        #expect(throws: AIProviderError.refused) {
+            try AIService.ClaudeAnswerProvider.answerText(#"{"answer":"   "}"#)
+        }
+        #expect(throws: AIProviderError.refused) {
+            try AIService.ClaudeAnswerProvider.answerText("")
+        }
+    }
+
+    @Test func aSavedFullEndpointKeepsOneCompletionsPath() {
+        #expect(AIService.httpBase(URL(string: "https://api.example.com/v1/chat/completions")!)
+            .absoluteString == "https://api.example.com/v1")
+        #expect(AIService.httpBase(URL(string: "https://api.example.com/v1/chat/completions/")!)
+            .absoluteString == "https://api.example.com/v1")
+        #expect(AIService.httpBase(URL(string: "https://api.example.com/v1")!)
+            .absoluteString == "https://api.example.com/v1")
+        #expect(AIService.httpBase(URL(string: "https://api.example.com")!)
+            .absoluteString == "https://api.example.com")
+        // Percent-encoding survives: `%2F` is not turned into a path separator.
+        #expect(AIService.httpBase(URL(string: "https://api.example.com/a%2Fb/chat/completions")!)
+            .absoluteString == "https://api.example.com/a%2Fb")
+    }
+
+    @Test func anUnknownServiceIdNormalisesToCustom() throws {
+        let settings = AISettings(provider: .http, model: "m", httpProfileID: "gone")
+        #expect(settings.httpProfileID == "custom")
+        let json = #"{"provider":"http","httpProfileID":"gone"}"#
+        let decoded = try JSONDecoder().decode(AISettings.self, from: Data(json.utf8))
+        #expect(decoded.httpProfileID == "custom")
+    }
+
+    @Test func configurationFailuresAreWorded() {
+        #expect(AIProviderFailure.message(
+            for: AIProviderConfigurationError.modelRequired("DeepSeek"), provider: .http)
+            == "Choose a model for DeepSeek before asking.")
+        #expect(AIProviderFailure.message(
+            for: AIProviderConfigurationError.appleNeedsNewerSystem, provider: .appleOnDevice)
+            .contains("26.4"))
+    }
+
+    @Test func aFrameworkCodeBecomesASentence() {
+        let message = AIProviderFailure.message(
+            for: AIProviderError.framework("spawn 2"), provider: .claudeCLI)
+        #expect(message.contains("Claude CLI could not run"))
+        #expect(message.contains("spawn 2"))
+        #expect(!message.hasPrefix("spawn 2"))
+    }
+
+    @Test func aCatalogueFromTheOldServiceIsDropped() async {
+        let state = ProviderSettingsState(loadKey: { _ in "" }, saveKey: { _, _ in 0 },
+            modelFetch: { _, _, _ in
+                try await Task.sleep(for: .milliseconds(50))
+                return [AIModel(id: "old-model")]
+            })
+        state.loadKeyIfNeeded(profileID: "deepseek")
+        state.loadModels(settings: AISettings(provider: .http, model: "m", httpProfileID: "deepseek"))
+        state.invalidateCatalogue()
+        // Long enough for the cancelled fetch to have returned had it been
+        // allowed to publish.
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(state.models.isEmpty)
+        #expect(!state.loadingModels)
     }
 
     @Test func failuresAreWordedForTheReader() {

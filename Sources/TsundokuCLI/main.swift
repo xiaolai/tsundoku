@@ -112,6 +112,16 @@ struct TsundokuCLI {
     }
 
     private static func ask(_ arguments: [String]) async {
+        // Argument validation comes before any work: an unreadable Kindle must
+        // not mask a usage error.
+        if let service = value("--service", in: arguments),
+            !AIService.knownServiceIDs.contains(service)
+        {
+            print(
+                "error: unknown service '\(service)'. Known: \(AIService.knownServiceIDs.joined(separator: ", "))"
+            )
+            exit(2)
+        }
         do {
             let live = try KindleLive.currentPage()
             guard !live.text.isEmpty else {

@@ -16,6 +16,14 @@ public struct AppleAnswer: Sendable {
 }
 #endif
 
+/// A configuration problem this app finds before any request. Kept apart from
+/// sayso's failures so a sentence the app wrote is never mistaken for a
+/// library code and reworded.
+public enum AIProviderConfigurationError: Error, Equatable, Sendable {
+    case modelRequired(String)
+    case appleNeedsNewerSystem
+}
+
 /// Turns settings into a provider and a question into an answer.
 ///
 /// The transport, the CLI processes and Apple's model are sayso's; what stays
@@ -61,6 +69,36 @@ public enum AIService {
         AIProviderProfile.profile(id: settings.httpProfileID) ?? .custom
     }
 
+    /// An id this build does not know must not stay in the settings: requests
+    /// would resolve it to `custom` while the window hid the endpoint field and
+    /// stored keys under the unknown id.
+    public static func normalizedProfileID(_ raw: String) -> String {
+        AIProviderProfile.profile(id: raw) == nil
+            ? AIProviderProfile.custom.id : raw
+    }
+
+    public static var knownServiceIDs: [String] {
+        AIProviderProfile.known.map(\.id)
+    }
+
+    /// The base sayso appends `chat/completions` to. The old client accepted an
+    /// endpoint that already named the full path, so a saved one must not get
+    /// the suffix twice.
+    public static func httpBase(_ url: URL) -> URL {
+        guard
+            var components = URLComponents(
+                url: url, resolvingAgainstBaseURL: false)
+        else { return url }
+        // Percent-encoded on purpose: `path` decodes `%2F` into `/`, which
+        // would change how an exotic endpoint routes.
+        var path = components.percentEncodedPath
+        while path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        let suffix = "/chat/completions"
+        if path.hasSuffix(suffix) { path.removeLast(suffix.count) }
+        components.percentEncodedPath = path
+        return components.url ?? url
+    }
+
     /// The base address the provider will use: the profile's own for a known
     /// service, the typed one for `custom`.
     public static func httpBaseURL(_ settings: AISettings) -> URL? {
@@ -98,7 +136,7 @@ public enum AIService {
 
     static func httpProvider(_ settings: AISettings) throws -> any AIProvider {
         let profile = httpProfile(settings)
-        guard let url = httpBaseURL(settings) else {
+        guard let url = httpBaseURL(settings).map(httpBase) else {
             throw AIProviderError.insecureEndpoint
         }
         // No invented model: the old fallback sent `gpt-4o-mini` to endpoints
@@ -106,8 +144,7 @@ public enum AIService {
         let model = settings.model.trimmingCharacters(
             in: .whitespacesAndNewlines)
         guard !model.isEmpty else {
-            throw AIProviderError.framework(
-                "Choose a model for \(profile.name) before asking.")
+            throw AIProviderConfigurationError.modelRequired(profile.name)
         }
         return try HTTPProvider(
             configuration: HTTPProvider.Configuration(
@@ -131,17 +168,26 @@ public enum AIService {
         func answer(to question: String) async throws(AIProviderError)
             -> String
         {
-            Self.answerText(try await cli.answer(to: question))
+            try Self.answerText(try await cli.answer(to: question))
         }
 
-        static func answerText(_ raw: String) -> String {
+        static func answerText(_ raw: String) throws(AIProviderError)
+            -> String
+        {
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let data = trimmed.data(using: .utf8),
+            let text: String
+            if let data = trimmed.data(using: .utf8),
                 let object = try? JSONSerialization.jsonObject(with: data)
                     as? [String: Any],
                 let answer = object["answer"] as? String
-            else { return trimmed }
-            return answer
+            {
+                text = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                text = trimmed
+            }
+            // A schema permits an empty string; a blank answer is no answer.
+            guard !text.isEmpty else { throw .refused }
+            return text
         }
     }
 
@@ -215,11 +261,9 @@ public enum AIService {
             return AppleOnDeviceProvider<AppleAnswer>(
                 configuration: AppleAnswerConfiguration { $0.answer })
         }
-        throw AIProviderError.framework(
-            "Apple on-device needs macOS 26.4 or later.")
+        throw AIProviderConfigurationError.appleNeedsNewerSystem
         #else
-        throw AIProviderError.framework(
-            "Apple on-device is not available in this build.")
+        throw AIProviderConfigurationError.appleNeedsNewerSystem
         #endif
     }
 }
@@ -257,7 +301,10 @@ public enum AIConnection {
             guard let cli = provider as? AIService.ClaudeAnswerProvider else {
                 throw AIProviderError.badShape
             }
-            return "Connected · Claude CLI \(try await cli.cli.check())"
+            // Claude's check proves the binary, its version and the app's
+            // folders; it does not spend a model call, so sign-in stays
+            // unverified until the first ask.
+            return "Installed · Claude CLI \(try await cli.cli.check()) (sign-in unverified)"
         case .codexCLI:
             let provider = try AIService.provider(for: settings)
             guard let cli = provider as? CodexCLIProvider else {
@@ -275,8 +322,7 @@ public enum AIConnection {
                 return "Available · Apple on-device"
             }
             #endif
-            throw AIProviderError.framework(
-                "Apple on-device needs macOS 26.4 or later.")
+            throw AIProviderConfigurationError.appleNeedsNewerSystem
         }
     }
 }
@@ -298,6 +344,14 @@ public enum AIProviderFailure {
     public static func message(
         for error: any Error, provider: AIProviderKind
     ) -> String {
+        if let configuration = error as? AIProviderConfigurationError {
+            switch configuration {
+            case .modelRequired(let service):
+                return "Choose a model for \(service) before asking."
+            case .appleNeedsNewerSystem:
+                return "Apple on-device needs macOS 26.4 or later."
+            }
+        }
         guard let failure = error as? AIProviderError else {
             return error.localizedDescription
         }
@@ -340,8 +394,18 @@ public enum AIProviderFailure {
             return "The passage is too long for the on-device model."
         case .guardrail:
             return "The model's guardrails refused this text."
-        case .framework(let message):
-            return message
+        case .framework(let code):
+            // sayso's framework cases are short internal codes ("folder",
+            // "spawn 2", "generation"); a reader gets a sentence, the code
+            // stays for a bug report.
+            switch provider {
+            case .appleOnDevice:
+                return "Apple's on-device model failed (code: \(code))."
+            case .claudeCLI, .codexCLI:
+                return "\(cliName(provider)) could not run (code: \(code)). Try again, or sign in again if it persists."
+            case .http:
+                return "The endpoint client failed (code: \(code))."
+            }
         }
     }
 

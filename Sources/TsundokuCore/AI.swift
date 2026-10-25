@@ -1,5 +1,3 @@
-import Foundation
-
 public enum AIAction: String, CaseIterable, Codable, Sendable {
     case explain
     case translate
