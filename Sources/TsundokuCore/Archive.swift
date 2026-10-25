@@ -149,6 +149,37 @@ public final class Archive: @unchecked Sendable {
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS conversations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              book_key TEXT NOT NULL,
+              book_title TEXT NOT NULL,
+              book_source TEXT,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS conversations_book_key
+            ON conversations(book_key)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS conversation_turns (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              conversation_id INTEGER NOT NULL,
+              action TEXT NOT NULL,
+              question TEXT NOT NULL,
+              answer TEXT NOT NULL,
+              provider TEXT NOT NULL,
+              prompt TEXT NOT NULL,
+              context_json TEXT NOT NULL,
+              created_at REAL NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS conversation_turns_conversation
+            ON conversation_turns(conversation_id)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS captures (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               asin TEXT,
@@ -615,6 +646,185 @@ public final class Archive: @unchecked Sendable {
                         timeIntervalSince1970: row.double("created_at") ?? 0))
             }
         }
+    }
+
+    // MARK: - Conversations
+
+    public func latestConversation(bookKey: String) throws -> Conversation? {
+        try queue.sync {
+            let rows = try database.query(
+                """
+                SELECT * FROM conversations
+                WHERE book_key = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """, [.text(bookKey)])
+            return rows.first.map(Self.conversation(from:))
+        }
+    }
+
+    public func createConversation(
+        bookKey: String, bookTitle: String, bookSource: BookSource?
+    ) throws -> Conversation {
+        try queue.sync {
+            let now = Date().timeIntervalSince1970
+            try database.execute(
+                """
+                INSERT INTO conversations
+                (book_key, book_title, book_source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    .text(bookKey), .text(bookTitle),
+                    bookSource.map { .text($0.rawValue) } ?? .null,
+                    .real(now), .real(now),
+                ])
+            return Conversation(
+                id: database.lastInsertRowID, bookKey: bookKey,
+                bookTitle: bookTitle, bookSource: bookSource,
+                createdAt: Date(timeIntervalSince1970: now),
+                updatedAt: Date(timeIntervalSince1970: now))
+        }
+    }
+
+    @discardableResult
+    public func appendConversationTurn(
+        conversationID: Int64, action: AIAction, question: String,
+        answer: String, provider: String, prompt: String, context: AIContext
+    ) throws -> ConversationTurn {
+        let encoded = try JSONEncoder().encode(context)
+        let contextJSON = String(decoding: encoded, as: UTF8.self)
+        return try queue.sync {
+            let now = Date().timeIntervalSince1970
+            try database.execute(
+                """
+                INSERT INTO conversation_turns
+                (conversation_id, action, question, answer, provider, prompt,
+                 context_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    .integer(conversationID), .text(action.rawValue),
+                    .text(question), .text(answer), .text(provider),
+                    .text(prompt), .text(contextJSON), .real(now),
+                ])
+            let id = database.lastInsertRowID
+            try database.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                [.real(now), .integer(conversationID)])
+            return ConversationTurn(
+                id: id, conversationID: conversationID, action: action,
+                question: question, answer: answer, provider: provider,
+                prompt: prompt, context: context,
+                createdAt: Date(timeIntervalSince1970: now))
+        }
+    }
+
+    public func conversationTurns(
+        conversationID: Int64
+    ) throws -> [ConversationTurn] {
+        try queue.sync {
+            try database.query(
+                """
+                SELECT * FROM conversation_turns
+                WHERE conversation_id = ?
+                ORDER BY id
+                """, [.integer(conversationID)]
+            ).compactMap(Self.turn(from:))
+        }
+    }
+
+    public func conversations(
+        bookKey: String? = nil
+    ) throws -> [ConversationSummary] {
+        try queue.sync {
+            var sql = """
+                SELECT c.*,
+                    (SELECT COUNT(*) FROM conversation_turns t
+                     WHERE t.conversation_id = c.id) AS turn_count,
+                    (SELECT question FROM conversation_turns t
+                     WHERE t.conversation_id = c.id
+                     ORDER BY t.id LIMIT 1) AS first_question,
+                    (SELECT action FROM conversation_turns t
+                     WHERE t.conversation_id = c.id
+                     ORDER BY t.id LIMIT 1) AS first_action,
+                    (SELECT answer FROM conversation_turns t
+                     WHERE t.conversation_id = c.id
+                     ORDER BY t.id DESC LIMIT 1) AS last_answer
+                FROM conversations c
+                """
+            var bindings: [SQLValue] = []
+            if let bookKey {
+                sql += " WHERE c.book_key = ?"
+                bindings.append(.text(bookKey))
+            }
+            sql += " ORDER BY c.updated_at DESC, c.id DESC"
+            return try database.query(sql, bindings).map { row in
+                let question = row.string("first_question") ?? ""
+                let action = row.string("first_action") ?? ""
+                let firstQuestion =
+                    question.isEmpty
+                    ? (AIAction(rawValue: action)?.displayName ?? action)
+                    : question
+                return ConversationSummary(
+                    conversation: Self.conversation(from: row),
+                    turnCount: Int(row.int("turn_count") ?? 0),
+                    firstQuestion: firstQuestion,
+                    lastAnswer: row.string("last_answer"))
+            }
+        }
+    }
+
+    public func conversationCounts() throws -> [String: Int] {
+        try queue.sync {
+            let rows = try database.query(
+                """
+                SELECT c.book_key AS book_key, COUNT(t.id) AS turns
+                FROM conversations c
+                LEFT JOIN conversation_turns t ON t.conversation_id = c.id
+                GROUP BY c.book_key
+                """)
+            var counts: [String: Int] = [:]
+            for row in rows {
+                guard let key = row.string("book_key") else { continue }
+                counts[key] = Int(row.int("turns") ?? 0)
+            }
+            return counts
+        }
+    }
+
+    private static func conversation(from row: Row) -> Conversation {
+        Conversation(
+            id: row.int("id") ?? 0,
+            bookKey: row.string("book_key") ?? "",
+            bookTitle: row.string("book_title") ?? "",
+            bookSource: row.string("book_source").flatMap(
+                BookSource.init(rawValue:)),
+            createdAt: Date(
+                timeIntervalSince1970: row.double("created_at") ?? 0),
+            updatedAt: Date(
+                timeIntervalSince1970: row.double("updated_at") ?? 0))
+    }
+
+    private static func turn(from row: Row) -> ConversationTurn? {
+        guard let rawAction = row.string("action"),
+            let action = AIAction(rawValue: rawAction)
+        else { return nil }
+        let contextJSON = row.string("context_json") ?? "{}"
+        let context =
+            (try? JSONDecoder().decode(
+                AIContext.self, from: Data(contextJSON.utf8))) ?? .empty
+        return ConversationTurn(
+            id: row.int("id") ?? 0,
+            conversationID: row.int("conversation_id") ?? 0,
+            action: action,
+            question: row.string("question") ?? "",
+            answer: row.string("answer") ?? "",
+            provider: row.string("provider") ?? "",
+            prompt: row.string("prompt") ?? "",
+            context: context,
+            createdAt: Date(
+                timeIntervalSince1970: row.double("created_at") ?? 0))
     }
 
     @discardableResult
