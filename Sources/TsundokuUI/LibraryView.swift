@@ -150,7 +150,7 @@ public struct LibraryView: View {
                     .width(85)
 
                     TableColumn("Messages") { book in
-                        let count = model.conversationCounts[book.asin] ?? 0
+                        let count = model.conversationCount(for: book)
                         Text(count == 0 ? "—" : "\(count)")
                             .foregroundStyle(
                                 count == 0 ? .secondary : .primary)
@@ -338,7 +338,7 @@ struct BookDetailView: View {
                         }
                         LabeledContent("Messages") {
                             Text(
-                                "\(model.conversationCounts[book.asin] ?? 0)")
+                                "\(model.conversationCount(for: book))")
                         }
                     }
 

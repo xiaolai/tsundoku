@@ -142,6 +142,55 @@ struct CompanionIdentityTests {
                 == conversation.id)
     }
 
+    @Test("the Messages column counts a book's title-keyed chats")
+    func messagesColumnCountsTitleKeys() throws {
+        let directory = try temporaryDirectory("identity-counts")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        model.conversationCounts = [
+            "ASSET-1": 1,
+            "books:alice's adventures": 2,
+            "kindle:alice's adventures": 3,
+            "text:f00d": 4,
+        ]
+        #expect(
+            model.conversationCount(for: book("ASSET-1", "Alice's Adventures"))
+                == 6)
+    }
+
+    @Test("a legacy Kindle title-keyed chat moves under the ASIN")
+    func legacyKindleTitleKeyMigrates() async throws {
+        let directory = try temporaryDirectory("identity-kindle-title")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let archive = try #require(model.archive)
+        let conversation = try archive.createConversation(
+            bookKey: "kindle:the math of neural networks",
+            bookTitle: "The Math of Neural Networks", bookSource: .kindle)
+        try archive.appendConversationTurn(
+            conversationID: conversation.id, action: .explain, question: "",
+            answer: "Old", provider: "p", prompt: "", context: .empty)
+
+        let page = ReaderPage(
+            text: String(repeating: "the page's words ", count: 30),
+            title: "The Math of Neural Networks", kind: .kindle,
+            source: .accessibility, identifier: "B0ASIN0001")
+        let panel = AIPanelModel(
+            app: model, context: FixedReader(kind: .kindle, pageValue: page),
+            contextResolver: { _, _, _ in nil })
+        panel.loadPage()
+        await panel.awaitPageLoad()
+
+        #expect(panel.bookKey == "B0ASIN0001")
+        #expect(panel.turns.count == 1)
+        #expect(
+            try archive.latestConversation(
+                bookKey: "kindle:the math of neural networks") == nil)
+        #expect(
+            try archive.latestConversation(bookKey: "B0ASIN0001")?.id
+                == conversation.id)
+    }
+
     @Test("an unidentified Kindle page stays session-only")
     func unidentifiedKindleStaysSessionOnly() async throws {
         let directory = try temporaryDirectory("identity-session")

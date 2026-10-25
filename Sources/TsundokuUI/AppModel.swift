@@ -410,6 +410,18 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// The Messages column's count for a book.
+    ///
+    /// A book's threads can be filed under its ASIN, or under a weaker title
+    /// key before the local text proves the edition. Both are its chats, so
+    /// both count; the Chats tab lists them and marks the weaker ones unfiled.
+    /// Capture-fingerprint keys are not counted here because they need the
+    /// capture index, which the column must not read per row.
+    public func conversationCount(for book: Book) -> Int {
+        ConversationFiling.keys(for: book, captureFingerprints: [])
+            .reduce(0) { $0 + (conversationCounts[$1] ?? 0) }
+    }
+
     /// Refreshes the per-book chat counts the library column prints.
     public func refreshConversationCounts() {
         guard let archive else { return }

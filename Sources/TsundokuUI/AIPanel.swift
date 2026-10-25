@@ -228,9 +228,12 @@ public final class AIPanelModel: ObservableObject {
                 notes.append(
                     "The book is identified by the captured page text.")
             case .titleMatch:
-                notes.append(
-                    "The book is identified by its Books title; the page text "
-                        + "has not yet matched an EPUB edition.")
+                notes.append("The book is identified by its Books title.")
+                if context.chapter != nil {
+                    notes.append(
+                        "The EPUB text matched this page, but no archived "
+                            + "edition was selected.")
+                }
             case .lastOpened, .archiveMatch:
                 if let title = identity.book?.title, !title.isEmpty {
                     notes.append("Book: \(title).")
@@ -408,47 +411,54 @@ public final class AIPanelModel: ObservableObject {
                 let captures = (try? archive?.captures()) ?? []
                 return resolver(page, captures, archive)
             }.value
-            guard let self, generation == self.localContextGeneration,
-                let result
+            guard let self, generation == self.localContextGeneration
             else { return }
-            if let chapter = result.chapter {
-                self.context.chapter = chapter
+            if let result {
+                if let chapter = result.chapter {
+                    self.context.chapter = chapter
+                }
+                if let pageNumber = result.pageNumber,
+                    self.context.pageNumber == nil
+                {
+                    self.context.pageNumber = pageNumber
+                }
+                let capture = result.capture.flatMap { record
+                    -> CaptureEvidence? in
+                    guard let fingerprint = result.fingerprint,
+                        !fingerprint.isEmpty
+                    else { return nil }
+                    return CaptureEvidence(
+                        fingerprint: fingerprint, title: record.title,
+                        confidence: record.identityConfidence)
+                }
+                let improved = ReadingIdentityResolver.resolve(
+                    facts: ReadingLiveFacts(
+                        kind: page.kind, title: page.title,
+                        identifier: page.identifier, capture: capture,
+                        epubAssetID: result.assetID),
+                    books: books)
+                self.adopt(improved, archive: archive)
+                self.migrateLegacyKeys(
+                    improved, fingerprint: result.fingerprint,
+                    liveTitle: page.title, kind: page.kind)
+                TsundokuDiagnostics.shared.event(
+                    "local_context_resolved",
+                    [
+                        "chapter": result.chapter ?? "",
+                        "page": result.pageNumber ?? -1,
+                        "fingerprint": result.fingerprint ?? "",
+                        "capture": result.capture?.directory ?? "",
+                        "asset_id": result.assetID ?? "",
+                        "identity_rank": improved.rank.rawValue,
+                        "identity_key": improved.key ?? "unidentified",
+                    ])
+            } else if let identity = self.identity {
+                // No local text covers this page, but a reader-supplied ASIN
+                // may still let an older title-keyed chat move under it.
+                self.migrateLegacyKeys(
+                    identity, fingerprint: nil, liveTitle: page.title,
+                    kind: page.kind)
             }
-            if let pageNumber = result.pageNumber,
-                self.context.pageNumber == nil
-            {
-                self.context.pageNumber = pageNumber
-            }
-            let capture = result.capture.flatMap { record
-                -> CaptureEvidence? in
-                guard let fingerprint = result.fingerprint,
-                    !fingerprint.isEmpty
-                else { return nil }
-                return CaptureEvidence(
-                    fingerprint: fingerprint, title: record.title,
-                    confidence: record.identityConfidence)
-            }
-            let improved = ReadingIdentityResolver.resolve(
-                facts: ReadingLiveFacts(
-                    kind: page.kind, title: page.title,
-                    identifier: page.identifier, capture: capture,
-                    epubAssetID: result.assetID),
-                books: books)
-            self.adopt(improved, archive: archive)
-            self.migrateLegacyKeys(
-                improved, fingerprint: result.fingerprint,
-                liveTitle: page.title)
-            TsundokuDiagnostics.shared.event(
-                "local_context_resolved",
-                [
-                    "chapter": result.chapter ?? "",
-                    "page": result.pageNumber ?? -1,
-                    "fingerprint": result.fingerprint ?? "",
-                    "capture": result.capture?.directory ?? "",
-                    "asset_id": result.assetID ?? "",
-                    "identity_rank": improved.rank.rawValue,
-                    "identity_key": improved.key ?? "unidentified",
-                ])
         }
         localContextTask = task
     }
@@ -461,7 +471,8 @@ public final class AIPanelModel: ObservableObject {
     /// stronger identity is established, those rows move to it — idempotently,
     /// and only when the old key actually holds a conversation.
     private func migrateLegacyKeys(
-        _ identity: ReadingIdentity, fingerprint: String?, liveTitle: String
+        _ identity: ReadingIdentity, fingerprint: String?, liveTitle: String,
+        kind: ReaderKind
     ) {
         guard let key = identity.key, identity.rank <= .lastOpened,
             let archive = app?.archive
@@ -471,7 +482,13 @@ public final class AIPanelModel: ObservableObject {
             legacy.append("text:\(fingerprint)")
         }
         if !ReadingIdentityResolver.isPlaceholder(liveTitle) {
-            legacy.append("books:\(ConversationKey.normalize(liveTitle))")
+            let normalized = ConversationKey.normalize(liveTitle)
+            legacy.append("books:\(normalized)")
+            // Pre-v2 Kindle chats used a `kindle:` title key. They are the
+            // same book under weaker evidence and move with the rest.
+            if kind == .kindle {
+                legacy.append("kindle:\(normalized)")
+            }
         }
         let candidates = legacy.filter { $0 != key }
         guard !candidates.isEmpty else { return }
