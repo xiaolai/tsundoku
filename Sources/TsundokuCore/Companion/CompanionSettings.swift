@@ -177,24 +177,30 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
     /// Follow the reading surface's type in the panel's answer text. Off
     /// keeps the panel's own body style.
     public var matchReaderTypography: Bool
+    /// Take the reading surface's background colour into the panel. Off keeps
+    /// the system window background.
+    public var matchReaderTheme: Bool
 
     public init(
         panelPlacement: PanelPlacement = .auto,
         triggerPlacement: TriggerPlacement = .auto,
         launchAtLogin: Bool = false,
         hotKey: CompanionHotKey = .defaultShortcut,
-        matchReaderTypography: Bool = true
+        matchReaderTypography: Bool = true,
+        matchReaderTheme: Bool = true
     ) {
         self.panelPlacement = panelPlacement
         self.triggerPlacement = triggerPlacement
         self.launchAtLogin = launchAtLogin
         self.hotKey = hotKey
         self.matchReaderTypography = matchReaderTypography
+        self.matchReaderTheme = matchReaderTheme
     }
 
     private enum CodingKeys: String, CodingKey {
         case panelPlacement, triggerPlacement, launchAtLogin, hotKey
         case matchReaderTypography
+        case matchReaderTheme
     }
 
     /// Decodes every missing field to its default, so a blob written before a
@@ -221,6 +227,10 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
             try container.decodeIfPresent(
                 Bool.self, forKey: .matchReaderTypography)
             ?? defaults.matchReaderTypography
+        matchReaderTheme =
+            try container.decodeIfPresent(
+                Bool.self, forKey: .matchReaderTheme)
+            ?? defaults.matchReaderTheme
     }
 
     public static let defaults = CompanionSettings()

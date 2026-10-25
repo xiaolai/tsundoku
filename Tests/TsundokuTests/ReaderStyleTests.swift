@@ -141,10 +141,12 @@ struct ReaderStyleTests {
             try JSONSerialization.jsonObject(with: encoded)
                 as? [String: Any])
         object.removeValue(forKey: "matchReaderTypography")
+        object.removeValue(forKey: "matchReaderTheme")
         let legacy = try JSONSerialization.data(withJSONObject: object)
         let decoded = try JSONDecoder().decode(
             CompanionSettings.self, from: legacy)
         #expect(decoded.panelPlacement == .side)
         #expect(decoded.matchReaderTypography)
+        #expect(decoded.matchReaderTheme)
     }
 }

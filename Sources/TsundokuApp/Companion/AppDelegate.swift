@@ -71,6 +71,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = CommandLine.arguments
         startDiagnostics(arguments)
+        // The gate measures a window of its own and exits; none of the
+        // menu-bar app's reader tracking or companion setup applies.
+        if arguments.contains("--typography-gate") {
+            TypographyGate.run()
+            return
+        }
         permissions.onLibraryAccessReady = { [weak self] in
             guard let self else { return }
             self.ensureAppModel().requestLibraryImport()

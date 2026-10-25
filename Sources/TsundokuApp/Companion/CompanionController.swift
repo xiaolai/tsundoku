@@ -334,11 +334,13 @@ final class CompanionController {
     /// Sample the reader's type for the answer text. The sampler caches per
     /// book window and size, so repeated calls are cheap.
     private func refreshReaderStyle(for reader: ReaderSnapshot) {
-        guard settings.settings.matchReaderTypography else {
+        let settings = settings.settings
+        guard settings.matchReaderTypography || settings.matchReaderTheme else {
             styleGeneration += 1
             styleTask?.cancel()
             styleTask = nil
             panelModel?.textStyle = nil
+            panelModel?.theme = nil
             return
         }
         styleGeneration += 1
@@ -346,23 +348,36 @@ final class CompanionController {
         styleTask?.cancel()
         styleTask = Task { [weak self] in
             guard let self else { return }
-            let sampled = await self.styleSampler.style(for: reader)
+            let sampled = await self.styleSampler.sample(for: reader)
             guard !Task.isCancelled, generation == self.styleGeneration
             else { return }
-            let style = sampled.map { CompanionTypography.style(from: $0) }
+            let style = settings.matchReaderTypography
+                ? sampled?.style.map { CompanionTypography.style(from: $0) }
+                : nil
+            let theme = settings.matchReaderTheme
+                ? sampled?.theme.map(CompanionTheme.init)
+                : nil
             self.panelModel?.textStyle = style
+            self.panelModel?.theme = theme
             guard let sampled else { return }
-            TsundokuDiagnostics.shared.event(
-                "reader_style_sampled",
-                [
-                    "reader": reader.kind.rawValue,
-                    "origin": sampled.origin.rawValue,
-                    "family": sampled.family ?? "",
-                    "point_size": Double(sampled.pointSize),
-                    "line_pitch": Double(sampled.linePitch),
-                    "panel_size": style.map { Double($0.size) } ?? 0,
-                    "panel_spacing": style.map { Double($0.lineSpacing) } ?? 0,
-                ])
+            var fields: [String: Any] = ["reader": reader.kind.rawValue]
+            if let readerStyle = sampled.style {
+                fields["origin"] = readerStyle.origin.rawValue
+                fields["family"] = readerStyle.family ?? ""
+                fields["point_size"] = Double(readerStyle.pointSize)
+                fields["line_pitch"] = Double(readerStyle.linePitch)
+                fields["panel_size"] = style.map { Double($0.size) } ?? 0
+                fields["panel_spacing"] =
+                    style.map { Double($0.lineSpacing) } ?? 0
+            }
+            if let sampledTheme = sampled.theme {
+                fields["theme_red"] = (sampledTheme.red * 255).rounded()
+                fields["theme_green"] = (sampledTheme.green * 255).rounded()
+                fields["theme_blue"] = (sampledTheme.blue * 255).rounded()
+                fields["theme_share"] = sampledTheme.share
+                fields["theme_dark"] = sampledTheme.isDark
+            }
+            TsundokuDiagnostics.shared.event("reader_style_sampled", fields)
         }
     }
 

@@ -20,6 +20,9 @@ public final class AIPanelModel: ObservableObject {
     /// The reader's typography, when it could be sampled; nil keeps the
     /// panel's own body style.
     @Published public var textStyle: CompanionTextStyle?
+    /// The reading page's colours, when a capture established them; nil keeps
+    /// the system window styling.
+    @Published public var theme: CompanionTheme?
     @Published public var action: AIAction = .explain
     @Published public var question = "" {
         didSet {

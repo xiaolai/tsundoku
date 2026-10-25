@@ -109,20 +109,44 @@ public struct CompanionPanelView: View {
         let shape = RoundedRectangle(
             cornerRadius: CompanionMetrics.cornerRadius,
             style: .continuous)
+        panelContent
+            // The companion is a window, not a translucent HUD. An opaque
+            // system window background keeps long answers readable over a
+            // page view, and the window itself supplies the native shadow.
+            // When the page's colours are known, the panel takes them instead.
+            .background(
+                model.theme?.background
+                    ?? Color(nsColor: .windowBackgroundColor),
+                in: shape)
+            .overlay(
+                shape.strokeBorder(
+                    model.theme.map {
+                        $0.isDark
+                            ? Color.white.opacity(0.12)
+                            : Color.black.opacity(0.12)
+                    } ?? Color(nsColor: .separatorColor).opacity(0.6),
+                    lineWidth: 0.5)
+            )
+            .clipShape(shape)
+    }
+
+    /// The page's direction drives the panel's semantic colours: a dark page
+    /// gives light text, a light or sepia page keeps dark text. With no theme,
+    /// the system's own appearance is inherited.
+    @ViewBuilder private var panelContent: some View {
+        if let theme = model.theme {
+            content.environment(
+                \.colorScheme, theme.isDark ? .dark : .light)
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
         AIPanelView(
             model: model, compact: compact, onActivate: onActivate,
             onClose: onClose
         )
-        // The companion is a window, not a translucent HUD. An opaque system
-        // window background keeps long answers readable over a page view, and
-        // the window itself supplies the native shadow.
-        .background(Color(nsColor: .windowBackgroundColor), in: shape)
-        .overlay(
-            shape.strokeBorder(
-                Color(nsColor: .separatorColor).opacity(0.6),
-                lineWidth: 0.5)
-        )
-        .clipShape(shape)
     }
 }
 
@@ -155,6 +179,10 @@ public struct CompanionSettingsSection: View {
             Toggle(
                 "Match the reader's typography",
                 isOn: $store.settings.matchReaderTypography
+            )
+            Toggle(
+                "Match the reader's theme",
+                isOn: $store.settings.matchReaderTheme
             )
             if !store.loginItemStatus.isEmpty
                 && !["Not registered", "Enabled"].contains(

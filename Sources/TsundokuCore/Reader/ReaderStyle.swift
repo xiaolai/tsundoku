@@ -31,6 +31,21 @@ public struct ReaderStyle: Equatable, Sendable {
     }
 }
 
+/// One sampling of the reading surface: its type, its colours, or both.
+///
+/// The two come from different evidence and can be absent separately — a
+/// title page yields a theme but no pitch, and a missing permission yields
+/// neither.
+public struct ReaderSample: Equatable, Sendable {
+    public let style: ReaderStyle?
+    public let theme: ReaderTheme?
+
+    public init(style: ReaderStyle?, theme: ReaderTheme?) {
+        self.style = style
+        self.theme = theme
+    }
+}
+
 /// The answer text's style in the companion panel.
 public struct CompanionTextStyle: Equatable, Sendable {
     public let family: String?
