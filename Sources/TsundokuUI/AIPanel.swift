@@ -38,6 +38,9 @@ public final class AIPanelModel: ObservableObject {
     /// turns are promoted. A single Bool let the first completion clear the
     /// flag for both; the count keeps it true until the last write ends.
     private var persistenceCount = 0
+    /// Serializes archive writes: an answer and a session promotion must not
+    /// race to create the same book's conversation.
+    private var persistenceChain: Task<Void, Never>?
     /// The reader's typography, when it could be sampled; nil keeps the
     /// panel's own body style.
     @Published public var textStyle: CompanionTextStyle?
@@ -121,6 +124,9 @@ public final class AIPanelModel: ObservableObject {
     /// The pre-send check started by `run()`, so a caller can await it.
     public private(set) var sendPreparationTask: Task<Void, Never>?
     private var sendGeneration = 0
+    /// The last nonempty reader identifier, held across pages that expose
+    /// none, so A → (none) → B is still seen as a switch when B names itself.
+    private var lastReaderIdentifier: String?
     private var pageWork: Task<ReaderPage, Error>?
     private var answerTask: Task<Void, Never>?
     private var selectionTask: Task<Void, Never>?
@@ -275,20 +281,15 @@ public final class AIPanelModel: ObservableObject {
     public func loadPage() {
         pageTask?.cancel()
         pageWork?.cancel()
-        answerTask?.cancel()
         localContextTask?.cancel()
         followTask?.cancel()
-        sendPreparationTask?.cancel()
         pageTask = nil
         pageWork = nil
-        answerTask = nil
         localContextTask = nil
         followTask = nil
-        sendPreparationTask = nil
-        sendGeneration += 1
+        cancelAnswerWork()
         sendNote = nil
         pageGeneration += 1
-        answerGeneration += 1
         conversationGeneration += 1
         selectionGeneration += 1
         let historyWasLoading = historyLoading
@@ -319,6 +320,8 @@ public final class AIPanelModel: ObservableObject {
                     generation == self.pageGeneration
                 else { return }
                 self.applyLivePage(page)
+                self.lastReaderIdentifier = Self.identifierValue(
+                    page.identifier)
                 // Kindle hides the title with its chrome; its last-opened
                 // ASIN identifies the book when the app can read Kindle's
                 // container, and the archive supplies the title. Without
@@ -357,6 +360,13 @@ public final class AIPanelModel: ObservableObject {
                     self.error =
                         "This page exposes no text. Image pages need a "
                         + "screenshot or a vision model."
+                    if key != previousKey {
+                        // The key already moved to the new book; its old
+                        // turns must not survive to be sent by a retry.
+                        self.turns = []
+                        self.conversationID = nil
+                        self.conversations = []
+                    }
                     if historyWasLoading, self.bookKey == previousKey {
                         self.loadConversationHistory()
                     }
@@ -633,7 +643,9 @@ public final class AIPanelModel: ObservableObject {
                 provider: $0.provider, prompt: $0.prompt, context: $0.context)
         }
         beginPersistence()
-        Task { [weak self] in
+        let previous = persistenceChain
+        let task = Task { [weak self] in
+            await previous?.value
             let stored = await Task.detached { () -> Conversation? in
                 // The conversation and every turn are one transaction; a
                 // failure leaves no partially saved thread behind.
@@ -654,6 +666,7 @@ public final class AIPanelModel: ObservableObject {
                     "Could not file this book's earlier chats."
             }
         }
+        persistenceChain = task
     }
 
     // MARK: - Page turns
@@ -743,6 +756,13 @@ public final class AIPanelModel: ObservableObject {
         livePageNumber = page.pageNumber
     }
 
+    private static func identifierValue(_ value: String?) -> String? {
+        let trimmed = value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased() ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private func makeContext(
         for page: ReaderPage, identity: ReadingIdentity
     ) -> AIContext {
@@ -763,7 +783,17 @@ public final class AIPanelModel: ObservableObject {
     /// answer that belonged to the old one. A turn never rewrites an already
     /// stored turn: its caption was snapshotted when it was sent.
     private func applyPageTurn(_ page: ReaderPage) {
+        // The reader identifier before this turn, not the identity key: an
+        // EPUB match can file the book under an archive ASIN while the reader
+        // keeps reporting its own unchanged asset ID. Comparing against the
+        // key would call that same-book conflict a switch on every turn.
+        let previousIdentifier =
+            lastReaderIdentifier
+            ?? Self.identifierValue(pageIdentifier) ?? ""
         applyLivePage(page)
+        // A selection read started for the previous page must not land on
+        // this one.
+        selectionGeneration += 1
         followedTurns += 1
         if phase == .failed, failureKind == .page {
             phase = .idle
@@ -778,8 +808,111 @@ public final class AIPanelModel: ObservableObject {
         // Live-only evidence is weaker than what the local text already
         // proved. A fingerprint-keyed page loses its capture match on the
         // next page; that is not a new book, and must not clear the chat.
+        let liveIdentifier = Self.identifierValue(page.identifier) ?? ""
+        let liveTitle =
+            ReadingIdentityResolver.isPlaceholder(page.title)
+            ? "" : page.title
+        let currentIdentity = self.identity
+        // A different archived edition of the same work: same title and
+        // author, different identifier. That is a key move, not a new book.
+        let duplicateEdition: Bool
+        if let oldBook = currentIdentity?.book,
+            currentIdentity?.evidence == .archiveEPUB,
+            liveIdentity.evidence == .archiveIdentifier,
+            let newBook = liveIdentity.book,
+            oldBook.asin.caseInsensitiveCompare(newBook.asin)
+                != .orderedSame,
+            !newBook.title.isEmpty, !newBook.author.isEmpty,
+            !oldBook.author.isEmpty,
+            ConversationKey.normalize(newBook.title)
+                == ConversationKey.normalize(oldBook.title),
+            ConversationKey.normalize(newBook.author)
+                == ConversationKey.normalize(oldBook.author)
+        {
+            duplicateEdition = true
+        } else {
+            duplicateEdition = false
+        }
+        let explicitNewBook: Bool
+        if liveIdentifier.isEmpty {
+            explicitNewBook = false
+        } else if !previousIdentifier.isEmpty {
+            explicitNewBook = liveIdentifier != previousIdentifier
+        } else if let current = currentIdentity,
+            current.rank != .sessionOnly
+        {
+            let keyDiffers =
+                ConversationFiling.canonical(current.key ?? "")
+                != liveIdentifier
+            if current.evidence == .archiveEPUB {
+                // The reader's asset ID is authoritative over a text match.
+                // A proven duplicate edition is the only case that keeps the
+                // thread; an unarchived identifier cannot be proven the same
+                // book, so it starts a new chat rather than inheriting the
+                // old one.
+                explicitNewBook = keyDiffers && !duplicateEdition
+            } else {
+                // A title identity improves to an archived asset ID; it is a
+                // new book only when the archive or the live title names a
+                // different one.
+                let matched = liveIdentity.book
+                let matchedTitle = matched?.title ?? liveTitle
+                let sameTitle =
+                    !matchedTitle.isEmpty
+                    && ConversationKey.normalize(matchedTitle)
+                        == ConversationKey.normalize(current.title)
+                let sameAuthor =
+                    !(matched?.author ?? "").isEmpty
+                    && !(current.book?.author ?? "").isEmpty
+                    && ConversationKey.normalize(matched?.author ?? "")
+                        == ConversationKey.normalize(
+                            current.book?.author ?? "")
+                let knownDifferent: Bool
+                if let matched {
+                    let sameBook = current.book.map {
+                        $0.asin.caseInsensitiveCompare(matched.asin)
+                            == .orderedSame
+                    } ?? false
+                    knownDifferent =
+                        !sameBook && !(sameTitle && sameAuthor)
+                } else {
+                    knownDifferent = false
+                }
+                let titleDiffers =
+                    matched == nil && !liveTitle.isEmpty
+                    && !current.title.isEmpty
+                    && ConversationKey.normalize(liveTitle)
+                        != ConversationKey.normalize(current.title)
+                explicitNewBook =
+                    keyDiffers && (knownDifferent || titleDiffers)
+            }
+        } else {
+            explicitNewBook = false
+        }
+        if !liveIdentifier.isEmpty {
+            lastReaderIdentifier = liveIdentifier
+        }
+        // Adopt the reader's key for a duplicate edition and move the thread
+        // under it, rather than letting the EPUB match suppress it forever.
+        var migratedDuplicateEdition = false
+        if duplicateEdition, !explicitNewBook,
+            let current = currentIdentity,
+            let newBook = liveIdentity.book,
+            let oldKey = current.key, let newKey = liveIdentity.key
+        {
+            do {
+                try app?.archive?.migrateConversations(
+                    from: oldKey, to: newKey, title: newBook.title,
+                    source: newBook.source)
+            } catch {
+                saveError =
+                    "Could not file this book's earlier chats: \(error)"
+            }
+            migratedDuplicateEdition = true
+        }
         let identity: ReadingIdentity
-        if let current = self.identity,
+        if !migratedDuplicateEdition, let current = self.identity,
+            !explicitNewBook,
             (liveIdentity.rank == .sessionOnly
                 && current.rank != .sessionOnly)
                 || (liveIdentity.rank == .archiveMatch
@@ -792,7 +925,8 @@ public final class AIPanelModel: ObservableObject {
         } else {
             identity = liveIdentity
         }
-        let bookChanged = identity.key != bookKey
+        let bookChanged =
+            identity.key != bookKey && !migratedDuplicateEdition
         self.identity = identity
         bookKey = identity.key
         bookTitle = identity.title
@@ -939,6 +1073,17 @@ public final class AIPanelModel: ObservableObject {
         provider = settings.provider.displayName
         submittedRequest = request
         submittedOnDevice = settings.provider == .appleOnDevice
+        let selected = request.selection?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let sourceLength =
+            selected.isEmpty ? request.pageText.count : selected.count
+        if sourceLength > AIComposer.passageLimit {
+            let note =
+                "The passage is longer than 8,000 characters; the answer "
+                + "covers its first part only."
+            sendNote = [sendNote, note].compactMap { $0 }
+                .joined(separator: " ")
+        }
         let prompt = AIComposer.prompt(for: request, settings: settings)
         TsundokuDiagnostics.shared.event(
             "ai_request_started",
@@ -1028,22 +1173,17 @@ public final class AIPanelModel: ObservableObject {
     public func cancel() {
         pageTask?.cancel()
         pageWork?.cancel()
-        answerTask?.cancel()
         selectionTask?.cancel()
         localContextTask?.cancel()
         followTask?.cancel()
-        sendPreparationTask?.cancel()
         pageTask = nil
         pageWork = nil
-        answerTask = nil
         selectionTask = nil
         localContextTask = nil
         followTask = nil
-        sendPreparationTask = nil
-        sendGeneration += 1
+        cancelAnswerWork()
         sendNote = nil
         pageGeneration += 1
-        answerGeneration += 1
         selectionGeneration += 1
         phase = .idle
         error = nil
@@ -1053,15 +1193,23 @@ public final class AIPanelModel: ObservableObject {
         TsundokuDiagnostics.shared.event("ai_work_cancelled")
     }
 
-    /// Stops the answer, not the panel: page following continues, so the next
-    /// send uses the current page.
-    public func stopAnswer() {
+    /// Cancel the answer and any prepared send, and invalidate both
+    /// generations so a late result cannot publish. Every caller that starts
+    /// new answer work goes through here; only the operation-specific reset
+    /// stays local.
+    private func cancelAnswerWork() {
         answerTask?.cancel()
         answerTask = nil
         sendPreparationTask?.cancel()
         sendPreparationTask = nil
         sendGeneration += 1
         answerGeneration += 1
+    }
+
+    /// Stops the answer, not the panel: page following continues, so the next
+    /// send uses the current page.
+    public func stopAnswer() {
+        cancelAnswerWork()
         if phase == .loadingAnswer { phase = .idle }
         error = nil
         failureKind = nil
@@ -1070,13 +1218,8 @@ public final class AIPanelModel: ObservableObject {
     /// Starts a fresh conversation about the same book. Earlier conversations
     /// stay in the history menu and in the library.
     public func newChat() {
-        answerTask?.cancel()
-        answerTask = nil
-        sendPreparationTask?.cancel()
-        sendPreparationTask = nil
-        sendGeneration += 1
+        cancelAnswerWork()
         sendNote = nil
-        answerGeneration += 1
         conversationGeneration += 1
         turns = []
         conversationID = nil
@@ -1086,7 +1229,9 @@ public final class AIPanelModel: ObservableObject {
         saveError = nil
         failureKind = nil
         submittedRequest = nil
-        if phase != .loadingPage { phase = .idle }
+        // Any in-flight conversation load was invalidated above; leaving
+        // `.loadingPage` here would disable sending forever.
+        phase = .idle
         TsundokuDiagnostics.shared.event("ai_conversation_cleared")
     }
 
@@ -1097,13 +1242,8 @@ public final class AIPanelModel: ObservableObject {
         // this after cancellation would stop its in-flight answer and leave
         // the phase reading as loading forever.
         if id == conversationID, !turns.isEmpty { return }
-        answerTask?.cancel()
-        answerTask = nil
-        sendPreparationTask?.cancel()
-        sendPreparationTask = nil
-        sendGeneration += 1
+        cancelAnswerWork()
         sendNote = nil
-        answerGeneration += 1
         conversationGeneration += 1
         selectionGeneration += 1
         let generation = conversationGeneration
@@ -1122,6 +1262,7 @@ public final class AIPanelModel: ObservableObject {
                 guard let self, !Task.isCancelled,
                     generation == self.conversationGeneration
                 else { return }
+                self.historyLoading = false
                 self.error = "Could not read this conversation: \(error)"
                 self.phase = .ready
             }
@@ -1248,13 +1389,26 @@ public final class AIPanelModel: ObservableObject {
         let title = context.bookTitle
         let source = context.bookSource
         beginPersistence()
-        Task { [weak self] in
+        let previous = persistenceChain
+        let task = Task { [weak self] in
+            await previous?.value
+            // A session promotion ahead of this write may have created and
+            // recorded the book's conversation. Reuse that only while the
+            // conversation has not changed since the answer was sent: a
+            // queued write must never append to a thread the reader opened
+            // after it. New Chat also leaves `conversationID` nil, so it
+            // still creates a fresh thread.
+            let existingID =
+                self?.conversationGeneration == generationAtSend
+                ? self?.conversationID : nil
             do {
                 let result = try await Task.detached {
                     () -> (Int64, [ConversationSummary]) in
                     let id: Int64
                     if let conversationAtSend {
                         id = conversationAtSend
+                    } else if let existingID {
+                        id = existingID
                     } else {
                         id = try archive.createConversation(
                             bookKey: key, bookTitle: title,
@@ -1288,6 +1442,7 @@ public final class AIPanelModel: ObservableObject {
                     "This answer could not be saved: \(error)"
             }
         }
+        persistenceChain = task
     }
 
     /// A Books page has no ASIN in the Accessibility tree. The title
@@ -1784,6 +1939,12 @@ public struct AIPanelView: View {
         VStack(alignment: .leading, spacing: 3) {
             if let note = model.sendNote {
                 Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let error = model.error, model.phase != .failed {
+                Text(error)
                     .font(.caption2)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)

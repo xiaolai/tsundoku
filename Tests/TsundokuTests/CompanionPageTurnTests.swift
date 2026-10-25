@@ -400,6 +400,197 @@ struct CompanionPageTurnTests {
         #expect(panel.turns.last?.context.pageNumber == 1)
     }
 
+    @Test("a reader asset ID adopts a duplicate edition and moves its chat")
+    func duplicateEditionAssetID() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-duplicate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let editions = [
+            Book(
+                asin: "ASSET-A", title: "Alice", author: "A", bookType: 10,
+                readState: 0, source: .appleBooks),
+            Book(
+                asin: "ASSET-B", title: "Alice", author: "A", bookType: 10,
+                readState: 0, source: .appleBooks),
+        ]
+        model.books = editions
+        let archive = try #require(model.archive)
+        _ = try archive.importAll(books: editions, annotations: [])
+        let conversation = try archive.createConversation(
+            bookKey: "ASSET-A", bookTitle: "Alice",
+            bookSource: .appleBooks)
+        try archive.appendConversationTurn(
+            conversationID: conversation.id, action: .explain, question: "",
+            answer: "Old answer", provider: "p", prompt: "", context: .empty)
+
+        let first = ReaderPage(
+            text: String(repeating: "first page words ", count: 20),
+            title: "Alice", kind: .appleBooks, source: .accessibility,
+            pageNumber: 1, pageCount: 100)
+        let second = ReaderPage(
+            text: String(repeating: "second page words ", count: 20),
+            title: "Alice", kind: .appleBooks, source: .accessibility,
+            pageNumber: 2, pageCount: 100, identifier: "ASSET-B")
+        let reader = SteppingReader(kind: .appleBooks, pages: [first, second])
+        let panel = AIPanelModel(
+            app: model, context: reader,
+            contextResolver: { page, _, _ in
+                ReadingContextResolver.Result(
+                    chapter: nil, pageNumber: page.pageNumber,
+                    fingerprint: nil, capture: nil,
+                    assetID: page.pageNumber == 1 ? "ASSET-A" : nil)
+            })
+        panel.followInterval = .seconds(3_600)
+        panel.followDebounce = .zero
+
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        await panel.localContextTask?.value
+        defer { panel.cancel() }
+        #expect(panel.bookKey == "ASSET-A")
+        #expect(panel.identity?.evidence == .archiveEPUB)
+        #expect(panel.identity?.book?.asin == "ASSET-A")
+        #expect(panel.turns.count == 1)
+
+        reader.show(1)
+        await panel.followPageOnce()
+        await panel.localContextTask?.value
+
+        #expect(panel.bookKey == "ASSET-B")
+        #expect(panel.turns.count == 1, "the chat must move, not clear")
+        #expect(try archive.latestConversation(bookKey: "ASSET-A") == nil)
+        #expect(
+            try archive.latestConversation(bookKey: "ASSET-B")?.id
+                == conversation.id)
+    }
+
+    @Test("a same-title book by another author starts a new chat")
+    func sameTitleDifferentAuthor() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-same-title-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let editions = [
+            Book(
+                asin: "ASSET-A", title: "Alice", author: "Author A",
+                bookType: 10, readState: 0, source: .appleBooks),
+            Book(
+                asin: "ASSET-B", title: "Alice", author: "Author B",
+                bookType: 10, readState: 0, source: .appleBooks),
+        ]
+        model.books = editions
+        let archive = try #require(model.archive)
+        _ = try archive.importAll(books: editions, annotations: [])
+        let conversation = try archive.createConversation(
+            bookKey: "ASSET-A", bookTitle: "Alice",
+            bookSource: .appleBooks)
+        try archive.appendConversationTurn(
+            conversationID: conversation.id, action: .explain, question: "",
+            answer: "Old answer", provider: "p", prompt: "", context: .empty)
+
+        let first = ReaderPage(
+            text: String(repeating: "first page words ", count: 20),
+            title: "Alice", kind: .appleBooks, source: .accessibility,
+            pageNumber: 1, pageCount: 100)
+        let second = ReaderPage(
+            text: String(repeating: "second page words ", count: 20),
+            title: "Alice", kind: .appleBooks, source: .accessibility,
+            pageNumber: 2, pageCount: 100, identifier: "ASSET-B")
+        let reader = SteppingReader(kind: .appleBooks, pages: [first, second])
+        let panel = AIPanelModel(
+            app: model, context: reader,
+            contextResolver: { page, _, _ in
+                ReadingContextResolver.Result(
+                    chapter: nil, pageNumber: page.pageNumber,
+                    fingerprint: nil, capture: nil,
+                    assetID: page.pageNumber == 1 ? "ASSET-A" : nil)
+            })
+        panel.followInterval = .seconds(3_600)
+        panel.followDebounce = .zero
+
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        await panel.localContextTask?.value
+        defer { panel.cancel() }
+
+        reader.show(1)
+        await panel.followPageOnce()
+        await panel.localContextTask?.value
+
+        #expect(panel.bookKey == "ASSET-B")
+        #expect(panel.turns.isEmpty, "another author's book must not inherit")
+        #expect(
+            try archive.latestConversation(bookKey: "ASSET-A")?.id
+                == conversation.id)
+    }
+
+    @Test("an unarchived identifier after an EPUB match starts a new chat")
+    func unarchivedIdentifierAfterEPUB() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-unarchived-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let editions = [
+            Book(
+                asin: "ASSET-A", title: "Alice", author: "Author A",
+                bookType: 10, readState: 0, source: .appleBooks)
+        ]
+        model.books = editions
+        let archive = try #require(model.archive)
+        _ = try archive.importAll(books: editions, annotations: [])
+        let conversation = try archive.createConversation(
+            bookKey: "ASSET-A", bookTitle: "Alice",
+            bookSource: .appleBooks)
+        try archive.appendConversationTurn(
+            conversationID: conversation.id, action: .explain, question: "",
+            answer: "Old answer", provider: "p", prompt: "", context: .empty)
+
+        let first = ReaderPage(
+            text: String(repeating: "first page words ", count: 20),
+            title: "Alice", kind: .appleBooks, source: .accessibility,
+            pageNumber: 1, pageCount: 100)
+        let second = ReaderPage(
+            text: String(repeating: "second page words ", count: 20),
+            title: "Unknown", kind: .appleBooks, source: .accessibility,
+            pageNumber: 2, pageCount: 100, identifier: "ASSET-B")
+        let reader = SteppingReader(kind: .appleBooks, pages: [first, second])
+        let panel = AIPanelModel(
+            app: model, context: reader,
+            contextResolver: { page, _, _ in
+                ReadingContextResolver.Result(
+                    chapter: nil, pageNumber: page.pageNumber,
+                    fingerprint: nil, capture: nil,
+                    assetID: page.pageNumber == 1 ? "ASSET-A" : nil)
+            })
+        panel.followInterval = .seconds(3_600)
+        panel.followDebounce = .zero
+
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        await panel.localContextTask?.value
+        defer { panel.cancel() }
+
+        reader.show(1)
+        await panel.followPageOnce()
+        await panel.localContextTask?.value
+
+        #expect(panel.bookKey == "ASSET-B")
+        #expect(panel.turns.isEmpty, "an unproven identifier is not the old book")
+        #expect(
+            try archive.latestConversation(bookKey: "ASSET-A")?.id
+                == conversation.id)
+    }
+
     @Test("a selection spanning several nodes is joined in order")
     func multiNodeSelection() {
         #expect(

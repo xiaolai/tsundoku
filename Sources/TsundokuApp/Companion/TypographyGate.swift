@@ -118,11 +118,7 @@ enum TypographyGate {
             guard let theme else {
                 return (failure(page, "no_theme"), nil)
             }
-            let rgb = [
-                Int((theme.red * 255).rounded()),
-                Int((theme.green * 255).rounded()),
-                Int((theme.blue * 255).rounded()),
-            ]
+            let rgb = rgb(theme)
             let colourMatches = dark
                 ? rgb.allSatisfy { $0 <= 38 }
                 : rgb.allSatisfy { $0 >= 217 }
@@ -150,28 +146,23 @@ enum TypographyGate {
             rgb: [0, 0, 0], passed: false, note: note)
     }
 
-    /// Host the product's panel with the measured theme under the opposite
-    /// host appearance, then compare the captured background with the measured
-    /// colour. The screenshot is kept for the record; a failure to write it
-    /// fails the check rather than leaving stale evidence behind.
-    private static func panelCheck(
-        theme: ReaderTheme, page: String, dark: Bool, stamp: String
-    ) async -> PanelResult {
-        let expected = [
+    private static func rgb(_ theme: ReaderTheme) -> [Int] {
+        [
             Int((theme.red * 255).rounded()),
             Int((theme.green * 255).rounded()),
             Int((theme.blue * 255).rounded()),
         ]
-        let failure: (String) -> PanelResult = { note in
-            PanelResult(
-                page: page, expectedRgb: expected, capturedRgb: [],
-                passed: false, note: note)
-        }
+    }
+
+    /// The panel model the gate renders. Built once so the assertion flow in
+    /// `panelCheck` stays about the capture, not about fixture details.
+    private static func fixtureModel(theme: ReaderTheme) -> AIPanelModel {
         let model = AIPanelModel(app: nil)
         model.bookTitle = "Typography gate"
         model.provider = "Gate"
         model.pageText = String(
-            repeating: "The quick brown fox jumps over the lazy dog. ", count: 20)
+            repeating: "The quick brown fox jumps over the lazy dog. ",
+            count: 20)
         model.turns = [
             AITurn(
                 action: .explain, question: "",
@@ -193,7 +184,76 @@ enum TypographyGate {
         model.readerKind = .kindle
         model.theme = CompanionTheme(theme)
         model.phase = .ready
+        return model
+    }
 
+    /// Host the product's panel with the measured theme under the opposite
+    /// host appearance, then compare the captured background with the measured
+    /// colour. The screenshot is kept for the record; a failure to write it
+    /// fails the check rather than leaving stale evidence behind.
+    private static func panelCheck(
+        theme: ReaderTheme, page: String, dark: Bool, stamp: String
+    ) async -> PanelResult {
+        let expected = rgb(theme)
+        let failure: (String) -> PanelResult = { note in
+            PanelResult(
+                page: page, expectedRgb: expected, capturedRgb: [],
+                passed: false, note: note)
+        }
+        let panel: HostedPanel
+        switch await capturePanel(theme: theme, dark: dark) {
+        case .failed(let note):
+            return failure(note)
+        case .captured(let captured):
+            panel = captured
+        }
+        defer { panel.window.orderOut(nil) }
+        guard
+            let pixel = self.pixel(
+                panel.image, x: panel.image.width / 2, y: 6)
+        else { return failure("pixel_unreadable") }
+        guard pixel.alpha >= 250 else {
+            return failure("pixel_transparent")
+        }
+        let capturedRGB = [Int(pixel.red), Int(pixel.green), Int(pixel.blue)]
+        // A fresh path per run: a failure can never leave the previous
+        // run's screenshot looking like this run's evidence.
+        let path = "/tmp/tsundoku-typography-panel-\(page)-\(stamp).png"
+        guard save(panel.image, to: path) else {
+            return failure("panel_screenshot_not_saved")
+        }
+        // A background that follows the theme is not enough: text that kept
+        // the host appearance would be unreadable while the colour check
+        // above still passed. Require neutral text pixels with a readable
+        // contrast against that background.
+        guard let contrast = textContrast(
+            panel.image, background: capturedRGB),
+            contrast >= 4.5
+        else { return failure("text_contrast_low") }
+        let matches = zip(expected, capturedRGB).allSatisfy {
+            abs($0 - $1) <= 10
+        }
+        return PanelResult(
+            page: page, expectedRgb: expected, capturedRgb: capturedRGB,
+            passed: matches, note: path)
+    }
+
+    private struct HostedPanel {
+        let window: NSWindow
+        let image: CGImage
+    }
+
+    private enum PanelCapture {
+        case captured(HostedPanel)
+        case failed(String)
+    }
+
+    /// Host the panel under the opposite appearance and capture it. Window
+    /// setup and capture live together; the caller owns only the assertions.
+    private static func capturePanel(
+        theme: ReaderTheme, dark: Bool
+    ) async -> PanelCapture {
+        let model = fixtureModel(theme: theme)
         let host = NSHostingView(
             rootView: CompanionPanelView(
                 model: model, compact: false, onActivate: {}, onClose: {}))
@@ -207,34 +267,20 @@ enum TypographyGate {
         // under a light appearance and a light page under a dark one.
         window.appearance = NSAppearance(named: dark ? .aqua : .darkAqua)
         window.orderFrontRegardless()
-        defer { window.orderOut(nil) }
-        try? await Task.sleep(for: .milliseconds(800))
-
         do {
-            guard let shareable = try await shareableWindow(
-                number: window.windowNumber)
-            else { return failure("panel_window_not_found") }
+            try await Task.sleep(for: .milliseconds(800))
+            guard
+                let shareable = try await shareableWindow(
+                    number: window.windowNumber)
+            else {
+                window.orderOut(nil)
+                return .failed("panel_window_not_found")
+            }
             let captured = try await WindowTextSampler.capture(shareable)
-            guard let pixel = self.pixel(captured.image, x: captured.image.width / 2, y: 6)
-            else { return failure("pixel_unreadable") }
-            guard pixel.alpha >= 250 else {
-                return failure("pixel_transparent")
-            }
-            let capturedRGB = [Int(pixel.red), Int(pixel.green), Int(pixel.blue)]
-            // A fresh path per run: a failure can never leave the previous
-            // run's screenshot looking like this run's evidence.
-            let path = "/tmp/tsundoku-typography-panel-\(page)-\(stamp).png"
-            guard save(captured.image, to: path) else {
-                return failure("panel_screenshot_not_saved")
-            }
-            let matches = zip(expected, capturedRGB).allSatisfy {
-                abs($0 - $1) <= 10
-            }
-            return PanelResult(
-                page: page, expectedRgb: expected, capturedRgb: capturedRGB,
-                passed: matches, note: path)
+            return .captured(HostedPanel(window: window, image: captured.image))
         } catch {
-            return failure(String(describing: error))
+            window.orderOut(nil)
+            return .failed(String(describing: error))
         }
     }
 
@@ -261,6 +307,75 @@ enum TypographyGate {
         }
         guard drawn else { return nil }
         return (pixel[0], pixel[1], pixel[2], pixel[3])
+    }
+
+    /// The best WCAG contrast ratio between the measured background and a
+    /// neutral (text-like) pixel in the panel's middle band. Accent fills are
+    /// excluded by chroma so a coloured button cannot stand in for text.
+    private static func textContrast(
+        _ image: CGImage, background: [Int]
+    ) -> Double? {
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0,
+            background.count == 3,
+            let context = CGContext(
+                data: nil, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        context.draw(
+            image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let data = context.data else { return nil }
+        let bytes = data.assumingMemoryBound(to: UInt8.self)
+        let backgroundLuminance = luminance(
+            Double(background[0]) / 255, Double(background[1]) / 255,
+            Double(background[2]) / 255)
+        var best = 0.0
+        var qualifying = 0
+        var rows = Set<Int>()
+        for y in stride(from: height / 4, to: height * 3 / 4, by: 2) {
+            for x in stride(from: width / 8, to: width * 7 / 8, by: 2) {
+                let offset = y * context.bytesPerRow + x * 4
+                let red = bytes[offset]
+                let green = bytes[offset + 1]
+                let blue = bytes[offset + 2]
+                let alpha = bytes[offset + 3]
+                guard alpha >= 250 else { continue }
+                let spread =
+                    Int(max(red, max(green, blue)))
+                    - Int(min(red, min(green, blue)))
+                guard spread <= 16 else { continue }
+                let value = luminance(
+                    Double(red) / 255, Double(green) / 255,
+                    Double(blue) / 255)
+                let ratio =
+                    (max(backgroundLuminance, value) + 0.05)
+                    / (min(backgroundLuminance, value) + 0.05)
+                best = max(best, ratio)
+                if ratio >= 4.5 {
+                    qualifying += 1
+                    rows.insert(y)
+                }
+            }
+        }
+        // One icon, border or stray pixel is not readable text: require a
+        // body of high-contrast neutral pixels spread over several lines.
+        guard qualifying >= 50, rows.count >= 3 else { return 0 }
+        return best
+    }
+
+    private static func luminance(
+        _ red: Double, _ green: Double, _ blue: Double
+    ) -> Double {
+        func channel(_ value: Double) -> Double {
+            value <= 0.04045
+                ? value / 12.92
+                : pow((value + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * channel(red) + 0.7152 * channel(green)
+            + 0.0722 * channel(blue)
     }
 
     private static func save(_ image: CGImage, to path: String) -> Bool {

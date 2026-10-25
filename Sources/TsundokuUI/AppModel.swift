@@ -139,10 +139,9 @@ public final class AppModel: ObservableObject {
     @Published public var status = "Starting…"
     @Published public var notice: String?
     @Published public var isImporting = false
-    /// The import currently running. Completion is observable, so a caller
-    /// waits for the work itself rather than polling `isImporting` against a
-    /// clock; a slow disk must not read as a failed import.
-    public private(set) var importTask: Task<Void, Never>?
+    /// The archive reload started by an import or a refresh. Completion is
+    /// observable so a caller does not see stale books or counts.
+    public private(set) var reloadTask: Task<Void, Never>?
     @Published public private(set) var permissionAccessibility = AXIsProcessTrusted()
     @Published public private(set) var permissionScreen = CGPreflightScreenCaptureAccess()
     @Published public private(set) var permissionCheckResult: String?
@@ -176,12 +175,12 @@ public final class AppModel: ObservableObject {
 
     public let archive: Archive?
     private let sessionLogger: SessionLogger?
-    private var activeCaptureFlag: CancellationFlag?
+    private let captureSession = CaptureSession()
+    private let libraryImportSession = LibraryImportCoordinator.Session()
     private var liveTask: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
     private var pendingBookID: String?
     private var hasImported = false
-    private var importRequestedAfterCurrentRun = false
     private var readerRecoveryDeferred = false
     @Published public private(set) var hasCompletedImport = false
     @Published public private(set) var lastImportResult: String?
@@ -190,6 +189,9 @@ public final class AppModel: ObservableObject {
     }
     private var pollGeneration = 0
     private var reloadGeneration = 0
+    private var aiNotesGeneration = 0
+    private var conversationCountsGeneration = 0
+    private var activityGeneration = 0
     private var permissionCancellables: Set<AnyCancellable> = []
     private var cleanRecoveryRunning = false
     private var popularHighlightsProbeRunning = false
@@ -367,28 +369,6 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    public var filteredAnnotations: [Annotation] {
-        let query = annotationSearch.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        ).lowercased()
-        return annotations.filter { annotation in
-            if let provenance = annotationFilter.provenance,
-                annotation.provenance != provenance
-            {
-                return false
-            }
-            if let source = sourceFilter.source,
-                annotation.bookSource != source
-            {
-                return false
-            }
-            guard !query.isEmpty else { return true }
-            return annotation.bookTitle.lowercased().contains(query)
-                || annotation.displayText.lowercased().contains(query)
-                || (annotation.note ?? "").lowercased().contains(query)
-        }
-    }
-
     public var selectedBookAnnotations: [Annotation] {
         guard let selectedBookID else { return [] }
         return annotations.filter { $0.asin == selectedBookID && $0.bookSource == selectedBook?.source }
@@ -404,9 +384,18 @@ public final class AppModel: ObservableObject {
 
     public func refreshAINotes() {
         guard let archive else { return }
+        aiNotesGeneration += 1
+        let generation = aiNotesGeneration
         Task {
-            do { savedAINotes = try await Task.detached { try archive.aiNotes() }.value }
-            catch { post("Could not read saved AI notes: \(error)", seconds: 12) }
+            do {
+                let notes = try await Task.detached {
+                    try archive.aiNotes()
+                }.value
+                guard generation == self.aiNotesGeneration else { return }
+                savedAINotes = notes
+            } catch {
+                post("Could not read saved AI notes: \(error)", seconds: 12)
+            }
         }
     }
 
@@ -429,11 +418,17 @@ public final class AppModel: ObservableObject {
     /// Refreshes the per-book chat counts the library column prints.
     public func refreshConversationCounts() {
         guard let archive else { return }
+        conversationCountsGeneration += 1
+        let generation = conversationCountsGeneration
         Task {
             do {
-                conversationCounts = try await Task.detached {
+                let counts = try await Task.detached {
                     try archive.conversationCounts()
                 }.value
+                guard generation == self.conversationCountsGeneration else {
+                    return
+                }
+                conversationCounts = counts
             } catch {
                 post("Could not read chat history: \(error)", seconds: 12)
             }
@@ -487,29 +482,13 @@ public final class AppModel: ObservableObject {
         !(permissionAccessibility && permissionScreen)
     }
 
-    public var currentBookTitle: String {
-        if let book = selectedBook, book.source == .kindle,
-            !book.title.isEmpty
-        {
-            return book.title
-        }
-        if let title = livePage?.title, !title.isEmpty {
-            return title
-        }
-        return "the open book"
-    }
-
-    public var capturePageLimitLabel: String {
-        capturePhase == .running ? "Capturing…" : "Ready"
-    }
-
     // MARK: - Loading
 
     private func reloadFromArchive() {
         guard let archive else { return }
         reloadGeneration += 1
         let generation = reloadGeneration
-        Task {
+        let task = Task {
             do {
                 let books = try await Task.detached {
                     try archive.books()
@@ -569,144 +548,137 @@ public final class AppModel: ObservableObject {
                 self.post("Archive read failed: \(error)", seconds: 10)
             }
         }
+        reloadTask = task
     }
 
     /// A grant may arrive while a different source is still importing. Coalesce
     /// those requests so newly readable sources are not silently skipped.
     public func requestLibraryImport() {
-        if isImporting { importRequestedAfterCurrentRun = true }
-        else { importLibrary() }
+        importLibrary()
     }
 
     public func importLibrary(announce: Bool = true) {
         guard !CommandLine.arguments.contains("--no-import") else { return }
-        guard !isImporting, let archive else { return }
+        guard archive != nil else { return }
         hasImported = true
-        TsundokuDiagnostics.shared.event("library_import_started")
-        isImporting = true
-        let accessGeneration = permissions?.librarySetupGeneration
-        importError = nil
-        importFailures = []
-        status = "Reading local stores…"
-        let task = Task {
-            var totalBooks = 0
-            var totalAnnotations = 0
-            var totalUser = 0
-            var lastImportDate: Date?
-            var importedSources: [String] = []
-            var committedSources = Set<BookSource>()
-            var failures: [LibraryImportFailure] = []
-
-            do {
-                let paths = kindleImportPaths
+        libraryImportSession.request(
+            makeRun: { [weak self] in
+                guard let self, let archive = self.archive else {
+                    return nil
+                }
+                TsundokuDiagnostics.shared.event("library_import_started")
+                self.isImporting = true
+                self.importError = nil
+                self.importFailures = []
                 self.sourceHealth[.kindle] = "Importing…"
-                if let data = try await Task.detached(operation: { () throws -> (books: [Book], annotations: [Annotation])? in
-                    guard try paths.validateAccess() else { return nil }
-                    return try KindleReader.readAll(paths)
-                }).value {
-                    let imported = try await Task.detached {
-                        try archive.importAll(
-                            books: data.books, annotations: data.annotations)
-                    }.value
-                    totalBooks += imported.books
-                    totalAnnotations += imported.annotations
-                    totalUser += imported.userAnnotations
-                    lastImportDate = imported.importedAt
-                    importedSources.append("Kindle")
-                    committedSources.insert(.kindle)
-                    self.sourceLastImport[.kindle] = imported.importedAt
-                    try? archive.setMeta("last_import_source_Kindle", ISO8601DateFormatter().string(from: imported.importedAt))
-                    self.sourceHealth[.kindle] = "Imported \(imported.books.formatted()) books · \(TsundokuFormat.relative(imported.importedAt))"
-                } else {
-                    self.sourceHealth[.kindle] = "No local store found; showing any archived records."
-                }
-            } catch {
-                failures.append(LibraryImportFailure(source: .kindle, error: error))
-                self.sourceHealth[.kindle] = "Import failed: \(error)"
-            }
-
-            let booksPaths = booksImportPaths
-            do {
                 self.sourceHealth[.appleBooks] = "Importing…"
-                if let data = try await Task.detached(operation: { () throws -> (books: [Book], annotations: [Annotation])? in
-                    guard try booksPaths.validateAccess() else { return nil }
-                    return try BooksReader.readAll(booksPaths)
-                }).value {
-                    let imported = try await Task.detached {
-                        try archive.importAll(
-                            books: data.books,
-                            annotations: data.annotations)
-                    }.value
-                    totalBooks += imported.books
-                    totalAnnotations += imported.annotations
-                    totalUser += imported.userAnnotations
-                    lastImportDate = max(
-                        lastImportDate ?? imported.importedAt,
-                        imported.importedAt)
-                    importedSources.append("Apple Books")
-                    committedSources.insert(.appleBooks)
-                    self.sourceLastImport[.appleBooks] = imported.importedAt
-                    try? archive.setMeta("last_import_source_Apple Books", ISO8601DateFormatter().string(from: imported.importedAt))
-                    self.sourceHealth[.appleBooks] = "Imported \(imported.books.formatted()) books · \(TsundokuFormat.relative(imported.importedAt))"
-                } else {
-                    self.sourceHealth[.appleBooks] = "No local store found."
-                }
-            } catch {
-                failures.append(LibraryImportFailure(source: .appleBooks, error: error))
-                self.sourceHealth[.appleBooks] = "Import failed: \(error)"
-            }
+                self.status = "Reading local stores…"
+                let accessGeneration =
+                    self.permissions?.librarySetupGeneration
+                let kindlePaths = self.kindleImportPaths
+                let booksPaths = self.booksImportPaths
+                return LibraryImportCoordinator.Session.Run(
+                    sources: [
+                        LibraryImportCoordinator.Source(
+                            source: .kindle,
+                            missingMessage:
+                                "No local store found; showing any archived "
+                                + "records.",
+                            read: {
+                                guard try kindlePaths.validateAccess() else {
+                                    return nil
+                                }
+                                return try KindleReader.readAll(kindlePaths)
+                            }),
+                        LibraryImportCoordinator.Source(
+                            source: .appleBooks,
+                            missingMessage: "No local store found.",
+                            read: {
+                                guard try booksPaths.validateAccess() else {
+                                    return nil
+                                }
+                                return try BooksReader.readAll(booksPaths)
+                            }),
+                    ],
+                    archive: archive, announce: announce,
+                    accessGeneration: accessGeneration)
+            },
+            onOutcome: { [weak self] outcome, run in
+                self?.applyImportOutcome(
+                    outcome, announce: run.announce,
+                    accessGeneration: run.accessGeneration)
+            },
+            onFinish: { [weak self] in
+                guard let self else { return }
+                self.isImporting = false
+                self.hasCompletedImport = true
+                self.lastImportResult = self.status
+                self.reloadFromArchive()
+            })
+    }
 
-            self.isImporting = false
-            self.hasCompletedImport = true
-            self.lastImport = lastImportDate ?? self.lastImport
-            self.importFailures = failures
-            self.importError = failures.isEmpty ? nil : failures.map { "\($0.source.displayName): \($0.detail)" }.joined(separator: "\n")
-            TsundokuDiagnostics.shared.event("library_import_finished", [
-                "books": totalBooks, "annotations": totalAnnotations,
-                "failed_sources": failures.map { $0.source.rawValue },
-                "access_denied_sources": failures.filter(\.accessDenied).map { $0.source.rawValue },
-            ])
-            if totalBooks > 0 || totalAnnotations > 0 {
-                self.status =
-                    "\(totalBooks) books · \(totalAnnotations) annotations "
-                    + "· \(totalUser) yours"
-                let sourceLabel =
-                    importedSources.isEmpty
-                    ? "local stores"
-                    : importedSources.joined(separator: " and ")
-                self.post(
-                    "Imported \(totalBooks.formatted()) books and "
-                        + "\(totalAnnotations.formatted()) annotations "
-                        + "from \(sourceLabel).",
-                    enabled: announce)
-                if !failures.isEmpty {
-                    self.status = "Import partially completed. Some archived records may be out of date."
-                }
-            } else if !importedSources.isEmpty {
-                self.status = "The local stores are empty."
-                self.post(
-                    "The local Kindle or Apple Books stores are empty.",
-                    enabled: announce)
-            } else if failures.isEmpty {
-                self.status = "No local Kindle or Apple Books stores found."
-                self.post(
-                    "No local Kindle or Apple Books stores were found.",
-                    enabled: announce)
-            } else {
-                self.status = failures.first?.summary ?? "Library import failed."
-                self.post(self.status, seconds: 12)
-            }
-            if let accessGeneration {
-                self.permissions?.completeLibrarySetup(importedSources: committedSources, failures: failures, generation: accessGeneration)
-            }
-            self.lastImportResult = self.status
-            self.reloadFromArchive()
-            if self.importRequestedAfterCurrentRun {
-                self.importRequestedAfterCurrentRun = false
-                self.importLibrary(announce: false)
-            }
+    /// Publish one finished import. Task lifecycle and queuing belong to
+    /// `LibraryImportCoordinator.Session`; this is wording and state only.
+    private func applyImportOutcome(
+        _ outcome: LibraryImportCoordinator.Outcome, announce: Bool,
+        accessGeneration: Int?
+    ) {
+        sourceHealth.merge(
+            outcome.health, uniquingKeysWith: { _, new in new })
+        for (source, date) in outcome.lastImportBySource {
+            sourceLastImport[source] = date
         }
-        importTask = task
+        let failures = outcome.failures
+        lastImport = outcome.lastImportDate ?? lastImport
+        importFailures = failures
+        importError =
+            failures.isEmpty
+            ? nil
+            : failures.map { "\($0.source.displayName): \($0.detail)" }
+                .joined(separator: "\n")
+        TsundokuDiagnostics.shared.event("library_import_finished", [
+            "books": outcome.books,
+            "annotations": outcome.annotations,
+            "failed_sources": failures.map { $0.source.rawValue },
+            "access_denied_sources": failures.filter(\.accessDenied)
+                .map { $0.source.rawValue },
+        ])
+        if outcome.books > 0 || outcome.annotations > 0 {
+            status =
+                "\(outcome.books) books · "
+                + "\(outcome.annotations) annotations "
+                + "· \(outcome.user) yours"
+            let sourceLabel =
+                outcome.importedSources.isEmpty
+                ? "local stores"
+                : outcome.importedSources.joined(separator: " and ")
+            post(
+                "Imported \(outcome.books.formatted()) books and "
+                    + "\(outcome.annotations.formatted()) annotations "
+                    + "from \(sourceLabel).",
+                enabled: announce)
+            if !failures.isEmpty {
+                status = "Import partially completed. Some archived records may be out of date."
+            }
+        } else if !outcome.importedSources.isEmpty {
+            status = "The local stores are empty."
+            post(
+                "The local Kindle or Apple Books stores are empty.",
+                enabled: announce)
+        } else if failures.isEmpty {
+            status = "No local Kindle or Apple Books stores found."
+            post(
+                "No local Kindle or Apple Books stores were found.",
+                enabled: announce)
+        } else {
+            status = failures.first?.summary ?? "Library import failed."
+            post(status, seconds: 12)
+        }
+        if let accessGeneration {
+            permissions?.completeLibrarySetup(
+                importedSources: outcome.committedSources,
+                failures: failures, generation: accessGeneration)
+        }
     }
 
     /// Awaits the running import and any import queued behind it.
@@ -715,9 +687,10 @@ public final class AppModel: ObservableObject {
     /// machine delays the answer instead of failing the wait. A test that
     /// calls this and then asserts a post-condition cannot race the import.
     public func awaitImportCompletion() async {
-        while isImporting, let task = importTask {
-            await task.value
-        }
+        await libraryImportSession.waitForCompletion()
+        // The import task starts the archive reload; awaiting the import
+        // alone would return with stale books and counts.
+        await reloadTask?.value
     }
 
     /// A short-lived message for the sidebar footer.
@@ -839,18 +812,29 @@ public final class AppModel: ObservableObject {
     public func refreshActivity() {
         guard let archive else { return }
         recoverSettingsIfNeeded()
+        activityGeneration += 1
+        let generation = activityGeneration
         Task {
-            let sessions = try? await Task.detached(operation: {
-                try archive.sessions()
-            }).value
-            if let sessions {
+            do {
+                let sessions = try await Task.detached(operation: {
+                    try archive.sessions()
+                }).value
+                guard generation == self.activityGeneration else { return }
                 self.sessions = sessions
+            } catch {
+                self.post(
+                    "Could not refresh reading sessions: \(error)",
+                    seconds: 12)
             }
-            let captures = try? await Task.detached(operation: {
-                try archive.captures()
-            }).value
-            if let captures {
+            do {
+                let captures = try await Task.detached(operation: {
+                    try archive.captures()
+                }).value
+                guard generation == self.activityGeneration else { return }
                 self.captures = captures
+            } catch {
+                self.post(
+                    "Could not refresh captures: \(error)", seconds: 12)
             }
         }
     }
@@ -863,17 +847,21 @@ public final class AppModel: ObservableObject {
         selectedBookOriginal = nil
         originalNote = nil
         guard let book = selectedBook else { return }
+        // Check the same stores this model imports from, not the defaults:
+        // launch arguments and injected paths must not be bypassed.
+        let kindlePaths = kindleImportPaths
+        let booksPaths = booksImportPaths
         Task.detached { [weak self] in
             let availability: OriginalAvailability
             var note: String?
             switch book.source {
             case .kindle:
                 availability = OriginalDetector.kindle(
-                    asin: book.asin, paths: KindlePaths.standard())
+                    asin: book.asin, paths: kindlePaths)
             case .appleBooks:
                 do {
-                    if let asset = try BooksAssetReader().asset(
-                        for: book.asin)
+                    if let asset = try BooksAssetReader(paths: booksPaths)
+                        .asset(for: book.asin)
                     {
                         availability = OriginalDetector.books(asset: asset)
                         note = asset.warnings.first
@@ -1073,6 +1061,22 @@ public final class AppModel: ObservableObject {
         sessionLogger?.start()
     }
 
+    /// Start tracking one chosen book, replacing any other tracked title.
+    /// The library's per-book button must switch the target, not stop the
+    /// book currently being tracked.
+    public func startTracking(_ book: Book) {
+        guard book.source == .kindle else {
+            post(
+                "Reading sessions follow the live Kindle page. Select a "
+                    + "Kindle book first.")
+            return
+        }
+        trackedBookID = book.asin
+        settings.sessionLogging = true
+        sessionLogger?.setBook(book.asin)
+        sessionLogger?.start()
+    }
+
     private func applyTracking() {
         if settings.sessionLogging, let trackedBookID {
             sessionLogger?.setBook(trackedBookID)
@@ -1125,7 +1129,9 @@ public final class AppModel: ObservableObject {
 
     public func startCapture(pages: Int?) {
         guard let archive else { return }
-        guard capturePhase != .running else { return }
+        guard capturePhase != .running, !captureSession.isRunning else {
+            return
+        }
         refreshPermissions()
         guard !permissionsNeeded else {
             requestCaptureAccess(pages: pages)
@@ -1153,7 +1159,6 @@ public final class AppModel: ObservableObject {
         capturePageSetup = nil
         captureDirectory = folder
         let flag = CancellationFlag()
-        activeCaptureFlag = flag
         let cleanPolicy: CleanPagePolicy =
             settings.cleanPageDuringCapture ? .hidePopularHighlights
                 : .asDisplayed
@@ -1168,47 +1173,39 @@ public final class AppModel: ObservableObject {
             cropTop: settings.captureCropTop,
             cropBottom: settings.booksCropBottom)
         let bundleOptions = settings.captureBundleOptions
-        Task {
-            do {
-                let result = try await Task.detached {
-                    let engine = CaptureEngine(archive: archive)
-                    return try engine.capture(
-                        book: book,
-                        kind: kind,
-                        pageLimit: pages,
-                        output: folder,
-                        progress: { progress in
-                            Task { @MainActor [self] in
-                                self.captureProgress = progress.fraction
-                                self.captureMessage = progress.message
-                            }
-                        },
-                        isCancelled: { flag.isSet },
-                        cleanPage: kind == .kindle ? cleanPolicy : .asDisplayed,
-                        pageSetup: kind == .kindle ? setup : booksSetup,
-                        bundle: CaptureBundleRequest(
-                            options: bundleOptions))
-                }.value
-                self.capturePhase = .finished
-                self.captureProgress = 1
-                self.captureMessage =
-                    "\(result.pages) pages · \(result.title)"
-                self.capturePDF = result.pdf
-                self.captureCleanPage = result.cleanPage
-                self.capturePageSetup = result.pageSetup
-                self.captureDirectory = result.directory
-                self.activeCaptureFlag = nil
-                self.reloadFromArchive()
-            } catch {
-                self.capturePhase = .failed
-                self.captureMessage = "\(error)"
-                self.activeCaptureFlag = nil
-            }
-        }
+        let request = CaptureCoordinator.Request(
+            archive: archive, book: book, kind: kind, pageLimit: pages,
+            output: folder, cleanPage: cleanPolicy, pageSetup: setup,
+            booksPageSetup: booksSetup, bundleOptions: bundleOptions,
+            cancellation: flag)
+        captureSession.start(
+            request,
+            progress: { [weak self] progress in
+                self?.captureProgress = progress.fraction
+                self?.captureMessage = progress.message
+            },
+            completion: { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success(let result):
+                    self.capturePhase = .finished
+                    self.captureProgress = 1
+                    self.captureMessage =
+                        "\(result.pages) pages · \(result.title)"
+                    self.capturePDF = result.pdf
+                    self.captureCleanPage = result.cleanPage
+                    self.capturePageSetup = result.pageSetup
+                    self.captureDirectory = result.directory
+                    self.reloadFromArchive()
+                case .failure(let error):
+                    self.capturePhase = .failed
+                    self.captureMessage = "\(error)"
+                }
+            })
     }
 
     public func cancelCapture() {
-        activeCaptureFlag?.set()
+        captureSession.cancel()
         captureMessage = "Cancelling after this page…"
     }
 
@@ -1274,13 +1271,6 @@ public final class AppModel: ObservableObject {
     }
 }
 
-@MainActor
-public final class AppEnvironment {
-    public static let shared = AppEnvironment()
-    public let model = AppModel()
-    private init() {}
-}
-
 /// A bounded resume bookmark, never a capture job. It contains only the book
 /// identity, page limit and capture preferences; no provider credentials.
 private struct CaptureAccessDraft: Codable {
@@ -1304,12 +1294,16 @@ private struct CaptureAccessOptions: Codable {
     let cleanPage: Bool
     let includeCover: Bool
     let writeSidecars: Bool
+    /// Optional so a bookmark written before the reader choice existed still
+    /// decodes.
+    let captureReader: CaptureReader?
     init(_ settings: AISettings) {
         pageSize = settings.capturePageSize; fontSize = settings.captureFontSize
         booksFontSteps = settings.booksFontSteps; cropTop = settings.captureCropTop
         booksCropBottom = settings.booksCropBottom; kindleCropBottom = settings.kindleCropBottom
         cleanPage = settings.cleanPageDuringCapture; includeCover = settings.includeCoverPage
         writeSidecars = settings.writeSidecars
+        captureReader = settings.captureReader
     }
     func restore(into value: inout AISettings) {
         value.capturePageSize = pageSize; value.captureFontSize = fontSize
@@ -1317,5 +1311,6 @@ private struct CaptureAccessOptions: Codable {
         value.booksCropBottom = booksCropBottom; value.kindleCropBottom = kindleCropBottom
         value.cleanPageDuringCapture = cleanPage; value.includeCoverPage = includeCover
         value.writeSidecars = writeSidecars
+        if let captureReader { value.captureReader = captureReader }
     }
 }

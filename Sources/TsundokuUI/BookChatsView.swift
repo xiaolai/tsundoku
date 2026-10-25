@@ -15,9 +15,20 @@ struct BookChatsView: View {
     @State private var turns: [ConversationTurn] = []
     @State private var isLoading = true
     @State private var loadingTurns = false
-    @State private var error: String?
+    /// Two errors, not one: a transcript load completing after a failed
+    /// summary load must not hide why the sidebar is stale.
+    @State private var summariesError: String?
+    @State private var turnsError: String?
+
+    private var error: String? { summariesError ?? turnsError }
     @State private var turnsGeneration = 0
+    @State private var summariesGeneration = 0
     @State private var incompleteCaptures = false
+    /// Fingerprints are expensive to rebuild. They change only when this
+    /// book's captures change, not when a turn is appended.
+    @State private var captureCache: (
+        captures: [CaptureRecord], fingerprints: [String], incomplete: Bool
+    )?
 
     /// `livePage` tracks Kindle only, so it cannot decide whether an Apple
     /// Books book is open. The companion itself chooses the frontmost reader;
@@ -59,7 +70,7 @@ struct BookChatsView: View {
                 // loadSummaries here would run the query twice.
                 model.refreshConversationCounts()
             } catch {
-                self.error = "Could not file this chat: \(error)"
+                self.turnsError = "Could not file this chat: \(error)"
             }
         }
     }
@@ -86,10 +97,16 @@ struct BookChatsView: View {
         }
         .onChange(of: model.conversationCounts) { _, _ in
             // The companion can store an answer while this view is open;
-            // refresh both the list and the selected transcript.
+            // refresh both the list and the selected transcript. A changed
+            // selection has its own handler, so do not load turns twice.
             Task {
+                let previousSelection = selectedID
                 await loadSummaries()
-                if let id = selectedID { await loadTurns(id) }
+                guard summariesError == nil,
+                    selectedID == previousSelection,
+                    let id = selectedID
+                else { return }
+                await loadTurns(id)
             }
         }
     }
@@ -278,46 +295,74 @@ struct BookChatsView: View {
 
     private func loadSummaries() async {
         isLoading = true
-        error = nil
+        summariesError = nil
         guard let archive = model.archive else {
             isLoading = false
-            error = "The archive is not open."
+            summariesError = "The archive is not open."
             return
         }
+        summariesGeneration += 1
+        let generation = summariesGeneration
+        let cachedCache = captureCache
         do {
             let loaded = try await Task.detached {
-                () -> (rows: [ConversationSummary], incomplete: Bool) in
-                let all = try archive.conversations()
+                () -> (
+                    rows: [ConversationSummary], incomplete: Bool,
+                    captures: [CaptureRecord], fingerprints: [String],
+                    usedCache: Bool
+                ) in
                 var incomplete = false
-                let captures: [CaptureRecord]
+                let allCaptures: [CaptureRecord]
                 do {
-                    captures = try archive.captures()
+                    allCaptures = try archive.captures()
                 } catch {
-                    captures = []
+                    allCaptures = []
                     incomplete = true
                 }
-                var fingerprints: [String] = []
-                for capture in captures
-                where capture.asin.caseInsensitiveCompare(book.asin)
-                    == .orderedSame
-                {
-                    do {
-                        let index = try BookTextIndex.load(
-                            directory: URL(
-                                fileURLWithPath: capture.directory))
-                        fingerprints.append(index.fingerprint)
-                    } catch {
-                        incomplete = true
+                let captures = allCaptures
+                    .filter {
+                        $0.asin.caseInsensitiveCompare(book.asin)
+                            == .orderedSame
+                    }
+                    .sorted { $0.id < $1.id }
+                let cached = cachedCache.flatMap {
+                    $0.captures == captures ? $0 : nil
+                }
+                var fingerprints = cached?.fingerprints ?? []
+                if let cached {
+                    incomplete = incomplete || cached.incomplete
+                } else {
+                    for capture in captures {
+                        do {
+                            let index = try BookTextIndex.load(
+                                directory: URL(
+                                    fileURLWithPath: capture.directory))
+                            fingerprints.append(index.fingerprint)
+                        } catch {
+                            incomplete = true
+                        }
                     }
                 }
                 let keys = ConversationFiling.keys(
                     for: book, captureFingerprints: fingerprints)
+                // Query only this book's keys. Include the stored spelling of
+                // the ASIN for a conversation filed before canonical casing.
+                var queryKeys = keys
+                queryKeys.insert(book.asin.lowercased())
+                let rows = try archive.conversations(
+                    bookKeys: queryKeys, includeLastAnswer: false)
                 return (
-                    all.filter {
-                        ConversationFiling.matches($0.conversation, keys: keys)
+                    rows.filter {
+                        ConversationFiling.matches(
+                            $0.conversation, keys: keys)
                     },
-                    incomplete)
+                    incomplete, captures, fingerprints, cached != nil)
             }.value
+            guard generation == summariesGeneration else { return }
+            if !loaded.usedCache {
+                captureCache = (
+                    loaded.captures, loaded.fingerprints, loaded.incomplete)
+            }
             summaries = loaded.rows
             incompleteCaptures = loaded.incomplete
             isLoading = false
@@ -327,8 +372,9 @@ struct BookChatsView: View {
                 selectedID = loaded.rows.first?.id
             }
         } catch {
+            guard generation == summariesGeneration else { return }
             isLoading = false
-            self.error = "\(error)"
+            self.summariesError = "\(error)"
         }
     }
 
@@ -337,7 +383,7 @@ struct BookChatsView: View {
         turnsGeneration += 1
         let generation = turnsGeneration
         loadingTurns = true
-        error = nil
+        turnsError = nil
         do {
             let loaded = try await Task.detached {
                 try archive.conversationTurns(conversationID: id)
@@ -350,7 +396,7 @@ struct BookChatsView: View {
         } catch {
             guard generation == turnsGeneration else { return }
             loadingTurns = false
-            self.error = "\(error)"
+            self.turnsError = "\(error)"
         }
     }
 }

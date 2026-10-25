@@ -29,6 +29,12 @@ public struct LibraryView: View {
         }
     }
 
+    private func resetFilters() {
+        model.search = ""
+        model.sourceFilter = .all
+        scope = .all
+    }
+
     private var rows: [Book] {
         var result = model.filteredBooks.filter { book in
             switch scope {
@@ -102,6 +108,7 @@ public struct LibraryView: View {
             if model.bookWorkspaceID == nil {
                 if command == "inspector" { showInspector.toggle() }
                 if command == "open", let book = model.selectedBook {
+                    model.bookWorkspaceSection = .annotations
                     model.bookWorkspaceID = book.asin
                 }
             }
@@ -109,15 +116,16 @@ public struct LibraryView: View {
     }
 
     private var bookList: some View {
-        Group {
+        // One filtered, sorted snapshot per evaluation: the empty check, the
+        // table and the footer all read the same rows.
+        let rows = self.rows
+        return Group {
             if rows.isEmpty {
                 LibraryEmptyState(
                     model: model, annotations: false,
                     hasImportedRecords: !model.books.isEmpty
                 ) {
-                    model.search = ""
-                    model.sourceFilter = .all
-                    scope = .all
+                    resetFilters()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -192,17 +200,14 @@ public struct LibraryView: View {
                         IconButton(
                             "Open Annotations", systemImage: "book.pages"
                         ) {
+                            model.bookWorkspaceSection = .annotations
                             model.bookWorkspaceID = model.selectedBookID
                         }
                         .disabled(model.selectedBookID == nil)
                         IconButton(
                             "Reset Filters",
                             systemImage: "line.3.horizontal.decrease.circle"
-                        ) {
-                            model.search = ""
-                            model.sourceFilter = .all
-                            scope = .all
-                        }
+                        ) { resetFilters() }
                     }.padding(10)
                 }
             }
@@ -365,14 +370,19 @@ struct BookDetailView: View {
                                 model.showAIPanel()
                             }
                             if book.source == .kindle {
-                                IconButton(
+                                let isTracking =
                                     model.trackedBookID == book.asin
+                                IconButton(
+                                    isTracking
                                         ? "Stop Tracking" : "Track Reading",
-                                    systemImage: model.trackedBookID
-                                        == book.asin
+                                    systemImage: isTracking
                                         ? "stop.circle" : "record.circle"
                                 ) {
-                                    model.toggleTracking()
+                                    if isTracking {
+                                        model.toggleTracking()
+                                    } else {
+                                        model.startTracking(book)
+                                    }
                                 }
                             }
                             IconButton(
