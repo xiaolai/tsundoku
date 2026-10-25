@@ -91,6 +91,31 @@ public struct SettingsView: View {
                             Text(note).font(.caption)
                                 .foregroundStyle(.secondary)
                         }
+                        // The key comes before the model: fetching the
+                        // catalogue and testing the connection both need it,
+                        // and a reader should not meet a model picker that
+                        // cannot work yet.
+                        SecureField("API Key", text: $providerState.draftKey)
+                            .accessibilityIdentifier("provider-api-key")
+                            .disabled(providerState.testing)
+                            .help("Stored in the Keychain, one key per service. Environment variables and .env files are not read.")
+                            .onSubmit {
+                                providerState.saveKey(
+                                    profileID: model.settings.httpProfileID)
+                            }
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(providerState.keyStatus.isEmpty && providerState.hasUnsavedKey ? "Unsaved key" : providerState.keyStatus)
+                                Text("Stored in the Keychain, one key per service; environment variables are not read.")
+                            }
+                            .font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Save Key") {
+                                providerState.saveKey(
+                                    profileID: model.settings.httpProfileID)
+                            }
+                            .disabled(!providerState.hasUnsavedKey || providerState.testing)
+                        }
                     }
 
                     HStack {
@@ -128,29 +153,6 @@ public struct SettingsView: View {
                     {
                         Text(providerState.modelStatus).font(.caption)
                             .foregroundStyle(.secondary)
-                    }
-                    if model.settings.provider == .http {
-                        SecureField("API Key", text: $providerState.draftKey)
-                            .accessibilityIdentifier("provider-api-key")
-                            .disabled(providerState.testing)
-                            .help("Stored in the Keychain, one key per service. Environment variables and .env files are not read.")
-                            .onSubmit {
-                                providerState.saveKey(
-                                    profileID: model.settings.httpProfileID)
-                            }
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(providerState.keyStatus.isEmpty && providerState.hasUnsavedKey ? "Unsaved key" : providerState.keyStatus)
-                                Text("Stored in the Keychain, one key per service; environment variables are not read.")
-                            }
-                            .font(.caption).foregroundStyle(.secondary)
-                            Spacer()
-                            Button("Save Key") {
-                                providerState.saveKey(
-                                    profileID: model.settings.httpProfileID)
-                            }
-                            .disabled(!providerState.hasUnsavedKey || providerState.testing)
-                        }
                     }
                     TextField(
                         "Answer Language", text: $model.settings.language
