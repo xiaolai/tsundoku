@@ -74,7 +74,10 @@ final class CompanionWindow {
         // companion uses the same system shadow, following the opaque rounded
         // content and the transparent corners.
         window.hasShadow = true
-        window.level = .floating
+        // The placement decides the level; `setLevel` is called before every
+        // show. A drawer beside the reader belongs to the normal layer, an
+        // overlay that crosses the reader's window must stay above it.
+        window.level = .normal
         window.collectionBehavior = [
             .canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle,
         ]
@@ -114,6 +117,17 @@ final class CompanionWindow {
     var frame: CGRect { window.frame }
 
     var isVisible: Bool { window.isVisible }
+
+    /// **The level is the layer.** macOS has no cross-process window tree: a
+    /// window is ordered by its level and whether its app is active. A drawer
+    /// that sits outside the reader's frame is put in the normal layer, so
+    /// whatever covers the reader covers it too; an overlay or corner trigger
+    /// crosses the reader's window and must float above it, where the reader's
+    /// focus-gated visibility is what keeps it off other apps.
+    func setLevel(_ level: NSWindow.Level) {
+        guard window.level != level else { return }
+        window.level = level
+    }
 
     func setContent(_ content: AnyView, shape: CompanionHitShape) {
         container.hitShape = shape

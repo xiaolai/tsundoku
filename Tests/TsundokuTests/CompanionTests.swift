@@ -35,6 +35,17 @@ private func layout(
 
 @Suite("Companion geometry")
 struct CompanionGeometryTests {
+    @Test("only a placement that crosses the reader floats above it")
+    func onlyOverlaysFloat() {
+        // The window layer follows this: a drawer outside the reader stays in
+        // the normal layer, covered together with the reader; an overlay or a
+        // corner trigger crosses the reader's window and must float.
+        #expect(!CompanionLayout.Mode.side.isOverlay)
+        #expect(!CompanionLayout.Mode.bottom.isOverlay)
+        #expect(CompanionLayout.Mode.sideOverlay.isOverlay)
+        #expect(CompanionLayout.Mode.corner.isOverlay)
+    }
+
     @Test("a portrait reader gets a side drawer exactly its height")
     func portraitSide() {
         let result = layout(CGRect(x: 100, y: 40, width: 700, height: 1000))

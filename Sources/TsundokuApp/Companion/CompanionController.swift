@@ -203,6 +203,7 @@ final class CompanionController {
             window.setFrame(
                 layout.triggerFrame, animated: animated && previous != .hidden,
                 reduceMotion: reduceMotion)
+            window.setLevel(layout.mode.isOverlay ? .floating : .normal)
             window.show()
         case .panel:
             guard let layout = output.layout, let model = panelModel else {
@@ -231,6 +232,7 @@ final class CompanionController {
             window.setFrame(
                 layout.panelFrame, animated: animated && previous != .hidden,
                 reduceMotion: reduceMotion)
+            window.setLevel(layout.mode.isOverlay ? .floating : .normal)
             window.show()
         }
         if output.presentation != .panel && previous == .panel {
