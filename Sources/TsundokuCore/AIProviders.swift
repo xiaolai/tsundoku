@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import SaySoAI
 import SaySoAICLI
@@ -158,36 +157,6 @@ public enum AIService {
                     timeout: .seconds(240), answerSchema: answerSchema)))
     }
 
-    /// Where the app looks for a CLI: the inherited `PATH`, then the folders an
-    /// installer uses and a Finder-launched app does not inherit. Resolving it
-    /// here gives a missing Codex the honest `.notInstalled`; sayso's own probe
-    /// reports that case as an opaque framework error.
-    public static func findCLI(_ name: String) -> URL? {
-        var candidates =
-            (ProcessInfo.processInfo.environment["PATH"] ?? "")
-            .split(separator: ":")
-            .map {
-                URL(fileURLWithPath: String($0))
-                    .appendingPathComponent(name)
-            }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let folders = [
-            home.appendingPathComponent(".local/bin"),
-            home.appendingPathComponent("bin"),
-            home.appendingPathComponent(".npm-global/bin"),
-            home.appendingPathComponent(".volta/bin"),
-            home.appendingPathComponent(".bun/bin"),
-            home.appendingPathComponent("Library/pnpm"),
-            URL(fileURLWithPath: "/opt/homebrew/bin"),
-            URL(fileURLWithPath: "/usr/local/bin"),
-            URL(fileURLWithPath: "/usr/bin"),
-        ]
-        candidates += folders.map { $0.appendingPathComponent(name) }
-        return candidates.first {
-            FileManager.default.isExecutableFile(atPath: $0.path)
-        }
-    }
-
     /// Claude Code keeps its sign-in in the Keychain slot it derives from
     /// `CLAUDE_CONFIG_DIR` and has no non-interactive login, so an app-owned
     /// folder would demand a second sign-in no code can complete. The reader's
@@ -206,46 +175,15 @@ public enum AIService {
     static func codexProvider(_ settings: AISettings) throws
         -> any AIProvider
     {
-        guard let executable = findCLI("codex") else {
-            throw AIProviderError.notInstalled
-        }
-        // sayso's probe reads the sign-in before it prepares the folders, and a
-        // home that does not exist yet fails the probe as an opaque framework
-        // error. Make it first, private, with the rules sayso would check.
-        try ensurePrivateFolder(codexHome())
-        try ensurePrivateFolder(providerWorkingDirectory())
-        return try CodexCLIProvider(
+        // sayso creates and checks the app's own home before it probes the
+        // sign-in (v0.5.1); a missing binary and a missing home are its
+        // `.notInstalled` and `.notSignedIn`, not the app's to pre-detect.
+        try CodexCLIProvider(
             configuration: CodexCLIProvider.Configuration(
-                executable: executable,
                 codexHome: codexHome(),
                 workingDirectory: providerWorkingDirectory(),
                 model: settings.model.isEmpty ? nil : settings.model,
                 timeout: .seconds(240)))
-    }
-
-    /// A folder the app owns alone: the CLI writes a credential into it, so a
-    /// folder another user could write to (or a symlink to one) is refused, not
-    /// repaired.
-    static func ensurePrivateFolder(_ url: URL) throws {
-        let manager = FileManager.default
-        if !manager.fileExists(atPath: url.path) {
-            do {
-                try manager.createDirectory(
-                    at: url, withIntermediateDirectories: true,
-                    attributes: [.posixPermissions: 0o700])
-            } catch {
-                throw AIProviderError.framework(
-                    "Could not create the app's AI folder.")
-            }
-        }
-        var info = stat()
-        guard
-            lstat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
-            info.st_uid == getuid(), info.st_mode & 0o022 == 0
-        else {
-            throw AIProviderError.framework(
-                "The app's AI folder at \(url.path) is not private. Remove it and try again.")
-        }
     }
 
     /// The app's own Codex home. sayso refuses a folder other users can write
