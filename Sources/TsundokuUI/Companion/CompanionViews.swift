@@ -152,6 +152,10 @@ public struct CompanionSettingsSection: View {
                 }
             }
             Toggle("Start at login", isOn: $store.settings.launchAtLogin)
+            Toggle(
+                "Match the reader's typography",
+                isOn: $store.settings.matchReaderTypography
+            )
             if !store.loginItemStatus.isEmpty
                 && !["Not registered", "Enabled"].contains(
                     store.loginItemStatus)

@@ -17,6 +17,9 @@ public final class AIPanelModel: ObservableObject {
     @Published public var pageText = ""
     @Published public var bookTitle = ""
     @Published public var answer = ""
+    /// The reader's typography, when it could be sampled; nil keeps the
+    /// panel's own body style.
+    @Published public var textStyle: CompanionTextStyle?
     @Published public var action: AIAction = .explain
     @Published public var question = "" {
         didSet {
@@ -501,7 +504,7 @@ public struct AIPanelView: View {
                     }
                 case .ready:
                     ScrollView {
-                        MarkdownText(text: model.answer)
+                        MarkdownText(text: model.answer, style: model.textStyle)
                             .textSelection(.enabled)
                             .frame(
                                 maxWidth: .infinity, alignment: .leading)
@@ -679,6 +682,17 @@ public final class ActivatingField: NSTextField {
 
 struct MarkdownText: View {
     let text: String
+    var style: CompanionTextStyle? = nil
+
+    private var font: Font {
+        guard let style else { return .body }
+        if let family = style.family {
+            return .custom(family, size: style.size)
+        }
+        return .system(size: style.size)
+    }
+
+    private var lineSpacing: CGFloat { style?.lineSpacing ?? 3 }
 
     var body: some View {
         if let attributed = try? AttributedString(
@@ -687,12 +701,12 @@ struct MarkdownText: View {
                 interpretedSyntax: .inlineOnlyPreservingWhitespace))
         {
             Text(attributed)
-                .font(.body)
-                .lineSpacing(3)
+                .font(font)
+                .lineSpacing(lineSpacing)
         } else {
             Text(text)
-                .font(.body)
-                .lineSpacing(3)
+                .font(font)
+                .lineSpacing(lineSpacing)
         }
     }
 }

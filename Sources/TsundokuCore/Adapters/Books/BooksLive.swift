@@ -440,6 +440,62 @@ public enum BooksLive {
             == .orderedSame
     }
 
+    /// The body face of the reading window: the (family, size) covering the
+    /// most characters. Books publishes `AXFont` on every attributed run, so
+    /// headings and code lose by weight rather than by a role check.
+    public static func bodyFace(in window: BooksReaderWindow)
+        -> (family: String, size: CGFloat)?
+    {
+        var samples: [AXFontSample] = []
+        var visited = Set<CFHashCode>()
+        func walk(_ element: AXUIElement, _ depth: Int) {
+            guard depth < 24, visited.insert(CFHash(element)).inserted,
+                samples.count < 80
+            else { return }
+            let text = stringAttribute(element, kAXValueAttribute) ?? ""
+            if text.count >= 20, let face = fontFace(of: element) {
+                samples.append(
+                    AXFontSample(
+                        family: face.family, size: face.size,
+                        characters: text.count))
+            }
+            for child in children(element) { walk(child, depth + 1) }
+        }
+        walk(window.element, 0)
+        return AXFontFace.bodyFace(from: samples)
+    }
+
+    private static func fontFace(of element: AXUIElement)
+        -> (family: String, size: CGFloat)?
+    {
+        // The range is bounded: only the first run is needed, and a page-sized
+        // attributed string is expensive to build.
+        var range = CFRange(location: 0, length: 64)
+        guard let value = AXValueCreate(.cfRange, &range) else { return nil }
+        var out: CFTypeRef?
+        guard
+            AXUIElementCopyParameterizedAttributeValue(
+                element,
+                kAXAttributedStringForRangeParameterizedAttribute as CFString,
+                value, &out) == .success,
+            let attributed = out as? NSAttributedString,
+            attributed.length > 0
+        else { return nil }
+        var face: (family: String, size: CGFloat)?
+        attributed.enumerateAttribute(
+            NSAttributedString.Key("AXFont"),
+            in: NSRange(location: 0, length: attributed.length)
+        ) { value, _, stop in
+            if let font = value as? [String: Any],
+                let parsed = AXFontFace.parse(font: font)
+            {
+                face = parsed
+                stop.pointee = true
+            }
+        }
+        return face
+    }
+
     /// Recognise text in a captured spread. Only used for measurement and the
     /// OCR fallback; the caller labels the result.
     public static func recognizeText(in image: CGImage) throws -> String {

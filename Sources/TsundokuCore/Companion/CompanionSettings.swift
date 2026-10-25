@@ -174,17 +174,53 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
     public var triggerPlacement: TriggerPlacement
     public var launchAtLogin: Bool
     public var hotKey: CompanionHotKey
+    /// Follow the reading surface's type in the panel's answer text. Off
+    /// keeps the panel's own body style.
+    public var matchReaderTypography: Bool
 
     public init(
         panelPlacement: PanelPlacement = .auto,
         triggerPlacement: TriggerPlacement = .auto,
         launchAtLogin: Bool = false,
-        hotKey: CompanionHotKey = .defaultShortcut
+        hotKey: CompanionHotKey = .defaultShortcut,
+        matchReaderTypography: Bool = true
     ) {
         self.panelPlacement = panelPlacement
         self.triggerPlacement = triggerPlacement
         self.launchAtLogin = launchAtLogin
         self.hotKey = hotKey
+        self.matchReaderTypography = matchReaderTypography
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case panelPlacement, triggerPlacement, launchAtLogin, hotKey
+        case matchReaderTypography
+    }
+
+    /// Decodes every missing field to its default, so a blob written before a
+    /// setting existed does not reset the others.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = CompanionSettings()
+        panelPlacement =
+            try container.decodeIfPresent(
+                PanelPlacement.self, forKey: .panelPlacement)
+            ?? defaults.panelPlacement
+        triggerPlacement =
+            try container.decodeIfPresent(
+                TriggerPlacement.self, forKey: .triggerPlacement)
+            ?? defaults.triggerPlacement
+        launchAtLogin =
+            try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin)
+            ?? defaults.launchAtLogin
+        hotKey =
+            try container.decodeIfPresent(
+                CompanionHotKey.self, forKey: .hotKey)
+            ?? defaults.hotKey
+        matchReaderTypography =
+            try container.decodeIfPresent(
+                Bool.self, forKey: .matchReaderTypography)
+            ?? defaults.matchReaderTypography
     }
 
     public static let defaults = CompanionSettings()

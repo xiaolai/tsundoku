@@ -322,6 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         _ new: CompanionSettings, userInitiated: Bool
     ) {
         guard companion != nil else { return }
+        companion?.refreshStyleForCurrentReader()
         guard !CommandLine.arguments.contains("--no-system-integrations") else { return }
         if appliedHotKey != new.hotKey {
             let status = hotKey.install(new.hotKey)

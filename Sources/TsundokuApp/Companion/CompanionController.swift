@@ -15,6 +15,9 @@ final class CompanionController {
     private var panelModel: AIPanelModel?
     private var panelIdentity: ReaderIdentity?
     private var reader: ReaderSnapshot?
+    private let styleSampler = ReaderStyleSampler()
+    private var styleTask: Task<Void, Never>?
+    private var styleGeneration = 0
     private var output = CompanionOutput(presentation: .hidden, layout: nil)
     private var lastAppliedOutput: CompanionOutput?
     private var lastSurface: CompanionOutput.Presentation = .hidden
@@ -81,6 +84,9 @@ final class CompanionController {
         }
         if output.presentation == .panel {
             preparePanelModelIfNeeded()
+            if snapshot != previousReader, let reader {
+                refreshReaderStyle(for: reader)
+            }
         }
         guard snapshot != previousReader || output != lastAppliedOutput else {
             return
@@ -311,14 +317,60 @@ final class CompanionController {
         panelModel = model
         panelIdentity = identity
         model.loadPage()
+        refreshReaderStyle(for: reader)
         TsundokuDiagnostics.shared.event(
             "ai_panel_model_created", ["reader": reader.kind.rawValue])
     }
 
     private func cancelPanelModel() {
+        styleGeneration += 1
+        styleTask?.cancel()
+        styleTask = nil
         panelModel?.cancel()
         panelModel = nil
         panelIdentity = nil
+    }
+
+    /// Sample the reader's type for the answer text. The sampler caches per
+    /// book window and size, so repeated calls are cheap.
+    private func refreshReaderStyle(for reader: ReaderSnapshot) {
+        guard settings.settings.matchReaderTypography else {
+            styleGeneration += 1
+            styleTask?.cancel()
+            styleTask = nil
+            panelModel?.textStyle = nil
+            return
+        }
+        styleGeneration += 1
+        let generation = styleGeneration
+        styleTask?.cancel()
+        styleTask = Task { [weak self] in
+            guard let self else { return }
+            let sampled = await self.styleSampler.style(for: reader)
+            guard !Task.isCancelled, generation == self.styleGeneration
+            else { return }
+            let style = sampled.map { CompanionTypography.style(from: $0) }
+            self.panelModel?.textStyle = style
+            guard let sampled else { return }
+            TsundokuDiagnostics.shared.event(
+                "reader_style_sampled",
+                [
+                    "reader": reader.kind.rawValue,
+                    "origin": sampled.origin.rawValue,
+                    "family": sampled.family ?? "",
+                    "point_size": Double(sampled.pointSize),
+                    "line_pitch": Double(sampled.linePitch),
+                    "panel_size": style.map { Double($0.size) } ?? 0,
+                    "panel_spacing": style.map { Double($0.lineSpacing) } ?? 0,
+                ])
+        }
+    }
+
+    /// The setting changed while the panel is open: resample or drop the
+    /// style without waiting for the next reader event.
+    func refreshStyleForCurrentReader() {
+        guard output.presentation == .panel, let reader else { return }
+        refreshReaderStyle(for: reader)
     }
     // MARK: - Full screen
 
