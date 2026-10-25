@@ -19,6 +19,9 @@ public final class AIPanelModel: ObservableObject {
     /// What the next message is sent with. A page turn refreshes the page and
     /// page number; the book stays the same until the reader changes it.
     @Published public var context = AIContext.empty
+    /// How the current page's book was identified, for the info menu and
+    /// diagnostics. A nil key means the page stays unfiled.
+    @Published public var identity: ReadingIdentity?
     /// The conversation for this book, oldest first.
     @Published public var turns: [AITurn] = []
     /// Every conversation filed under the current book, newest first.
@@ -58,9 +61,50 @@ public final class AIPanelModel: ObservableObject {
         case answer
     }
 
+    /// What the pre-send page check found.
+    public enum PageFreshness: Equatable, Sendable {
+        case current
+        case refreshed(Int?)
+        case bookChanged
+        case unconfirmed
+    }
+
+    /// The answer transport, injectable so tests exercise the send path
+    /// without a provider or a network.
+    public typealias AnswerProvider = @Sendable (
+        AIRequest, AISettings
+    ) async throws -> AIAnswer
+
+    /// The local-index lookup, injectable so a test can supply an EPUB match
+    /// without a Books library or a real capture on disk.
+    public typealias ContextResolver = @Sendable (
+        ReaderPage, [CaptureRecord], Archive?
+    ) -> ReadingContextResolver.Result?
+
     private weak var app: AppModel?
     private let readerContext: any ReaderContext
+    private let contextResolver: ContextResolver
+    private let answerProvider: AnswerProvider
     private var pageTask: Task<Void, Never>?
+    /// The local-context lookup started by the current page load. Callers can
+    /// await the work itself instead of polling for its side effects.
+    public private(set) var localContextTask: Task<Void, Never>?
+    private var historyTask: Task<Void, Never>?
+    private var legacyMigrationTask: Task<Void, Never>?
+    private var followTask: Task<Void, Never>?
+    /// How often the open panel checks the reader for a page turn, and how
+    /// long it lets a page settle before moving the chips.
+    public var followInterval: Duration = .milliseconds(600)
+    public var followDebounce: Duration = .milliseconds(300)
+    /// The result of the latest pre-send page check, for tests and the status
+    /// line.
+    public private(set) var lastFreshness: PageFreshness?
+    /// A visible note when the page was refreshed, could not be confirmed, or
+    /// changed books between typing and sending.
+    @Published public var sendNote: String?
+    /// The pre-send check started by `run()`, so a caller can await it.
+    public private(set) var sendPreparationTask: Task<Void, Never>?
+    private var sendGeneration = 0
     private var pageWork: Task<ReaderPage, Error>?
     private var answerTask: Task<Void, Never>?
     private var selectionTask: Task<Void, Never>?
@@ -73,17 +117,50 @@ public final class AIPanelModel: ObservableObject {
     private var submittedRequest: AIRequest?
     private var submittedPrompt: String?
     private var submittedOnDevice = false
-    private var bookKey: String?
+    /// The key this page's conversation is filed under; nil while the page
+    /// is unidentified. Read-only outside the model.
+    public private(set) var bookKey: String?
 
-    public init(app: AppModel?, context: any ReaderContext) {
+    public init(
+        app: AppModel?, context: any ReaderContext,
+        contextResolver: @escaping ContextResolver = { page, captures, archive in
+            ReadingContextResolver.resolve(
+                pageText: page.text, kind: page.kind, title: page.title,
+                identifier: page.identifier, captures: captures,
+                archive: archive)
+        },
+        answerProvider: @escaping AnswerProvider = { request, settings in
+            try await AIService.answer(for: request, settings: settings)
+        }
+    ) {
         self.app = app
         self.readerContext = context
+        self.contextResolver = contextResolver
+        self.answerProvider = answerProvider
     }
 
     public convenience init(app: AppModel?) {
         let kind = ReaderContextLocator.preferredKind() ?? .kindle
         self.init(
             app: app, context: ReaderContextLocator.context(for: kind))
+    }
+
+    /// Waits for the current page load and the local-context lookup it
+    /// started. The work signals its own completion; there is no deadline.
+    public func awaitPageLoad() async {
+        await pageTask?.value
+        await localContextTask?.value
+        // A stronger identity re-loads the book's history; await that too, so
+        // the caller sees the settled conversation, not an empty one.
+        await legacyMigrationTask?.value
+        while let task = historyTask, historyLoading {
+            await task.value
+        }
+    }
+
+    /// Waits for the answer started by the last send, if any.
+    public func awaitAnswer() async {
+        await answerTask?.value
     }
 
     public var excerpt: String {
@@ -126,6 +203,43 @@ public final class AIPanelModel: ObservableObject {
             && !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// What the info menu says about identity and coverage.
+    ///
+    /// A missing chapter is explained by the absence of local text that
+    /// covers the page, and an unidentified page says where its chat stays,
+    /// instead of guessing a title or quietly dropping the context.
+    public var identityNote: String {
+        var notes: [String] = []
+        if let identity {
+            switch identity.rank {
+            case .sessionOnly:
+                notes.append(
+                    "This page could not be identified. The chat stays in "
+                        + "this window and is not saved to the library.")
+            case .captureText:
+                notes.append(
+                    "The book is identified by the captured page text.")
+            case .titleMatch:
+                notes.append(
+                    "The book is identified by its Books title; the page text "
+                        + "has not yet matched an EPUB edition.")
+            case .lastOpened, .archiveMatch:
+                if let title = identity.book?.title, !title.isEmpty {
+                    notes.append("Book: \(title).")
+                }
+            }
+        }
+        if context.chapter == nil, !pageText.isEmpty {
+            notes.append(
+                "No chapter: the local book text does not cover this page.")
+        }
+        if context.pageLabel == nil, readerKind == .appleBooks {
+            notes.append(
+                "Apple Books exposes no page number through Accessibility.")
+        }
+        return notes.joined(separator: " ")
+    }
+
     public var transmissionLabel: String {
         guard submittedRequest != nil else { return "Not sent" }
         if submittedOnDevice { return "Processed on this Mac" }
@@ -144,9 +258,17 @@ public final class AIPanelModel: ObservableObject {
         pageTask?.cancel()
         pageWork?.cancel()
         answerTask?.cancel()
+        localContextTask?.cancel()
+        followTask?.cancel()
+        sendPreparationTask?.cancel()
         pageTask = nil
         pageWork = nil
         answerTask = nil
+        localContextTask = nil
+        followTask = nil
+        sendPreparationTask = nil
+        sendGeneration += 1
+        sendNote = nil
         pageGeneration += 1
         answerGeneration += 1
         conversationGeneration += 1
@@ -186,23 +308,22 @@ public final class AIPanelModel: ObservableObject {
                 // either, the page is genuinely unidentified: the chat stays
                 // in memory instead of being filed under a placeholder and
                 // mixed with every other Kindle book.
-                let matched = self.matchedBook(for: page)
-                let identifier =
-                    page.identifier?.trimmingCharacters(
-                        in: .whitespacesAndNewlines) ?? ""
-                let placeholder =
-                    page.title.isEmpty || page.title == "Kindle"
-                let unidentifiedKindle =
-                    page.kind == .kindle && matched == nil
-                    && identifier.isEmpty && placeholder
-                let title =
-                    matched?.title
-                    ?? (unidentifiedKindle ? "" : page.title)
+                // The identity order is the plan's: archive match, Kindle's
+                // last-opened ASIN, capture text, Books title, session-only.
+                // The capture and EPUB facts arrive after the page is shown;
+                // `adopt` moves the key when they strengthen it.
+                let facts = ReadingLiveFacts(
+                    kind: page.kind, title: page.title,
+                    identifier: page.identifier)
+                let identity = ReadingIdentityResolver.resolve(
+                    facts: facts, books: self.app?.books ?? [])
+                self.identity = identity
+                let title = identity.title
                 self.bookTitle = title
                 self.context = AIContext(
                     bookTitle: title,
-                    bookSource: page.kind == .appleBooks
-                        ? .appleBooks : .kindle,
+                    bookSource: identity.book?.source
+                        ?? (page.kind == .appleBooks ? .appleBooks : .kindle),
                     reader: page.kind,
                     pageNumber: page.pageNumber,
                     pageCount: page.pageCount,
@@ -210,12 +331,7 @@ public final class AIPanelModel: ObservableObject {
                     excerpt: String(
                         page.text.prefix(600))
                         .trimmingCharacters(in: .whitespacesAndNewlines))
-                let key =
-                    unidentifiedKindle
-                    ? nil
-                    : ConversationKey.make(
-                        book: matched, reader: page.kind, title: title,
-                        identifier: page.identifier)
+                let key = identity.key
                 self.bookKey = key
                 TsundokuDiagnostics.shared.event(
                     "page_loaded",
@@ -245,7 +361,8 @@ public final class AIPanelModel: ObservableObject {
                     self.conversations = []
                     self.loadConversationHistory()
                 }
-                self.resolveLocalContext(page: page, matched: matched)
+                self.resolveLocalContext(page: page)
+                self.startFollowingPageTurns()
             } catch {
                 guard
                     let self, generation == self.pageGeneration
@@ -266,21 +383,19 @@ public final class AIPanelModel: ObservableObject {
     /// Resolves the page's chapter and page number from local text: a
     /// non-DRM EPUB's navigation for Books, a captured book's `text.jsonl`
     /// for either reader. Live Accessibility alone cannot supply either.
-    private func resolveLocalContext(page: ReaderPage, matched: Book?) {
+    private func resolveLocalContext(page: ReaderPage) {
         guard let app else { return }
         localContextGeneration += 1
         let generation = localContextGeneration
         // Read the captures from the archive, not the view model's copy:
         // the panel can open before the library reload has assigned it.
         let archive = app.archive
-        let identifier = matched?.asin ?? page.identifier
-        Task { [weak self] in
+        let books = app.books
+        let resolver = contextResolver
+        let task = Task { [weak self] in
             let result = await Task.detached {
                 let captures = (try? archive?.captures()) ?? []
-                return ReadingContextResolver.resolve(
-                    pageText: page.text, kind: page.kind, title: page.title,
-                    identifier: identifier, captures: captures,
-                    archive: archive)
+                return resolver(page, captures, archive)
             }.value
             guard let self, generation == self.localContextGeneration,
                 let result
@@ -293,18 +408,25 @@ public final class AIPanelModel: ObservableObject {
             {
                 self.context.pageNumber = pageNumber
             }
-            if self.bookKey == nil, let fingerprint = result.fingerprint {
-                self.bookKey = "text:\(fingerprint)"
-                if self.bookTitle.isEmpty,
-                    let record = result.capture,
-                    record.identityConfidence == "exact",
-                    !record.title.isEmpty
-                {
-                    self.bookTitle = record.title
-                    self.context.bookTitle = record.title
-                }
-                self.loadConversationHistory()
+            let capture = result.capture.flatMap { record
+                -> CaptureEvidence? in
+                guard let fingerprint = result.fingerprint,
+                    !fingerprint.isEmpty
+                else { return nil }
+                return CaptureEvidence(
+                    fingerprint: fingerprint, title: record.title,
+                    confidence: record.identityConfidence)
             }
+            let improved = ReadingIdentityResolver.resolve(
+                facts: ReadingLiveFacts(
+                    kind: page.kind, title: page.title,
+                    identifier: page.identifier, capture: capture,
+                    epubAssetID: result.assetID),
+                books: books)
+            self.adopt(improved, archive: archive)
+            self.migrateLegacyKeys(
+                improved, fingerprint: result.fingerprint,
+                liveTitle: page.title)
             TsundokuDiagnostics.shared.event(
                 "local_context_resolved",
                 [
@@ -312,8 +434,227 @@ public final class AIPanelModel: ObservableObject {
                     "page": result.pageNumber ?? -1,
                     "fingerprint": result.fingerprint ?? "",
                     "capture": result.capture?.directory ?? "",
+                    "asset_id": result.assetID ?? "",
+                    "identity_rank": improved.rank.rawValue,
+                    "identity_key": improved.key ?? "unidentified",
                 ])
         }
+        localContextTask = task
+    }
+
+    /// Moves chats filed under weaker keys that this page's text proves.
+    ///
+    /// The current page load only knows the key it started with. A thread
+    /// begun before the ASIN was readable lives under `text:<fingerprint>`; a
+    /// thread begun before an import lives under a Books title key. When the
+    /// stronger identity is established, those rows move to it — idempotently,
+    /// and only when the old key actually holds a conversation.
+    private func migrateLegacyKeys(
+        _ identity: ReadingIdentity, fingerprint: String?, liveTitle: String
+    ) {
+        guard let key = identity.key, identity.rank <= .lastOpened,
+            let archive = app?.archive
+        else { return }
+        var legacy: [String] = []
+        if let fingerprint, !fingerprint.isEmpty {
+            legacy.append("text:\(fingerprint)")
+        }
+        if !ReadingIdentityResolver.isPlaceholder(liveTitle) {
+            legacy.append("books:\(ConversationKey.normalize(liveTitle))")
+        }
+        let candidates = legacy.filter { $0 != key }
+        guard !candidates.isEmpty else { return }
+        let title = identity.title
+        let source = identity.book?.source
+        let task = Task { [weak self] in
+            let migrated = await Task.detached { () -> Bool in
+                var moved = false
+                for old in candidates {
+                    guard
+                        (try? archive.latestConversation(bookKey: old)) ?? nil
+                            != nil
+                    else { continue }
+                    do {
+                        try archive.migrateConversations(
+                            from: old, to: key, title: title, source: source)
+                        moved = true
+                    } catch {
+                        continue
+                    }
+                }
+                return moved
+            }.value
+            guard let self, migrated, self.bookKey == key else { return }
+            self.loadConversationHistory()
+        }
+        legacyMigrationTask = task
+    }
+
+    /// Adopts a stronger identity without starting a new conversation.
+    ///
+    /// A chat begun under a Books title or a capture fingerprint moves to the
+    /// ASIN/asset ID that the local text later proves, in place; no thread is
+    /// duplicated and no turn is lost. A weaker identity never replaces a
+    /// stronger one, so a page with less local evidence cannot steal another
+    /// book's history.
+    private func adopt(_ improved: ReadingIdentity, archive: Archive?) {
+        guard improved.rank <= (identity?.rank ?? .sessionOnly) else {
+            return
+        }
+        let previous = identity
+        identity = improved
+        guard let key = improved.key else {
+            if bookTitle.isEmpty, !improved.title.isEmpty {
+                bookTitle = improved.title
+                context.bookTitle = improved.title
+            }
+            return
+        }
+        if bookKey != key, let previousKey = previous?.key,
+            improved.rank < (previous?.rank ?? .sessionOnly)
+        {
+            do {
+                try archive?.migrateConversations(
+                    from: previousKey, to: key, title: improved.title,
+                    source: improved.book?.source)
+            } catch {
+                saveError =
+                    "Could not file this book's earlier chats: \(error)"
+            }
+            bookKey = key
+            bookTitle = improved.title
+            context.bookTitle = improved.title
+            turns = []
+            conversationID = nil
+            conversations = []
+            loadConversationHistory()
+            TsundokuDiagnostics.shared.event(
+                "book_identity_migrated",
+                ["from": previousKey, "to": key])
+        } else if bookKey == nil, previous?.key == nil {
+            // A session-only page gained a key: adopt it and load its history.
+            bookKey = key
+            bookTitle = improved.title
+            context.bookTitle = improved.title
+            loadConversationHistory()
+        } else if bookKey == key, bookTitle.isEmpty, !improved.title.isEmpty {
+            bookTitle = improved.title
+            context.bookTitle = improved.title
+        }
+    }
+
+    // MARK: - Page turns
+
+    /// Follows the reader's page while the panel is open.
+    ///
+    /// A page turn is detected by reading the live page, waiting one debounce
+    /// interval for the page to settle, and adopting the settled page. The
+    /// read runs off the main actor, so polling cannot stall typing.
+    private func startFollowingPageTurns() {
+        followTask?.cancel()
+        let reader = readerContext
+        followTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let interval =
+                    self?.followInterval ?? .milliseconds(600)
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
+                guard let self, !Task.isCancelled else { return }
+                await self.followPageOnce(reader: reader)
+            }
+        }
+    }
+
+    /// One follow step. Exposed so a test can drive page turns directly,
+    /// without a timer or a wall-clock wait.
+    public func followPageOnce() async {
+        await followPageOnce(reader: readerContext)
+    }
+
+    private func followPageOnce(reader: any ReaderContext) async {
+        guard phase != .loadingPage else { return }
+        let first = await Task.detached { try? reader.page() }.value
+        guard let first, !first.text.isEmpty else { return }
+        if samePage(first) {
+            // The page did not move, but a selection can change without one.
+            if first.selection != context.selection {
+                context.selection = first.selection
+            }
+            return
+        }
+        if followDebounce > .zero {
+            do {
+                try await Task.sleep(for: followDebounce)
+            } catch {
+                return
+            }
+        }
+        let settled = await Task.detached { try? reader.page() }.value
+        guard let settled, !settled.text.isEmpty, !samePage(settled) else {
+            return
+        }
+        applyPageTurn(settled)
+    }
+
+    private func samePage(_ page: ReaderPage) -> Bool {
+        page.text == pageText && page.identifier == pageIdentifier
+            && page.pageNumber == context.pageNumber
+    }
+
+    /// Adopts the settled page. A turn within a book keeps its conversation;
+    /// a turn that changes the book starts the new book's history and stops an
+    /// answer that belonged to the old one. A turn never rewrites an already
+    /// stored turn: its caption was snapshotted when it was sent.
+    private func applyPageTurn(_ page: ReaderPage) {
+        pageText = page.text
+        readerKind = page.kind
+        source = page.source
+        pageIdentifier = page.identifier
+        if phase == .failed, failureKind == .page {
+            phase = .idle
+            error = nil
+            failureKind = nil
+        }
+        let identity = ReadingIdentityResolver.resolve(
+            facts: ReadingLiveFacts(
+                kind: page.kind, title: page.title,
+                identifier: page.identifier),
+            books: app?.books ?? [])
+        let bookChanged = identity.key != bookKey
+        self.identity = identity
+        bookKey = identity.key
+        bookTitle = identity.title
+        context = AIContext(
+            bookTitle: identity.title,
+            bookSource: identity.book?.source
+                ?? (page.kind == .appleBooks ? .appleBooks : .kindle),
+            reader: page.kind,
+            pageNumber: page.pageNumber,
+            pageCount: page.pageCount,
+            selection: page.selection,
+            excerpt: String(page.text.prefix(600))
+                .trimmingCharacters(in: .whitespacesAndNewlines))
+        if bookChanged {
+            answerTask?.cancel()
+            answerTask = nil
+            answerGeneration += 1
+            if phase == .loadingAnswer { phase = .idle }
+            turns = []
+            conversationID = nil
+            conversations = []
+            loadConversationHistory()
+        }
+        resolveLocalContext(page: page)
+        TsundokuDiagnostics.shared.event(
+            "page_turn_followed",
+            [
+                "page": page.pageNumber ?? -1,
+                "book_changed": bookChanged,
+                "book_key": identity.key ?? "unidentified",
+            ])
     }
 
     /// Reads the live selection again, without reloading the page. Called when
@@ -342,6 +683,73 @@ public final class AIPanelModel: ObservableObject {
     public func run() {
         guard canRun else { return }
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        if action == .ask, text.isEmpty { return }
+        let requested = action
+        sendGeneration += 1
+        let generation = sendGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            let freshness = await self.confirmPageIsCurrent()
+            guard !Task.isCancelled, generation == self.sendGeneration else {
+                return
+            }
+            // A move to another book is not a page turn: the question was
+            // written about the book that is no longer on screen, so it must
+            // not be sent to the new one.
+            guard freshness != .bookChanged else { return }
+            self.startRequest(action: requested, question: text)
+        }
+        sendPreparationTask = task
+    }
+
+    /// Confirms the live page before a send, and adopts it when it moved.
+    ///
+    /// This is what makes a page turn followed by a send use the new page
+    /// even when the debounced follow has not caught up. An unreadable reader
+    /// keeps the page last read, with a visible note rather than a silent
+    /// stale send.
+    public func confirmPageIsCurrent() async -> PageFreshness {
+        guard !pageText.isEmpty, phase != .loadingPage else {
+            lastFreshness = .unconfirmed
+            return .unconfirmed
+        }
+        let reader = readerContext
+        let read = await Task.detached { try? reader.page() }.value
+        guard let read, !read.text.isEmpty else {
+            lastFreshness = .unconfirmed
+            sendNote =
+                "Could not confirm the page is current; the page last read "
+                + "will be sent."
+            return .unconfirmed
+        }
+        if samePage(read) {
+            // The page is current; a selection may still have changed since
+            // the last follow.
+            if read.selection != context.selection {
+                context.selection = read.selection
+            }
+            lastFreshness = .current
+            sendNote = nil
+            return .current
+        }
+        let previousKey = bookKey
+        applyPageTurn(read)
+        await localContextTask?.value
+        if bookKey != previousKey {
+            lastFreshness = .bookChanged
+            sendNote =
+                "The reader moved to another book; the page was reloaded. "
+                + "Send again if you meant the new page."
+            return .bookChanged
+        }
+        let label = read.pageNumber.map { "page \($0)" } ?? "the new page"
+        lastFreshness = .refreshed(read.pageNumber)
+        sendNote = "The page changed while you were typing; \(label) was sent."
+        return .refreshed(read.pageNumber)
+    }
+
+    private func startRequest(action: AIAction, question text: String) {
+        guard canRun else { return }
         if action == .ask, text.isEmpty { return }
         let settings = app?.settings ?? .defaults
         let request = AIRequest(
@@ -375,10 +783,10 @@ public final class AIPanelModel: ObservableObject {
         let turnContext = context
         let conversationAtSend = conversationID
         let conversationGenerationAtSend = conversationGeneration
+        let provider = answerProvider
         answerTask = Task { [weak self] in
             do {
-                let result = try await AIService.answer(
-                    for: request, settings: settings)
+                let result = try await provider(request, settings)
                 guard
                     let self, !Task.isCancelled,
                     generation == self.answerGeneration
@@ -453,10 +861,18 @@ public final class AIPanelModel: ObservableObject {
         pageWork?.cancel()
         answerTask?.cancel()
         selectionTask?.cancel()
+        localContextTask?.cancel()
+        followTask?.cancel()
+        sendPreparationTask?.cancel()
         pageTask = nil
         pageWork = nil
         answerTask = nil
         selectionTask = nil
+        localContextTask = nil
+        followTask = nil
+        sendPreparationTask = nil
+        sendGeneration += 1
+        sendNote = nil
         pageGeneration += 1
         answerGeneration += 1
         selectionGeneration += 1
@@ -474,6 +890,10 @@ public final class AIPanelModel: ObservableObject {
     public func newChat() {
         answerTask?.cancel()
         answerTask = nil
+        sendPreparationTask?.cancel()
+        sendPreparationTask = nil
+        sendGeneration += 1
+        sendNote = nil
         answerGeneration += 1
         conversationGeneration += 1
         turns = []
@@ -494,6 +914,10 @@ public final class AIPanelModel: ObservableObject {
         guard let archive = app?.archive else { return }
         answerTask?.cancel()
         answerTask = nil
+        sendPreparationTask?.cancel()
+        sendPreparationTask = nil
+        sendGeneration += 1
+        sendNote = nil
         answerGeneration += 1
         conversationGeneration += 1
         selectionGeneration += 1
@@ -533,7 +957,10 @@ public final class AIPanelModel: ObservableObject {
         guard let turn = turns.last, let archive = app?.archive else {
             return
         }
-        guard let asin = pageIdentifier ?? matchedBook()?.asin else {
+        guard
+            let asin = identity?.book?.asin ?? pageIdentifier
+                ?? matchedBook()?.asin
+        else {
             saveError =
                 "This page could not be matched to a single archived book. "
                 + "Import the library and try again."
@@ -562,12 +989,13 @@ public final class AIPanelModel: ObservableObject {
             conversationID = nil
             conversations = []
             historyLoading = false
+            historyTask = nil
             return
         }
         conversationGeneration += 1
         let generation = conversationGeneration
         historyLoading = true
-        Task { [weak self] in
+        let task = Task { [weak self] in
             do {
                 let loaded = try await Task.detached {
                     let latest = try archive.latestConversation(bookKey: key)
@@ -600,6 +1028,7 @@ public final class AIPanelModel: ObservableObject {
                 self.saveError = "Could not read this book's chats: \(error)"
             }
         }
+        historyTask = task
     }
 
     private func apply(
@@ -700,6 +1129,7 @@ public final class AIPanelModel: ObservableObject {
 
 public struct AIPanelView: View {
     @ObservedObject var model: AIPanelModel
+    @State private var composerHeight: CGFloat = 22
     private let compact: Bool
     private let onActivate: () -> Void
     private let onClose: (() -> Void)?
@@ -1061,6 +1491,10 @@ public struct AIPanelView: View {
                 "Only this page"
                     + (model.context.selection == nil ? "" : " and your selection")
                     + " is sent; the rest of the book stays on this Mac.")
+            if !model.identityNote.isEmpty {
+                Divider()
+                Text(model.identityNote)
+            }
         } label: {
             Image(systemName: "info.circle")
                 .font(.caption)
@@ -1101,15 +1535,26 @@ public struct AIPanelView: View {
                 }
             }
             HStack(alignment: .bottom, spacing: 8) {
-                ActivatingTextField(
-                    text: $model.question,
-                    placeholder: "Ask about this page…",
-                    onSubmit: { model.send() },
-                    onActivate: {
-                        onActivate()
-                        model.refreshSelection()
-                    },
-                    onEscape: { onClose?() })
+                ZStack(alignment: .topLeading) {
+                    ActivatingTextView(
+                        text: $model.question,
+                        height: $composerHeight,
+                        onSubmit: { model.send() },
+                        onActivate: {
+                            onActivate()
+                            model.refreshSelection()
+                        },
+                        onEscape: { onClose?() })
+                    if model.question.isEmpty {
+                        Text("Ask about this page…")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 5)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .frame(height: composerHeight)
                 if model.phase == .loadingAnswer {
                     Button {
                         model.cancel()
@@ -1151,6 +1596,12 @@ public struct AIPanelView: View {
 
     private var statusLine: some View {
         VStack(alignment: .leading, spacing: 3) {
+            if let note = model.sendNote {
+                Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let saveError = model.saveError {
                 Text(saveError)
                     .font(.caption2)
@@ -1194,28 +1645,35 @@ public struct AIPanelView: View {
     }
 }
 
-// MARK: - Text field
+// MARK: - Multiline composer
 
-/// A field that activates the companion on the click that focuses it.
+/// A multiline composer for a nonactivating panel.
 ///
-/// The spike measured Apple Books taking the first keystroke from a
-/// nonactivating panel. Activating in `mouseDown`, before becoming first
-/// responder, is what makes the first character land in the field.
-public struct ActivatingTextField: NSViewRepresentable {
+/// AppKit gap, not a preference: the responder system owns first-responder
+/// ordering and key handling here. The companion is a borderless
+/// `.nonactivatingPanel`, and the spike measured Apple Books taking the first
+/// keystroke from such a panel while Kindle sometimes accepted it (the
+/// 2026-10-21 companion spike, "Typing in a nonactivating panel"). Activating
+/// the app in `mouseDown`, before becoming
+/// first responder, is what makes the first character land. Return must send
+/// and Shift+Return must insert a newline, which means intercepting the text
+/// system's own newline command; a SwiftUI `TextField` is single-line and a
+/// `TextEditor` gives no access to that command.
+public struct ActivatingTextView: NSViewRepresentable {
     @Binding var text: String
-    let placeholder: String
+    @Binding var height: CGFloat
     let onSubmit: () -> Void
     let onActivate: () -> Void
     let onEscape: () -> Void
 
     public init(
-        text: Binding<String>, placeholder: String,
+        text: Binding<String>, height: Binding<CGFloat>,
         onSubmit: @escaping () -> Void,
         onActivate: @escaping () -> Void,
         onEscape: @escaping () -> Void
     ) {
         self._text = text
-        self.placeholder = placeholder
+        self._height = height
         self.onSubmit = onSubmit
         self.onActivate = onActivate
         self.onEscape = onEscape
@@ -1223,71 +1681,143 @@ public struct ActivatingTextField: NSViewRepresentable {
 
     public func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    public func makeNSView(context: Context) -> ActivatingField {
-        let field = ActivatingField()
-        field.placeholderString = placeholder
-        field.isBordered = false
-        field.drawsBackground = false
-        field.focusRingType = .none
-        field.font = .systemFont(ofSize: 13)
-        field.delegate = context.coordinator
-        field.onActivate = onActivate
-        field.onEscape = onEscape
-        field.target = context.coordinator
-        field.action = #selector(Coordinator.submit)
-        field.translatesAutoresizingMaskIntoConstraints = false
-        return field
+    public func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        let textView = ComposerTextView()
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.font = .systemFont(ofSize: 13)
+        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(
+            width: 0, height: CGFloat.greatestFiniteMagnitude)
+        textView.string = text
+        textView.onActivate = onActivate
+        textView.onSubmit = onSubmit
+        textView.onEscape = onEscape
+        textView.delegate = context.coordinator
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        context.coordinator.updateHeight()
+        return scrollView
     }
 
-    public func updateNSView(_ field: ActivatingField, context: Context) {
+    public func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.parent = self
-        if field.stringValue != text {
-            field.stringValue = text
+        guard let textView = scrollView.documentView as? ComposerTextView
+        else { return }
+        textView.onActivate = onActivate
+        textView.onSubmit = onSubmit
+        textView.onEscape = onEscape
+        if textView.string != text {
+            // Keep the caret: this update usually comes from sending a
+            // message, not from typing, and a reset caret would jump.
+            let selected = textView.selectedRange()
+            textView.string = text
+            textView.setSelectedRange(
+                NSRange(
+                    location: min(selected.location, text.utf16.count),
+                    length: 0))
+            context.coordinator.updateHeight()
         }
-        field.onActivate = onActivate
-        field.onEscape = onEscape
     }
 
-    public final class Coordinator: NSObject, NSTextFieldDelegate {
-        var parent: ActivatingTextField
+    @MainActor public final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ActivatingTextView
+        weak var textView: NSTextView?
+        private var heightUpdatePending = false
 
-        init(_ parent: ActivatingTextField) {
+        init(_ parent: ActivatingTextView) {
             self.parent = parent
         }
 
-        public func controlTextDidChange(_ notification: Notification) {
-            guard let field = notification.object as? NSTextField else {
+        public func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else {
                 return
             }
-            parent.text = field.stringValue
+            if parent.text != textView.string {
+                parent.text = textView.string
+            }
+            updateHeight()
         }
 
-        public func control(
-            _ control: NSControl, textView: NSTextView,
-            doCommandBy selector: Selector
-        ) -> Bool {
-            if selector == #selector(NSResponder.insertNewline(_:)) {
-                parent.onSubmit()
-                return true
+        /// Reports the text's laid-out height to SwiftUI, clamped to one line
+        /// through six. Setting state during a view update is deferred one
+        /// turn of the main queue.
+        func updateHeight() {
+            guard !heightUpdatePending else { return }
+            heightUpdatePending = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard let textView = self.textView,
+                    let container = textView.textContainer,
+                    let layout = textView.layoutManager
+                else {
+                    self.heightUpdatePending = false
+                    return
+                }
+                layout.ensureLayout(for: container)
+                let used = layout.usedRect(for: container).height
+                let desired = min(
+                    max(used + textView.textContainerInset.height * 2, 22),
+                    96)
+                self.heightUpdatePending = false
+                if abs(self.parent.height - desired) > 0.5 {
+                    self.parent.height = desired
+                }
             }
-            if selector == #selector(NSResponder.cancelOperation(_:)) {
-                parent.onEscape()
-                return true
-            }
-            return false
-        }
-
-        @MainActor @objc func submit() {
-            parent.onSubmit()
         }
     }
 }
 
-public final class ActivatingField: NSTextField {
+/// Which composer action a key press means.
+///
+/// Split out from the view so the Return/Shift+Return contract is testable
+/// without a window: Return sends, Shift+Return inserts a newline, Escape
+/// closes, and an active input-method composition keeps the key.
+enum ComposerKeyPolicy {
+    enum Action: Equatable {
+        case send
+        case newline
+        case escape
+        case none
+    }
+
+    static func action(
+        keyCode: UInt16, shift: Bool, hasMarkedText: Bool
+    ) -> Action {
+        guard !hasMarkedText else { return .none }
+        switch keyCode {
+        case 36, 76: return shift ? .newline : .send
+        case 53: return .escape
+        default: return .none
+        }
+    }
+}
+
+/// The text view intercepts Return and Shift+Return before the text system
+/// turns them into commands, and activates the app on the click that focuses
+/// it. An input-method composition keeps Return until it is committed.
+final class ComposerTextView: NSTextView {
     var onActivate: (() -> Void)?
+    var onSubmit: (() -> Void)?
     var onEscape: (() -> Void)?
 
-    public override func mouseDown(with event: NSEvent) {
+    override func mouseDown(with event: NSEvent) {
         if !NSApp.isActive {
             onActivate?()
         }
@@ -1296,14 +1826,27 @@ public final class ActivatingField: NSTextField {
         window?.makeFirstResponder(self)
     }
 
-    public override func becomeFirstResponder() -> Bool {
+    override func becomeFirstResponder() -> Bool {
         if !NSApp.isActive {
             onActivate?()
         }
         return super.becomeFirstResponder()
     }
 
-    public override func cancelOperation(_ sender: Any?) {
+    override func keyDown(with event: NSEvent) {
+        switch ComposerKeyPolicy.action(
+            keyCode: event.keyCode,
+            shift: event.modifierFlags.contains(.shift),
+            hasMarkedText: hasMarkedText())
+        {
+        case .send: onSubmit?()
+        case .newline: insertNewline(nil)
+        case .escape: onEscape?()
+        case .none: super.keyDown(with: event)
+        }
+    }
+
+    override func cancelOperation(_ sender: Any?) {
         onEscape?()
     }
 }

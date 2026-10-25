@@ -24,6 +24,42 @@ struct BookChatsView: View {
         return model.livePage?.title == book.title
     }
 
+    private func summary(_ id: Int64?) -> ConversationSummary? {
+        guard let id else { return nil }
+        return summaries.first { $0.id == id }
+    }
+
+    private var selectedIsFiled: Bool {
+        guard let conversation = summary(selectedID)?.conversation else {
+            return true
+        }
+        return ConversationFiling.isFiled(conversation, under: book)
+    }
+
+    /// Moves a chat filed under weaker evidence (a title or a capture
+    /// fingerprint) under this book's ASIN. Rows move in place, so the chat
+    /// keeps every turn.
+    private func fileUnderBook() {
+        guard let selected = summary(selectedID),
+            let archive = model.archive
+        else { return }
+        let key = selected.conversation.bookKey
+        Task {
+            do {
+                try await Task.detached {
+                    try archive.migrateConversations(
+                        from: key, to: book.asin, title: book.title,
+                        source: book.source)
+                }.value
+                await loadSummaries()
+                selectedID = selected.id
+                model.refreshConversationCounts()
+            } catch {
+                self.error = "Could not file this chat: \(error)"
+            }
+        }
+    }
+
     var body: some View {
         HSplitView {
             sidebar
@@ -79,6 +115,13 @@ struct BookChatsView: View {
                             )
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            if !ConversationFiling.isFiled(
+                                summary.conversation, under: book)
+                            {
+                                Label("Unfiled", systemImage: "tray")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            }
                         }
                         .tag(summary.id)
                         .padding(.vertical, 2)
@@ -127,6 +170,16 @@ struct BookChatsView: View {
                         .foregroundStyle(.secondary)
                     }
                     Spacer()
+                    if !selectedIsFiled {
+                        IconButton(
+                            "File Under This Book",
+                            systemImage: "tray.and.arrow.down",
+                            tooltip:
+                                "Move this chat under \(book.title); every "
+                                + "turn is kept"
+                        ) { fileUnderBook() }
+                        .controlSize(.small)
+                    }
                     IconButton(
                         "Open in Companion", systemImage: "sparkles",
                         tooltip: liveBookMatches
@@ -209,11 +262,28 @@ struct BookChatsView: View {
         }
         do {
             let loaded = try await Task.detached {
-                try archive.conversations(bookKey: book.asin)
+                let all = try archive.conversations()
+                let captures = (try? archive.captures()) ?? []
+                var fingerprints: [String] = []
+                for capture in captures
+                where capture.asin.caseInsensitiveCompare(book.asin)
+                    == .orderedSame
+                {
+                    if let index = try? BookTextIndex.load(
+                        directory: URL(fileURLWithPath: capture.directory))
+                    {
+                        fingerprints.append(index.fingerprint)
+                    }
+                }
+                let keys = ConversationFiling.keys(
+                    for: book, captureFingerprints: fingerprints)
+                return all.filter { keys.contains($0.conversation.bookKey) }
             }.value
             summaries = loaded
             isLoading = false
-            if selectedID == nil {
+            if selectedID == nil
+                || !loaded.contains(where: { $0.id == selectedID })
+            {
                 selectedID = loaded.first?.id
             }
         } catch {
