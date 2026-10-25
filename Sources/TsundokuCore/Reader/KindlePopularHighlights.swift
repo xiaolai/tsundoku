@@ -171,7 +171,7 @@ public struct KindlePopularHighlights: PopularHighlightsPanel {
     ) throws -> T {
         guard AXIsProcessTrusted() else { throw CleanPageError.notTrusted }
         guard KindleLive.isRunning() else { throw CleanPageError.notRunning }
-        KindleLive.activate()
+        try KindleLive.activate()
         guard KindleLive.isFrontmost() else {
             throw CleanPageError.notFrontmost
         }
@@ -289,7 +289,7 @@ public struct KindlePopularHighlights: PopularHighlightsPanel {
                     break
                 }
                 // A link tap can take focus; ask LaunchServices again.
-                if !KindleLive.isFrontmost() { KindleLive.activate() }
+                if !KindleLive.isFrontmost() { try KindleLive.activate() }
             }
         }
         if opened, wait(2.5, { isPanelOpen(box) }) {
@@ -301,7 +301,7 @@ public struct KindlePopularHighlights: PopularHighlightsPanel {
         // A press issued while a sheet was still closing is ignored; try the
         // candidate points once more before giving up.
         for point in points {
-            if !KindleLive.isFrontmost() { KindleLive.activate() }
+            if !KindleLive.isFrontmost() { try KindleLive.activate() }
             revealChrome(box, at: point)
             if case .performed = (try? press("Reading Settings", in: box))
                 ?? .notFound,

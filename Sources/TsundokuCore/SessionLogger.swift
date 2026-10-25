@@ -52,6 +52,18 @@ public final class SessionLogger: @unchecked Sendable {
         }
     }
 
+    /// Stop and wait for the logger's queue to drain, including a tick that
+    /// is already reading a page. For callers that query the archive right
+    /// after stopping, where `stop()`'s fire-and-forget shutdown would race
+    /// the write it is waiting for.
+    public func stopAndDrain() {
+        queue.sync {
+            self.running = false
+            self.timer?.cancel()
+            self.timer = nil
+        }
+    }
+
     private func tick() {
         guard running, let asin, KindleLive.isRunning(),
             KindleLive.isTrusted()
@@ -60,6 +72,17 @@ public final class SessionLogger: @unchecked Sendable {
             let page = try KindleLive.currentPage()
             guard page.state == "readingChromeHidden", !page.text.isEmpty
             else { return }
+            // File only a page whose reader identity is known and matches the
+            // tracked book. An unknown identity (Kindle's last-opened marker
+            // unreadable, or unstable across the read) could belong to any
+            // book, and a known different one belongs to another; neither may
+            // be recorded under the tracked ASIN.
+            guard let bookID = page.bookID, !bookID.isEmpty,
+                bookID.caseInsensitiveCompare(asin) == .orderedSame
+            else {
+                lastText = nil
+                return
+            }
             guard page.text != lastText else { return }
             lastText = page.text
             _ = try archive.recordPage(

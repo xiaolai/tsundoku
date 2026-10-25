@@ -293,12 +293,32 @@ public final class Archive: @unchecked Sendable {
                           start_pos = excluded.start_pos,
                           end_pos = excluded.end_pos,
                           text = COALESCE(excluded.text, annotations.text),
-                          note = COALESCE(excluded.note, annotations.note),
+                          note = CASE
+                            WHEN excluded.modified_at IS NOT NULL
+                              AND (annotations.modified_at IS NULL
+                                   OR excluded.modified_at
+                                      >= annotations.modified_at)
+                            THEN excluded.note
+                            -- A note without a timestamp is still content:
+                            -- take it. A missing note without a timestamp
+                            -- cannot be told apart from an unavailable
+                            -- field, so it never clears.
+                            WHEN excluded.modified_at IS NULL
+                              AND excluded.note IS NOT NULL
+                            THEN excluded.note
+                            ELSE annotations.note
+                          END,
                           color = COALESCE(excluded.color, annotations.color),
                           created_at = COALESCE(excluded.created_at,
                                                 annotations.created_at),
-                          modified_at = COALESCE(excluded.modified_at,
-                                                 annotations.modified_at),
+                          modified_at = CASE
+                            WHEN excluded.modified_at IS NULL
+                            THEN annotations.modified_at
+                            WHEN annotations.modified_at IS NULL
+                              OR excluded.modified_at >= annotations.modified_at
+                            THEN excluded.modified_at
+                            ELSE annotations.modified_at
+                          END,
                           source = excluded.source,
                           book_source = excluded.book_source
                         """,
@@ -444,6 +464,20 @@ public final class Archive: @unchecked Sendable {
             }
             sql += " ORDER BY a.created_at DESC, a.asin, a.start_pos"
             let rows = try database.query(sql, bindings)
+            // Multi-source provenance lives beside the annotation; reading
+            // only the legacy column loses every source but one.
+            let sourceRows = try database.query(
+                """
+                SELECT annotation_id, source FROM annotation_sources
+                ORDER BY annotation_id, source
+                """)
+            var sourcesByAnnotation: [String: [String]] = [:]
+            for sourceRow in sourceRows {
+                guard let identifier = sourceRow.string("annotation_id"),
+                    let name = sourceRow.string("source")
+                else { continue }
+                sourcesByAnnotation[identifier, default: []].append(name)
+            }
             return rows.compactMap { row in
                 guard let identifier = row.string("id"),
                     let asin = row.string("asin"),
@@ -469,7 +503,8 @@ public final class Archive: @unchecked Sendable {
                     modifiedAt: row.double("modified_at").map {
                         Date(timeIntervalSince1970: $0)
                     },
-                    sources: [row.string("source") ?? "Kindle"],
+                    sources: sourcesByAnnotation[identifier]
+                        ?? [row.string("source") ?? "Kindle"],
                     bookSource: BookSource(
                         rawValue: row.string("book_source") ?? "")
                         ?? .kindle)
@@ -554,10 +589,10 @@ public final class Archive: @unchecked Sendable {
                 let existing = try database.query(
                     """
                     SELECT id FROM sessions
-                    WHERE asin = ? AND ended_at >= ?
+                    WHERE asin = ? AND ended_at >= ? AND ended_at <= ?
                     ORDER BY ended_at DESC LIMIT 1
                     """,
-                    [.text(asin), .real(cutoff)])
+                    [.text(asin), .real(cutoff), .real(timestamp)])
                 let sessionID: Int64
                 if let identifier = existing.first?.int("id") {
                     sessionID = identifier
@@ -708,21 +743,11 @@ public final class Archive: @unchecked Sendable {
                     ])
                 id = database.lastInsertRowID
                 for turn in turns {
-                    let encoded = try JSONEncoder().encode(turn.context)
-                    let contextJSON = String(decoding: encoded, as: UTF8.self)
-                    try database.execute(
-                        """
-                        INSERT INTO conversation_turns
-                        (conversation_id, action, question, answer, provider,
-                         prompt, context_json, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            .integer(id), .text(turn.action.rawValue),
-                            .text(turn.question), .text(turn.answer),
-                            .text(turn.provider), .text(turn.prompt),
-                            .text(contextJSON), .real(now),
-                        ])
+                    try insertTurn(
+                        conversationID: id, action: turn.action,
+                        question: turn.question, answer: turn.answer,
+                        provider: turn.provider, prompt: turn.prompt,
+                        context: turn.context, createdAt: now)
                 }
             }
             return Conversation(
@@ -738,8 +763,6 @@ public final class Archive: @unchecked Sendable {
         conversationID: Int64, action: AIAction, question: String,
         answer: String, provider: String, prompt: String, context: AIContext
     ) throws -> ConversationTurn {
-        let encoded = try JSONEncoder().encode(context)
-        let contextJSON = String(decoding: encoded, as: UTF8.self)
         return try queue.sync {
             let now = Date().timeIntervalSince1970
             var turnID: Int64 = 0
@@ -753,19 +776,10 @@ public final class Archive: @unchecked Sendable {
                     throw ConversationArchiveError.missingConversation(
                         conversationID)
                 }
-                try database.execute(
-                    """
-                    INSERT INTO conversation_turns
-                    (conversation_id, action, question, answer, provider,
-                     prompt, context_json, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        .integer(conversationID), .text(action.rawValue),
-                        .text(question), .text(answer), .text(provider),
-                        .text(prompt), .text(contextJSON), .real(now),
-                    ])
-                turnID = database.lastInsertRowID
+                turnID = try insertTurn(
+                    conversationID: conversationID, action: action,
+                    question: question, answer: answer, provider: provider,
+                    prompt: prompt, context: context, createdAt: now)
                 try database.execute(
                     "UPDATE conversations SET updated_at = ? WHERE id = ?",
                     [.real(now), .integer(conversationID)])
@@ -776,6 +790,31 @@ public final class Archive: @unchecked Sendable {
                 prompt: prompt, context: context,
                 createdAt: Date(timeIntervalSince1970: now))
         }
+    }
+
+    /// Insert one turn row inside the caller's transaction. Both the
+    /// multi-turn create and the single append persist the same columns.
+    @discardableResult
+    private func insertTurn(
+        conversationID: Int64, action: AIAction, question: String,
+        answer: String, provider: String, prompt: String,
+        context: AIContext, createdAt: TimeInterval
+    ) throws -> Int64 {
+        let encoded = try JSONEncoder().encode(context)
+        let contextJSON = String(decoding: encoded, as: UTF8.self)
+        try database.execute(
+            """
+            INSERT INTO conversation_turns
+            (conversation_id, action, question, answer, provider,
+             prompt, context_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                .integer(conversationID), .text(action.rawValue),
+                .text(question), .text(answer), .text(provider),
+                .text(prompt), .text(contextJSON), .real(createdAt),
+            ])
+        return database.lastInsertRowID
     }
 
     public func conversationTurns(
@@ -796,40 +835,74 @@ public final class Archive: @unchecked Sendable {
         bookKey: String? = nil
     ) throws -> [ConversationSummary] {
         try queue.sync {
-            var sql = """
-                SELECT c.*,
-                    (SELECT COUNT(*) FROM conversation_turns t
-                     WHERE t.conversation_id = c.id) AS turn_count,
-                    (SELECT question FROM conversation_turns t
-                     WHERE t.conversation_id = c.id
-                     ORDER BY t.id LIMIT 1) AS first_question,
-                    (SELECT action FROM conversation_turns t
-                     WHERE t.conversation_id = c.id
-                     ORDER BY t.id LIMIT 1) AS first_action,
-                    (SELECT answer FROM conversation_turns t
-                     WHERE t.conversation_id = c.id
-                     ORDER BY t.id DESC LIMIT 1) AS last_answer
-                FROM conversations c
-                """
-            var bindings: [SQLValue] = []
             if let bookKey {
-                sql += " WHERE c.book_key = ?"
-                bindings.append(.text(bookKey))
+                return try summaries(
+                    whereClause: " WHERE c.book_key = ?",
+                    bindings: [.text(bookKey)])
             }
-            sql += " ORDER BY c.updated_at DESC, c.id DESC"
-            return try database.query(sql, bindings).map { row in
-                let question = row.string("first_question") ?? ""
-                let action = row.string("first_action") ?? ""
-                let firstQuestion =
-                    question.isEmpty
-                    ? (AIAction(rawValue: action)?.displayName ?? action)
-                    : question
-                return ConversationSummary(
-                    conversation: Self.conversation(from: row),
-                    turnCount: Int(row.int("turn_count") ?? 0),
-                    firstQuestion: firstQuestion,
-                    lastAnswer: row.string("last_answer"))
-            }
+            return try summaries(whereClause: "", bindings: [])
+        }
+    }
+
+    /// Summaries for a known set of keys, so a book's Chats tab does not scan
+    /// every conversation in the archive.
+    public func conversations(
+        bookKeys: Set<String>, includeLastAnswer: Bool = true
+    ) throws -> [ConversationSummary] {
+        guard !bookKeys.isEmpty else { return [] }
+        let keys = Array(bookKeys).sorted()
+        let placeholders = Array(repeating: "?", count: keys.count)
+            .joined(separator: ",")
+        return try queue.sync {
+            // Keys stored before canonical casing carry mixed case; a
+            // case-insensitive match keeps them visible without scanning the
+            // whole table.
+            try summaries(
+                whereClause:
+                    " WHERE c.book_key COLLATE NOCASE IN (\(placeholders))",
+                bindings: keys.map { .text($0) },
+                includeLastAnswer: includeLastAnswer)
+        }
+    }
+
+    private func summaries(
+        whereClause: String, bindings: [SQLValue],
+        includeLastAnswer: Bool = true
+    ) throws -> [ConversationSummary] {
+        // A caller that shows only the first question and turn count does not
+        // need every conversation's last answer read from the table.
+        let lastAnswer =
+            includeLastAnswer
+            ? """
+            , (SELECT answer FROM conversation_turns t
+               WHERE t.conversation_id = c.id
+               ORDER BY t.id DESC LIMIT 1) AS last_answer
+            """
+            : ""
+        let sql = """
+            SELECT c.*,
+                (SELECT COUNT(*) FROM conversation_turns t
+                 WHERE t.conversation_id = c.id) AS turn_count,
+                (SELECT question FROM conversation_turns t
+                 WHERE t.conversation_id = c.id
+                 ORDER BY t.id LIMIT 1) AS first_question,
+                (SELECT action FROM conversation_turns t
+                 WHERE t.conversation_id = c.id
+                 ORDER BY t.id LIMIT 1) AS first_action\(lastAnswer)
+            FROM conversations c
+            \(whereClause)
+            ORDER BY c.updated_at DESC, c.id DESC
+            """
+        return try database.query(sql, bindings).map { row in
+            let question = row.string("first_question") ?? ""
+            let action = row.string("first_action") ?? ""
+            let firstQuestion = TurnLabel.prompt(
+                question: question, action: action)
+            return ConversationSummary(
+                conversation: Self.conversation(from: row),
+                turnCount: Int(row.int("turn_count") ?? 0),
+                firstQuestion: firstQuestion,
+                lastAnswer: row.string("last_answer"))
         }
     }
 
@@ -865,24 +938,11 @@ public final class Archive: @unchecked Sendable {
         }
         try queue.sync {
             try database.transaction {
-                try database.execute(
-                    "UPDATE conversations SET book_key = ? WHERE book_key = ?",
-                    [.text(newKey), .text(oldKey)])
-                if let title, !title.isEmpty {
-                    try database.execute(
-                        """
-                        UPDATE conversations SET book_title = ?
-                        WHERE book_key = ?
-                          AND (book_title IS NULL OR book_title = '')
-                        """, [.text(title), .text(newKey)])
-                }
-                if let source {
-                    try database.execute(
-                        """
-                        UPDATE conversations SET book_source = ?
-                        WHERE book_key = ? AND book_source IS NULL
-                        """, [.text(source.rawValue), .text(newKey)])
-                }
+                try migrateRows(
+                    selector: "book_key = ?", bindings: [.text(oldKey)],
+                    metadataSelector: "book_key = ?",
+                    metadataBindings: [.text(newKey)],
+                    to: newKey, title: title, source: source)
             }
         }
     }
@@ -896,24 +956,42 @@ public final class Archive: @unchecked Sendable {
         guard !newKey.isEmpty else { return }
         try queue.sync {
             try database.transaction {
-                try database.execute(
-                    "UPDATE conversations SET book_key = ? WHERE id = ?",
-                    [.text(newKey), .integer(id)])
-                if let title, !title.isEmpty {
-                    try database.execute(
-                        """
-                        UPDATE conversations SET book_title = ?
-                        WHERE id = ? AND (book_title IS NULL OR book_title = '')
-                        """, [.text(title), .integer(id)])
-                }
-                if let source {
-                    try database.execute(
-                        """
-                        UPDATE conversations SET book_source = ?
-                        WHERE id = ? AND book_source IS NULL
-                        """, [.text(source.rawValue), .integer(id)])
-                }
+                try migrateRows(
+                    selector: "id = ?", bindings: [.integer(id)],
+                    metadataSelector: "id = ?", metadataBindings: [.integer(id)],
+                    to: newKey, title: title, source: source)
             }
+        }
+    }
+
+    /// Move rows matched by `selector` to `newKey`, then fill a blank title
+    /// and a missing source for the rows `metadataSelector` names. The two
+    /// selectors differ on purpose: a key-wide migration fills every row now
+    /// under the new key, while a single-conversation move fills only itself.
+    private func migrateRows(
+        selector: String, bindings: [SQLValue],
+        metadataSelector: String, metadataBindings: [SQLValue],
+        to newKey: String, title: String?, source: BookSource?
+    ) throws {
+        try database.execute(
+            "UPDATE conversations SET book_key = ? WHERE \(selector)",
+            [.text(newKey)] + bindings)
+        if let title, !title.isEmpty {
+            try database.execute(
+                """
+                UPDATE conversations SET book_title = ?
+                WHERE \(metadataSelector)
+                  AND (book_title IS NULL OR book_title = '')
+                """,
+                [.text(title)] + metadataBindings)
+        }
+        if let source {
+            try database.execute(
+                """
+                UPDATE conversations SET book_source = ?
+                WHERE \(metadataSelector) AND book_source IS NULL
+                """,
+                [.text(source.rawValue)] + metadataBindings)
         }
     }
 
@@ -1178,7 +1256,7 @@ public final class Archive: @unchecked Sendable {
 
     private func csvField(_ value: String) -> String {
         if value.contains(",") || value.contains("\"")
-            || value.contains("\n")
+            || value.contains("\n") || value.contains("\r")
         {
             return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
         }

@@ -1,4 +1,3 @@
-import ApplicationServices
 import Foundation
 
 /// The live Kindle page, adapted to the companion's reader contract.
@@ -9,14 +8,10 @@ public struct KindleContext: ReaderContext {
 
     public func page() throws -> ReaderPage {
         if Task.isCancelled { throw ReaderContextError.cancelled }
-        guard AXIsProcessTrusted() else {
-            throw ReaderContextError.notTrusted
-        }
-        guard KindleLive.isRunning() else {
-            throw ReaderContextError.readerNotRunning(.kindle)
-        }
         let live: LivePage
         do {
+            // `currentPage()` performs the trust and running checks and
+            // reports each through its own error case.
             live = try KindleLive.currentPage()
         } catch let error as KindleLiveError {
             switch error {
@@ -26,12 +21,6 @@ public struct KindleContext: ReaderContext {
                 throw ReaderContextError.readerNotRunning(.kindle)
             case .noWindow:
                 throw ReaderContextError.noReaderWindow(.kindle)
-            case .notReading(let state):
-                throw ReaderContextError.unavailable(
-                    .kindle,
-                    reason:
-                        "Kindle is showing \(state), not a live page. "
-                        + "Open a book and hide the toolbar.")
             case .readFailed(let message):
                 throw ReaderContextError.unavailable(
                     .kindle, reason: message)

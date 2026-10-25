@@ -142,12 +142,21 @@ struct ReadingTextIndexTests {
 
         let body = """
             <body><h2 id="one">One</h2><p>First chapter text here.</p>\
-            <h2 id="two">Two</h2><p>Second chapter text here.</p></body>
+            <h2 id="two">Two</h2><p>Second chapter text here.</p>\
+            <h2 id="three">Three</h2><p>Third chapter text here.</p></body>
             """
         let first = EPUBBookIndex.fragmentText(
-            in: body, fragment: "one", next: "two")
+            in: body, fragment: "one", next: ["two"])
         #expect(first?.contains("First chapter text") == true)
         #expect(first?.contains("Second chapter text") == false)
+
+        // A marker that appears before the current fragment cannot end it;
+        // the earliest marker after it must, even when another candidate is
+        // out of document order (one→two→one→three).
+        let second = EPUBBookIndex.fragmentText(
+            in: body, fragment: "two", next: ["one", "three"])
+        #expect(second?.contains("Second chapter text") == true)
+        #expect(second?.contains("Third chapter text") == false)
     }
 
     @Test("an EPUB's navigation supplies the chapter, and DRM is refused")

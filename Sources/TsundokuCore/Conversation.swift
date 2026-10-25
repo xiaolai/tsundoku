@@ -141,7 +141,7 @@ public struct ConversationTurn: Identifiable, Hashable, Sendable {
 
     /// What the reader asked, or the action's name when no question was typed.
     public var promptLabel: String {
-        question.isEmpty ? action.displayName : question
+        TurnLabel.prompt(question: question, action: action)
     }
 }
 

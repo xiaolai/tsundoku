@@ -22,7 +22,100 @@ public struct BooksContext: ReaderContext {
     }
 
     public func page() throws -> ReaderPage {
+        do {
+            return try readPage()
+        } catch is PageUnstable {
+            // One retry: a page that moved mid-read is usually settled by
+            // the time its replacement is read.
+            do {
+                return try readPage()
+            } catch is PageUnstable {
+                throw ReaderContextError.unavailable(
+                    .appleBooks,
+                    reason: "The page changed while it was being read.")
+            }
+        }
+    }
+
+    /// A page identity changed between two reads. Internal only: `page()`
+    /// retries it and turns a second failure into a reader error.
+    private struct PageUnstable: Error {}
+
+    private func readPage() throws -> ReaderPage {
         if Task.isCancelled { throw ReaderContextError.cancelled }
+        let chosen = try chosenWindow()
+        let window = chosen.node
+        if Task.isCancelled { throw ReaderContextError.cancelled }
+
+        let title = displayTitle(window)
+        let text = BooksPageText.text(from: window)
+        if !text.isEmpty {
+            // The selection is read after the text snapshot and accepted
+            // only while both it and the page stay unchanged.
+            let selection = try pageSelection(
+                in: chosen, expectedTitle: title, expectedText: text)
+            return ReaderPage(
+                text: text, title: title, kind: .appleBooks,
+                source: .accessibility, selection: selection)
+        }
+
+        guard let frame = BooksPageText.rect(window.frame) else {
+            throw ReaderContextError.noReaderWindow(.appleBooks)
+        }
+        let pid = chosen.app.processIdentifier
+        let ocr = try BooksOCR.pageText(pid: pid, axFrame: frame)
+        let recognized = ocr.text
+        guard recognized.count >= BooksOCR.minimumCharacters else {
+            throw ReaderContextError.noPageText(.appleBooks)
+        }
+        if Task.isCancelled { throw ReaderContextError.cancelled }
+        // OCR runs after the Accessibility snapshot. An image-only page can
+        // leave both snapshots empty with the same title, so screenshots on
+        // both sides of the selection read are what prove the page held.
+        guard let current = try? chosen.recorder.capture(chosen.element),
+            BooksPageText.text(from: current) == text,
+            displayTitle(current) == title,
+            let after = try? BooksOCR.capture(pid: pid, axFrame: frame),
+            BooksOCR.sameImage(ocr.image, after)
+        else { throw PageUnstable() }
+        // The selection belongs to the OCR page only if it is read after
+        // both screenshots and the page is still the same one afterwards.
+        let selection = try pageSelection(
+            in: chosen, expectedTitle: title, expectedText: text)
+        guard let final = try? BooksOCR.capture(pid: pid, axFrame: frame),
+            BooksOCR.sameImage(ocr.image, final)
+        else { throw PageUnstable() }
+        return ReaderPage(
+            text: recognized, title: title, kind: .appleBooks,
+            source: .ocr, selection: selection)
+    }
+
+    private func pageSelection(
+        in chosen: ChosenWindow, expectedTitle: String, expectedText: String
+    ) throws -> String? {
+        switch stableSelection(
+            in: chosen.element, source: chosen.source,
+            recorder: chosen.recorder, expectedTitle: expectedTitle,
+            expectedText: expectedText)
+        {
+        case .none: return nil
+        case .text(let value): return value
+        case .unstable: throw PageUnstable()
+        }
+    }
+
+    /// The reader window `page()` and `selectedText()` both use, chosen by
+    /// the same focus and geometry ranking so a selection always comes from
+    /// the page it is attached to.
+    private struct ChosenWindow {
+        let element: AXUIElement
+        let node: AXNode
+        let source: LiveAXSource
+        let recorder: AXRecorder<LiveAXSource>
+        let app: NSRunningApplication
+    }
+
+    private func chosenWindow() throws -> ChosenWindow {
         guard AXIsProcessTrusted() else {
             throw ReaderContextError.notTrusted
         }
@@ -33,7 +126,6 @@ public struct BooksContext: ReaderContext {
         else {
             throw ReaderContextError.readerNotRunning(.appleBooks)
         }
-
         let application = AXUIElementCreateApplication(
             app.processIdentifier)
         let source = LiveAXSource()
@@ -65,33 +157,9 @@ public struct BooksContext: ReaderContext {
         else {
             throw ReaderContextError.noReaderWindow(.appleBooks)
         }
-        let window = recorded[index].node
-        if Task.isCancelled { throw ReaderContextError.cancelled }
-
-        let title = displayTitle(window)
-        let text = BooksPageText.text(from: window)
-        // Read the selection from the same window in this same snapshot; a
-        // separate recapture can land after a book switch.
-        let selection = selectionText(
-            in: recorded[index].element, source: source)
-        if !text.isEmpty {
-            return ReaderPage(
-                text: text, title: title, kind: .appleBooks,
-                source: .accessibility, selection: selection)
-        }
-
-        guard let frame = BooksPageText.rect(window.frame) else {
-            throw ReaderContextError.noReaderWindow(.appleBooks)
-        }
-        let recognized = try BooksOCR.text(
-            pid: app.processIdentifier, axFrame: frame)
-        guard recognized.count >= BooksOCR.minimumCharacters else {
-            throw ReaderContextError.noPageText(.appleBooks)
-        }
-        if Task.isCancelled { throw ReaderContextError.cancelled }
-        return ReaderPage(
-            text: recognized, title: title, kind: .appleBooks,
-            source: .ocr, selection: selection)
+        return ChosenWindow(
+            element: recorded[index].element, node: recorded[index].node,
+            source: source, recorder: recorder, app: app)
     }
 
     /// Reads the current selection from the live window's text nodes.
@@ -100,32 +168,48 @@ public struct BooksContext: ReaderContext {
     /// the web area, and a selection can span several nodes. They are joined
     /// in tree order. Empty or unreadable nodes contribute nothing.
     public func selectedText() -> String? {
-        guard AXIsProcessTrusted() else { return nil }
+        guard let chosen = try? chosenWindow() else { return nil }
         guard
-            let app = NSRunningApplication.runningApplications(
-                withBundleIdentifier: bundleID).first
+            case .text(let selection) = stableSelection(
+                in: chosen.element, source: chosen.source,
+                recorder: chosen.recorder,
+                expectedTitle: displayTitle(chosen.node),
+                expectedText: BooksPageText.text(from: chosen.node))
         else { return nil }
-        let application = AXUIElementCreateApplication(app.processIdentifier)
-        let source = LiveAXSource()
-        let recorder = AXRecorder(source: source)
-        guard let windows = try? source.windows(application) else {
-            return nil
+        return selection
+    }
+
+    private enum SelectionSnapshot {
+        case none
+        case text(String)
+        /// The page or selection moved between reads; the caller must not
+        /// pair this selection with the text it read.
+        case unstable
+    }
+
+    /// A selection read twice with the same result, while the page itself is
+    /// proven unchanged, so a turn between the text snapshot and the
+    /// selection cannot pair them across pages.
+    private func stableSelection(
+        in window: AXUIElement, source: LiveAXSource,
+        recorder: AXRecorder<LiveAXSource>, expectedTitle: String,
+        expectedText: String
+    ) -> SelectionSnapshot {
+        guard let selection = selectionText(in: window, source: source)
+        else { return .none }
+        let liveTitle = (try? source.string(window, "AXTitle")) ?? ""
+        if !liveTitle.isEmpty, liveTitle != expectedTitle,
+            expectedTitle != "Apple Books"
+        {
+            return .unstable
         }
-        // Choose the window by exactly the rule `page()` uses, so the
-        // selection always belongs to the page it is attached to.
-        let recorded = windows.compactMap {
-            window -> (element: AXUIElement, node: AXNode)? in
-            guard let node = try? recorder.capture(window) else { return nil }
-            return (window, node)
-        }
-        let focus = focusedWindow(application)
-        guard
-            let best = BooksPageText.bestWindow(
-                recorded.map(\.node), preferredTitle: focus?.title,
-                preferredFrame: focus?.frame),
-            let index = recorded.firstIndex(where: { $0.node == best })
-        else { return nil }
-        return selectionText(in: recorded[index].element, source: source)
+        guard let current = try? recorder.capture(window),
+            BooksPageText.text(from: current) == expectedText,
+            displayTitle(current) == expectedTitle
+        else { return .unstable }
+        guard selectionText(in: window, source: source) == selection
+        else { return .unstable }
+        return .text(selection)
     }
 
     private func selectionText(
@@ -133,24 +217,36 @@ public struct BooksContext: ReaderContext {
     ) -> String? {
         var parts: [String] = []
         var budget = 4_000
-        var visited = Set<CFHashCode>()
+        var visited = Set<AXUIElement>()
+        var complete = true
         collectSelection(
             window, source: source, depth: 0,
-            budget: &budget, visited: &visited, into: &parts)
+            budget: &budget, visited: &visited, into: &parts,
+            complete: &complete)
+        // A traversal that hit a depth, part or node limit returns a prefix.
+        // Callers cannot tell it apart from a complete selection, so refuse
+        // it rather than attach a silently incomplete passage.
+        guard complete else { return nil }
         return SelectionText.joined(parts)
     }
 
     private func collectSelection(
         _ element: AXUIElement, source: LiveAXSource, depth: Int,
-        budget: inout Int, visited: inout Set<CFHashCode>,
-        into parts: inout [String]
+        budget: inout Int, visited: inout Set<AXUIElement>,
+        into parts: inout [String], complete: inout Bool
     ) {
-        guard depth < 24, parts.count < 50, budget > 0,
-            !Task.isCancelled
-        else { return }
-        let identity = CFHash(element)
-        guard !visited.contains(identity) else { return }
-        visited.insert(identity)
+        guard depth < 24, parts.count < 50, budget > 0 else {
+            if !Task.isCancelled { complete = false }
+            return
+        }
+        guard !Task.isCancelled else {
+            complete = false
+            return
+        }
+        // AXUIElement equality resolves hash collisions; a hash-only set
+        // would drop a distinct element that shares one.
+        guard !visited.contains(element) else { return }
+        visited.insert(element)
         budget -= 1
         let role = (try? source.string(element, "AXRole")) ?? ""
         if role == "AXHeading",
@@ -170,7 +266,8 @@ public struct BooksContext: ReaderContext {
         for child in (try? source.children(element)) ?? [] {
             collectSelection(
                 child, source: source, depth: depth + 1,
-                budget: &budget, visited: &visited, into: &parts)
+                budget: &budget, visited: &visited, into: &parts,
+                complete: &complete)
         }
     }
 
@@ -237,6 +334,14 @@ enum BooksOCR {
     static let minimumCharacters = 20
 
     static func text(pid: pid_t, axFrame: CGRect) throws -> String {
+        try pageText(pid: pid, axFrame: axFrame).text
+    }
+
+    /// The recognised text and the image it came from. The image lets the
+    /// caller prove the page did not turn while Vision was running.
+    static func pageText(pid: pid_t, axFrame: CGRect) throws
+        -> (text: String, image: CGImage)
+    {
         if Task.isCancelled { throw ReaderContextError.cancelled }
         guard CGPreflightScreenCaptureAccess() else {
             throw ReaderContextError.unavailable(
@@ -247,7 +352,35 @@ enum BooksOCR {
         }
         let image = try capture(pid: pid, axFrame: axFrame)
         if Task.isCancelled { throw ReaderContextError.cancelled }
-        return try recognize(image)
+        return (try recognize(image), image)
+    }
+
+    /// Two screenshots of the same page agree after the same downscale. A
+    /// page turn changes enough content to differ even at this size, while a
+    /// static reader window is pixel-stable between captures.
+    static func sameImage(_ left: CGImage, _ right: CGImage) -> Bool {
+        guard let leftBytes = thumbnail(left), let rightBytes = thumbnail(right)
+        else { return false }
+        return leftBytes == rightBytes
+    }
+
+    private static func thumbnail(_ image: CGImage) -> [UInt8]? {
+        let side = 64
+        var bytes = [UInt8](repeating: 0, count: side * side * 4)
+        let drawn = bytes.withUnsafeMutableBytes { buffer -> Bool in
+            guard
+                let context = CGContext(
+                    data: buffer.baseAddress, width: side, height: side,
+                    bitsPerComponent: 8, bytesPerRow: side * 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.interpolationQuality = .low
+            context.draw(
+                image, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        return drawn ? bytes : nil
     }
 
     static func capture(pid: pid_t, axFrame: CGRect) throws
@@ -336,44 +469,57 @@ enum BooksOCR {
                 .appleBooks, reason: "OCR failed: \(error)")
         }
         let observations = request.results ?? []
-        // Columns are horizontal-overlap clusters: lines in one column share
-        // x-extent, while a facing page does not. This keeps a single-column
-        // line that happens to straddle the midpoint in its own column.
-        var columns: [[VNRecognizedTextObservation]] = []
-        for observation in observations.sorted(by: {
-            $0.boundingBox.minX < $1.boundingBox.minX
-        }) {
-            let box = observation.boundingBox
-            if let index = columns.firstIndex(where: { column in
-                // A line belongs to a column when its midpoint lies within
-                // that column's x-range. This keeps short and long lines with
-                // the same left edge together and still separates a facing
-                // page, whose midpoint is outside the range.
-                let minX = column.map(\.boundingBox.minX).min() ?? 0
-                let maxX = column.map(\.boundingBox.maxX).max() ?? 0
-                let mid = box.midX
-                return mid >= minX - box.width * 0.1
-                    && mid <= maxX + box.width * 0.1
-            }) {
-                columns[index].append(observation)
-            } else {
-                columns.append([observation])
-            }
-        }
-        let ordered = columns
-            .sorted { left, right in
-                let leftX = left.map(\.boundingBox.minX).min() ?? 0
-                let rightX = right.map(\.boundingBox.minX).min() ?? 0
-                return leftX < rightX
-            }
-            .flatMap { column in
-                column.sorted { $0.boundingBox.maxY > $1.boundingBox.maxY }
-            }
-        let lines = ordered.compactMap {
-            $0.topCandidates(1).first?.string
+        let order = readingOrder(
+            observations.map {
+                (
+                    minX: $0.boundingBox.minX, maxX: $0.boundingBox.maxX,
+                    maxY: $0.boundingBox.maxY
+                )
+            })
+        let lines = order.compactMap {
+            observations[$0].topCandidates(1).first?.string
         }
         return lines.joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Reading order from recognised line boxes: columns left to right, then
+    /// lines top to bottom. A line joins a column when it shares the column's
+    /// left edge or overlaps most of the column's width, so a heading and a
+    /// short last line stay with their body instead of forming columns of
+    /// their own; a facing page overlaps neither and starts a new column.
+    static func readingOrder(
+        _ boxes: [(minX: CGFloat, maxX: CGFloat, maxY: CGFloat)]
+    ) -> [Int] {
+        var columns: [[Int]] = []
+        for index in boxes.indices.sorted(by: {
+            boxes[$0].minX < boxes[$1].minX
+        }) {
+            let box = boxes[index]
+            if let column = columns.firstIndex(where: { members in
+                let left = members.map { boxes[$0].minX }.min() ?? box.minX
+                let right = members.map { boxes[$0].maxX }.max() ?? box.maxX
+                let sameEdge = abs(box.minX - left) <= 0.015
+                let overlap =
+                    min(box.maxX, right) - max(box.minX, left)
+                let narrower = min(box.maxX - box.minX, right - left)
+                return sameEdge
+                    || (narrower > 0 && overlap / narrower >= 0.5)
+            }) {
+                columns[column].append(index)
+            } else {
+                columns.append([index])
+            }
+        }
+        return columns
+            .sorted { left, right in
+                let leftX = left.map { boxes[$0].minX }.min() ?? 0
+                let rightX = right.map { boxes[$0].minX }.min() ?? 0
+                return leftX < rightX
+            }
+            .flatMap { column in
+                column.sorted { boxes[$0].maxY > boxes[$1].maxY }
+            }
     }
 
     private static func distance(_ left: CGRect, _ right: CGRect) -> CGFloat {

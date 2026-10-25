@@ -42,14 +42,6 @@ public enum ReaderTextSource: String, Codable, Equatable, Sendable {
     case ocr
     case none
 
-    public var displayName: String {
-        switch self {
-        case .accessibility: "Accessibility"
-        case .ocr: "OCR"
-        case .none: "No text"
-        }
-    }
-
     /// OCR is a fallback, and the panel must say so rather than present
     /// recognised text as if the reader exposed it.
     public var disclosure: String? {

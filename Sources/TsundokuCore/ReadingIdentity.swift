@@ -113,7 +113,7 @@ public struct ReadingIdentity: Sendable, Equatable {
 
     /// The header's title: never a placeholder, never invented.
     public var headerTitle: String {
-        title.isEmpty ? "Current Page" : title
+        ReadingIdentityResolver.isPlaceholder(title) ? "Current Page" : title
     }
 }
 
@@ -143,102 +143,138 @@ public enum ReadingIdentityResolver {
             facts.capture?.isExact == true && !isPlaceholder(facts.capture?.title ?? "")
             ? (facts.capture?.title ?? "") : ""
 
-        // The EPUB that contains the page is the strongest evidence. Resolve
-        // it completely — including its unarchived fallback — before any
-        // reader identifier can claim the page, or a conflicting identifier
-        // the archive happens to know would beat the text.
-        if !epubID.isEmpty {
-            if let book = archiveBook(epubID, in: books) {
-                return ReadingIdentity(
-                    key: book.asin, title: book.title, book: book,
-                    rank: .archiveMatch,
-                    provenance: "archive book matched by EPUB text",
-                    evidence: .archiveEPUB)
-            }
-            if facts.kind == .appleBooks {
-                return ReadingIdentity(
-                    key: canonicalID(epubID),
-                    title: liveTitle.isEmpty ? captureTitle : liveTitle,
-                    book: nil, rank: .archiveMatch,
-                    provenance: "EPUB asset ID; not in the archive",
-                    evidence: .archiveEPUB)
-            }
+        // The order is the contract: each helper claims the page only when
+        // its own evidence is present, and the first claim wins.
+        if let identity = epubIdentity(
+            epubID, kind: facts.kind, liveTitle: liveTitle,
+            captureTitle: captureTitle, books: books)
+        {
+            return identity
         }
-        if !identifier.isEmpty {
-            if let book = archiveBook(identifier, in: books) {
-                return ReadingIdentity(
-                    key: book.asin, title: book.title, book: book,
-                    rank: .archiveMatch,
-                    provenance: "archive book matched by reader identifier",
-                    evidence: .archiveIdentifier)
-            }
-            switch facts.kind {
-            case .appleBooks:
-                // An asset ID the archive has not imported yet is still the
-                // book's real identity; the chat will match the row once the
-                // library is imported. Canonical casing keeps the key stable
-                // across the import.
-                return ReadingIdentity(
-                    key: canonicalID(identifier),
-                    title: liveTitle.isEmpty ? captureTitle : liveTitle,
-                    book: nil, rank: .archiveMatch,
-                    provenance: "reader asset ID; not in the archive",
-                    evidence: .readerIdentifier)
-            case .kindle:
-                // Kindle's last-opened ASIN identifies the book even before
-                // its library row exists. The title stays empty unless an
-                // exact capture proves it.
-                return ReadingIdentity(
-                    key: canonicalID(identifier), title: captureTitle,
-                    book: nil, rank: .lastOpened,
-                    provenance: "Kindle last-opened ASIN; not in the archive",
-                    evidence: .lastOpened)
-            }
+        if let identity = identifierIdentity(
+            identifier, kind: facts.kind, liveTitle: liveTitle,
+            captureTitle: captureTitle, books: books)
+        {
+            return identity
         }
-
-        // Rank 3: a capture whose text matches the live page. Its metadata is
-        // still not trusted; only an exact-confidence title is used.
-        if let capture = facts.capture, !capture.fingerprint.isEmpty {
-            return ReadingIdentity(
-                key: "text:\(capture.fingerprint)",
-                title: capture.isExact ? captureTitle : "",
-                book: nil,
-                rank: .captureText,
-                provenance: "capture text fingerprint",
-                evidence: .captureText)
+        if let identity = captureIdentity(
+            facts.capture, captureTitle: captureTitle)
+        {
+            return identity
         }
-
-        // Rank 4: a real Books title. The archive supplies the display title
-        // and, when one edition matches, the book row; the key stays
-        // title-normalized until the EPUB text picks an asset ID.
-        if facts.kind == .appleBooks, !liveTitle.isEmpty {
-            let normalized = ConversationKey.normalize(liveTitle)
-            let candidates = books.filter {
-                $0.source == .appleBooks
-                    && ConversationKey.normalize($0.title) == normalized
-            }
-            let provenance: String
-            if candidates.isEmpty {
-                provenance = "Books title; no archived edition"
-            } else if candidates.count == 1 {
-                provenance = "Books title; one archived edition"
-            } else {
-                provenance =
-                    "Books title; \(candidates.count) archived editions "
-                    + "await the EPUB text"
-            }
-            return ReadingIdentity(
-                key: "books:\(normalized)",
-                title: candidates.first?.title ?? liveTitle,
-                book: candidates.count == 1 ? candidates[0] : nil,
-                rank: .titleMatch,
-                provenance: provenance, evidence: .title)
+        if let identity = titleIdentity(
+            liveTitle, kind: facts.kind, books: books)
+        {
+            return identity
         }
 
         // Rank 5: nothing trustworthy. No key, no archive write, no title.
         return ReadingIdentity(
             key: nil, title: "", book: nil, rank: .sessionOnly,
             provenance: "unidentified", evidence: .session)
+    }
+
+    /// The EPUB that contains the page is the strongest evidence. It is
+    /// resolved completely — including its unarchived fallback — before any
+    /// reader identifier can claim the page, or a conflicting identifier the
+    /// archive happens to know would beat the text.
+    private static func epubIdentity(
+        _ epubID: String, kind: ReaderKind, liveTitle: String,
+        captureTitle: String, books: [Book]
+    ) -> ReadingIdentity? {
+        guard !epubID.isEmpty else { return nil }
+        if let book = archiveBook(epubID, in: books) {
+            return ReadingIdentity(
+                key: book.asin, title: book.title, book: book,
+                rank: .archiveMatch,
+                provenance: "archive book matched by EPUB text",
+                evidence: .archiveEPUB)
+        }
+        guard kind == .appleBooks else { return nil }
+        return ReadingIdentity(
+            key: canonicalID(epubID),
+            title: liveTitle.isEmpty ? captureTitle : liveTitle,
+            book: nil, rank: .archiveMatch,
+            provenance: "EPUB asset ID; not in the archive",
+            evidence: .archiveEPUB)
+    }
+
+    private static func identifierIdentity(
+        _ identifier: String, kind: ReaderKind, liveTitle: String,
+        captureTitle: String, books: [Book]
+    ) -> ReadingIdentity? {
+        guard !identifier.isEmpty else { return nil }
+        if let book = archiveBook(identifier, in: books) {
+            return ReadingIdentity(
+                key: book.asin, title: book.title, book: book,
+                rank: .archiveMatch,
+                provenance: "archive book matched by reader identifier",
+                evidence: .archiveIdentifier)
+        }
+        switch kind {
+        case .appleBooks:
+            // An asset ID the archive has not imported yet is still the
+            // book's real identity; the chat will match the row once the
+            // library is imported. Canonical casing keeps the key stable
+            // across the import.
+            return ReadingIdentity(
+                key: canonicalID(identifier),
+                title: liveTitle.isEmpty ? captureTitle : liveTitle,
+                book: nil, rank: .archiveMatch,
+                provenance: "reader asset ID; not in the archive",
+                evidence: .readerIdentifier)
+        case .kindle:
+            // Kindle's last-opened ASIN identifies the book even before its
+            // library row exists. The title stays empty unless an exact
+            // capture proves it.
+            return ReadingIdentity(
+                key: canonicalID(identifier), title: captureTitle,
+                book: nil, rank: .lastOpened,
+                provenance: "Kindle last-opened ASIN; not in the archive",
+                evidence: .lastOpened)
+        }
+    }
+
+    /// Rank 3: a capture whose text matches the live page. Its metadata is
+    /// still not trusted; `captureTitle` is empty unless it was exact.
+    private static func captureIdentity(
+        _ capture: CaptureEvidence?, captureTitle: String
+    ) -> ReadingIdentity? {
+        guard let capture, !capture.fingerprint.isEmpty else { return nil }
+        return ReadingIdentity(
+            key: "text:\(capture.fingerprint)", title: captureTitle,
+            book: nil, rank: .captureText,
+            provenance: "capture text fingerprint",
+            evidence: .captureText)
+    }
+
+    /// Rank 4: a real Books title. The archive supplies the display title
+    /// and, when one edition matches, the book row; the key stays
+    /// title-normalized until the EPUB text picks an asset ID.
+    private static func titleIdentity(
+        _ liveTitle: String, kind: ReaderKind, books: [Book]
+    ) -> ReadingIdentity? {
+        guard kind == .appleBooks, !liveTitle.isEmpty else { return nil }
+        let normalized = ConversationKey.normalize(liveTitle)
+        let candidates = books.filter {
+            $0.source == .appleBooks
+                && ConversationKey.normalize($0.title) == normalized
+        }
+        let provenance: String
+        if candidates.isEmpty {
+            provenance = "Books title; no archived edition"
+        } else if candidates.count == 1 {
+            provenance = "Books title; one archived edition"
+        } else {
+            provenance =
+                "Books title; \(candidates.count) archived editions "
+                + "await the EPUB text"
+        }
+        return ReadingIdentity(
+            key: "books:\(normalized)",
+            title: candidates.first?.title ?? liveTitle,
+            book: candidates.count == 1 ? candidates[0] : nil,
+            rank: .titleMatch, provenance: provenance, evidence: .title)
     }
 
     private static func archiveBook(

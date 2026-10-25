@@ -25,7 +25,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
     private let sleep: Sleep
     private let now: Now
     private let isFrontmost: () -> Bool
-    private let activateApp: () -> Void
+    private let activateApp: () throws -> Void
     private let settleMinimum: TimeInterval
     private let settleTimeout: TimeInterval
     private let restoreTimeout: TimeInterval
@@ -58,7 +58,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         isTrusted: @escaping () -> Bool = KindleLive.isTrusted,
         isRunning: @escaping () -> Bool = KindleLive.isRunning,
         isFrontmost: @escaping () -> Bool = { true },
-        activate: @escaping () -> Void = KindleLive.activate,
+        activate: @escaping () throws -> Void = KindleLive.activate,
         settleMinimum: TimeInterval = 0.30,
         settleTimeout: TimeInterval = 3.0,
         restoreTimeout: TimeInterval = 60,
@@ -71,7 +71,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         guard isRunning() else {
             throw ReaderCaptureError.notRunning(.kindle)
         }
-        activate()
+        try activate()
         guard let first = try? readPage() else {
             throw ReaderCaptureError.noWindow(.kindle)
         }
@@ -616,8 +616,6 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 throw ReaderCaptureError.notRunning(.kindle)
             case .noWindow:
                 throw ReaderCaptureError.noWindow(.kindle)
-            case .notReading(let state):
-                throw ReaderCaptureError.notReading(.kindle, state: state)
             case .readFailed(let message):
                 throw ReaderCaptureError.captureFailed(
                     .kindle, reason: message)
@@ -632,7 +630,7 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         // ScreenCaptureKit photographs the display, not a window: if another
         // app is in front, the page image is that app.
         if !isFrontmost() {
-            activateApp()
+            try activateApp()
             sleep(0.35)
             guard isFrontmost() else {
                 throw ReaderCaptureError.captureFailed(

@@ -42,6 +42,11 @@ public struct BookTextIndex: Sendable {
 
     public let pages: [IndexedPage]
     public let chapters: [ChapterMark]
+    /// Normalized page text and shingles, computed once. A page lookup used
+    /// to normalize every captured page again on every call, which made a
+    /// cached index cost the same as an uncached one.
+    private let normalizedPages: [String]
+    private let pageShingles: [Set<String>]
     /// Stable across captures of the same book that start at the same page.
     ///
     /// It hashes every page's normalized text plus the page count. A sample
@@ -52,10 +57,14 @@ public struct BookTextIndex: Sendable {
 
     public init(pages: [IndexedPage]) {
         let sorted = pages.sorted { $0.page < $1.page }
+        let normalized = sorted.map { Self.normalize($0.text) }
         self.pages = sorted
         self.chapters = Self.chapterMarks(in: sorted)
-        let body = sorted.map { Self.normalize($0.text) }
-            .joined(separator: "\u{1E}")
+        self.normalizedPages = normalized
+        self.pageShingles = normalized.map {
+            Self.shingles(Self.words($0))
+        }
+        let body = normalized.joined(separator: "\u{1E}")
         self.fingerprint = TextIndexHash.hex(
             TextIndexHash.fnv(body + "\u{1F}" + String(sorted.count)))
     }
@@ -80,14 +89,16 @@ public struct BookTextIndex: Sendable {
     public func match(pageText: String) -> Match? {
         let live = Self.normalize(pageText)
         guard live.count >= 20 else { return nil }
-        for page in pages where Self.normalize(page.text) == live {
+        for (index, page) in pages.enumerated()
+        where normalizedPages[index] == live
+        {
             return Match(page: page.page, chapter: chapter(for: page.page))
         }
         let liveShingles = Self.shingles(Self.words(live))
         guard liveShingles.count >= 3 else { return nil }
         var best: (page: IndexedPage, score: Double)?
-        for page in pages {
-            let shingles = Self.shingles(Self.words(Self.normalize(page.text)))
+        for (index, page) in pages.enumerated() {
+            let shingles = pageShingles[index]
             guard !shingles.isEmpty else { continue }
             let score =
                 Double(liveShingles.intersection(shingles).count)
@@ -133,26 +144,39 @@ public struct BookTextIndex: Sendable {
             }
             // A Books heading may carry its title after the number:
             // "Chapter 12. The Journey" must not collapse to "Chapter 12".
-            return String(collapse(first).prefix(120))
+            // A heading broken after a hyphen keeps its second line too.
+            return String(
+                collapse(
+                    continuedHeading(first, lines: lines, at: firstIndex)
+                ).prefix(120))
         }
         guard
             first.firstMatch(
                 #"^Chapter\s+\S+"#, options: [.caseInsensitive]) != nil
         else { return nil }
-        var heading = first
-        if !heading.hasSuffix("."), firstIndex + 1 < lines.count {
-            let second = lines[firstIndex + 1]
-            if !second.isEmpty, second.count < 80 {
-                if heading.hasSuffix("-") {
-                    // A heading broken after a hyphen keeps the hyphen: the
-                    // capture cannot say whether it was soft.
-                    heading += second
-                } else {
-                    heading += " " + second
-                }
-            }
+        return String(
+            collapse(
+                continuedHeading(first, lines: lines, at: firstIndex)
+            ).prefix(120))
+    }
+
+    /// Rejoin a heading broken across two captured lines, identically for a
+    /// numeric and a spelled-out chapter number. A hyphen keeps its second
+    /// line directly; otherwise a short following line is appended with a
+    /// space. A heading that already ends a sentence owns no continuation.
+    private static func continuedHeading(
+        _ heading: String, lines: [String], at index: Int
+    ) -> String {
+        guard !heading.hasSuffix("."), index + 1 < lines.count else {
+            return heading
         }
-        return String(collapse(heading).prefix(120))
+        let second = lines[index + 1]
+        guard !second.isEmpty, second.count < 80 else { return heading }
+        if heading.hasSuffix("-") {
+            // The capture cannot say whether the hyphen was soft.
+            return heading + second
+        }
+        return heading + " " + second
     }
 
     // MARK: Text normalisation
@@ -170,7 +194,15 @@ public struct BookTextIndex: Sendable {
     }
 
     static func words(_ normalized: String) -> [String] {
-        normalized.split(separator: " ").map(String.init)
+        normalized.split(separator: " ").flatMap { token -> [String] in
+            // CJK text has no spaces; without this a whole page is one
+            // "word" and can never produce the three shingles matching needs.
+            let hasCJK = token.unicodeScalars.contains {
+                (0x4E00...0x9FFF).contains($0.value)
+                    || (0x3040...0x30FF).contains($0.value)
+            }
+            return hasCJK ? token.map(String.init) : [String(token)]
+        }
     }
 
     static func shingles(_ words: [String], size: Int = 8) -> Set<String> {
@@ -279,16 +311,25 @@ public struct EPUBBookIndex: Sendable {
                 html = text
                 htmlByPath[entry.url.path] = text
             }
-            let nextFragment = entries.dropFirst(index + 1).first {
-                $0.url.path == entry.url.path && !($0.fragment ?? "").isEmpty
-            }?.fragment
+            // Every later fragment can end this chapter; the earliest marker
+            // actually after it wins, so TOC order one→two→one→three still
+            // ends chapter two at three rather than at the body's end.
+            let nextFragments = entries.dropFirst(index + 1).compactMap {
+                candidate -> String? in
+                guard candidate.url.path == entry.url.path,
+                    let fragment = candidate.fragment,
+                    !fragment.isEmpty,
+                    fragment != entry.fragment
+                else { return nil }
+                return fragment
+            }
             let firstFragment = entries.first {
                 $0.url.path == entry.url.path && !($0.fragment ?? "").isEmpty
             }?.fragment
             let text: String
             if let fragment = entry.fragment, !fragment.isEmpty,
                 let sliced = Self.fragmentText(
-                    in: html, fragment: fragment, next: nextFragment)
+                    in: html, fragment: fragment, next: nextFragments)
             {
                 text = sliced
             } else if entry.fragment == nil,
@@ -413,7 +454,8 @@ public struct EPUBBookIndex: Sendable {
     ) -> [NavigationEntry] {
         let base = document.deletingLastPathComponent()
         return entries.compactMap { entry in
-            let parts = entry.href.split(
+            let href = decodeEntities(entry.href)
+            let parts = href.split(
                 separator: "#", maxSplits: 1,
                 omittingEmptySubsequences: false)
             let path = String(parts.first ?? "")
@@ -432,7 +474,7 @@ public struct EPUBBookIndex: Sendable {
                 return nil
             }
             return NavigationEntry(
-                url: url, identity: entry.href,
+                url: url, identity: href,
                 fragment: fragment, title: entry.title)
         }
     }
@@ -442,17 +484,29 @@ public struct EPUBBookIndex: Sendable {
     /// end. A missing marker returns nil, and the caller falls back to the
     /// whole file.
     static func fragmentText(
-        in html: String, fragment: String, next: String?
+        in html: String, fragment: String, next: [String]
     ) -> String? {
         guard
             let start = markerRange(in: html, fragment: fragment)
         else { return nil }
         let startIndex = startOfTag(html, at: start.lowerBound)
         var endIndex = html.endIndex
-        if let next,
-            let nextRange = markerRange(in: html, fragment: next)
-        {
-            endIndex = startOfTag(html, at: nextRange.lowerBound)
+        var nextStart: String.Index?
+        for candidate in next {
+            guard
+                let range = markerRange(in: html, fragment: candidate),
+                range.lowerBound > start.lowerBound
+            else { continue }
+            // A marker that appears earlier in the file cannot end this
+            // chapter; ending there would invert the range and fall back to
+            // the whole file, letting later chapters match this title.
+            let tagStart = startOfTag(html, at: range.lowerBound)
+            if nextStart == nil || tagStart < nextStart! {
+                nextStart = tagStart
+            }
+        }
+        if let nextStart {
+            endIndex = nextStart
         } else if let bodyEnd = html.range(
             of: "</body>", options: [.caseInsensitive])
         {
@@ -568,7 +622,7 @@ public struct EPUBBookIndex: Sendable {
             of: "(?is)<(script|style)\\b[^>]*>[\\s\\S]*?</\\1>",
             with: " ", options: .regularExpression)
         text = text.replacingOccurrences(
-            of: "(?is)<(?:br|/p|/div|/h\\d|/li|/tr|/section)\\s*/?>",
+            of: "(?is)<(?:br|/p|/div|/h\\d|/li|/tr|/td|/th|/section)\\s*/?>",
             with: "\n", options: .regularExpression)
         // Inline tags close a word, not a block: removing them without a
         // separator keeps `inter<em>national</em>ization` one word, while the
@@ -584,7 +638,7 @@ public struct EPUBBookIndex: Sendable {
     /// The old implementation replaced named entities in dictionary order and
     /// then numeric ones, so `&amp;lt;` could become either `<` or `&lt;`
     /// depending on iteration order.
-    private static func decodeEntities(_ text: String) -> String {
+    static func decodeEntities(_ text: String) -> String {
         let named = [
             "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'",
             "nbsp": " ", "mdash": "—", "ndash": "–", "hellip": "…",

@@ -6,6 +6,7 @@ public enum EPUBError: Error, CustomStringConvertible, Sendable {
     case unreadableOPF(URL)
     case malformedXML(String)
     case unsafePath(String)
+    case oversizedMetadata(URL, limit: Int)
 
     public var description: String {
         switch self {
@@ -19,6 +20,9 @@ public enum EPUBError: Error, CustomStringConvertible, Sendable {
             "The EPUB package document is malformed: \(reason)."
         case .unsafePath(let path):
             "The EPUB package document points outside the book: \(path)."
+        case .oversizedMetadata(let url, let limit):
+            "The EPUB metadata file \(url.lastPathComponent) exceeds "
+                + "\(limit) bytes."
         }
     }
 }
@@ -40,6 +44,11 @@ public struct EPUBManifestItem: Sendable, Equatable {
 /// The parts of an EPUB package document the export bundle needs. Parsed
 /// read-only; nothing here writes to the book or extracts its text.
 public struct EPUBPackage: Sendable, Equatable {
+    /// Metadata files are small; a cap stops a crafted EPUB from making the
+    /// parser allocate before it rejects the file.
+    static let containerLimit = 1_048_576
+    static let opfLimit = 4_194_304
+
     public let rootURL: URL
     public let opfURL: URL
     public let title: String?
@@ -85,14 +94,21 @@ public struct EPUBPackage: Sendable, Equatable {
     /// Parse an unpacked EPUB directory: read `META-INF/container.xml` for the
     /// package path, then the package document itself.
     public static func load(fromEPUBDirectory root: URL) throws -> EPUBPackage {
-        let root = root.standardizedFileURL
+        // A resolved root lets `SafeFile` open every component with
+        // O_NOFOLLOW; a symlinked root would otherwise be refused.
+        let root = root.resolvingSymlinksInPath().standardizedFileURL
         let container = root.appendingPathComponent("META-INF/container.xml")
         guard contains(container, in: root) else {
             throw EPUBError.unsafePath(container.path)
         }
         let opfURL: URL
         if FileManager.default.fileExists(atPath: container.path) {
-            guard let data = try? Data(contentsOf: container) else {
+            // Read through the validated descriptor, not by path: a link
+            // swapped in after the containment check must not be followed.
+            guard
+                let data = try readMetadata(
+                    container, in: root, limit: containerLimit)
+            else {
                 throw EPUBError.missingContainer(container)
             }
             let parser = XMLParser(data: data)
@@ -111,10 +127,38 @@ public struct EPUBPackage: Sendable, Equatable {
         } else {
             throw EPUBError.missingContainer(container)
         }
-        guard let data = try? Data(contentsOf: opfURL) else {
+        guard
+            let data = try readMetadata(opfURL, in: root, limit: opfLimit)
+        else {
             throw EPUBError.unreadableOPF(opfURL)
         }
         return try parse(opfData: data, opfURL: opfURL, rootURL: root)
+    }
+
+    /// Read one metadata file under `root` without following a symlink in
+    /// any component, and refuse a file larger than `limit`. Nil means the
+    /// file could not be opened; oversize throws so the caller can say why.
+    static func readMetadata(
+        _ url: URL, in root: URL, limit: Int
+    ) throws -> Data? {
+        let rootPath = root.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix(rootPath + "/") else { return nil }
+        let relative = String(path.dropFirst(rootPath.count + 1))
+        guard
+            let handle = SafeFile.openUnderRoot(
+                root, relativePath: relative)
+        else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        guard size <= UInt64(limit) else {
+            throw EPUBError.oversizedMetadata(url, limit: limit)
+        }
+        try? handle.seek(toOffset: 0)
+        guard let data = BoundedFileReader.read(handle, limit: limit) else {
+            throw EPUBError.oversizedMetadata(url, limit: limit)
+        }
+        return data
     }
 
     /// Parse package-document bytes. `opfURL` and `rootURL` are used to resolve
@@ -159,7 +203,8 @@ public struct EPUBPackage: Sendable, Equatable {
         }
         candidates.append(contentsOf: delegate.items.filter { item in
             let properties = item.properties?.lowercased() ?? ""
-            return properties.split(separator: " ").contains("cover-image")
+            return properties.split(whereSeparator: \.isWhitespace)
+                .contains("cover-image")
         })
         candidates.append(contentsOf: delegate.items.filter { item in
             let mediaType = item.mediaType?.lowercased() ?? ""
@@ -292,6 +337,7 @@ private final class OPFXMLDelegate: NSObject, XMLParserDelegate {
     var spine: [String] = []
 
     private var inMetadata = false
+    private var inManifest = false
     private var inSpine = false
     private var currentElement: String?
     private var currentScheme: String?
@@ -307,6 +353,10 @@ private final class OPFXMLDelegate: NSObject, XMLParserDelegate {
             inMetadata = true
             return
         }
+        if local == "manifest" {
+            inManifest = true
+            return
+        }
         if local == "spine" {
             inSpine = true
             return
@@ -317,20 +367,13 @@ private final class OPFXMLDelegate: NSObject, XMLParserDelegate {
             }
             return
         }
-        guard inMetadata else {
-            if local == "item" {
-                let id = attribute(attributeDict, "id") ?? ""
-                let href = attribute(attributeDict, "href") ?? ""
-                if !id.isEmpty, !href.isEmpty {
-                    items.append(
-                        EPUBManifestItem(
-                            id: id, href: href,
-                            mediaType: attribute(attributeDict, "media-type"),
-                            properties: attribute(attributeDict, "properties")))
-                }
-            }
+        // Only a manifest's own items are manifest items; a same-named
+        // element elsewhere in the package document must not join the list.
+        if local == "item", inManifest {
+            appendItem(attributeDict)
             return
         }
+        guard inMetadata else { return }
         switch local {
         case "meta":
             let name = attribute(attributeDict, "name")?.lowercased()
@@ -345,19 +388,20 @@ private final class OPFXMLDelegate: NSObject, XMLParserDelegate {
             currentElement = local
             currentScheme = attribute(attributeDict, "scheme")
             buffer = ""
-        case "item":
-            let id = attribute(attributeDict, "id") ?? ""
-            let href = attribute(attributeDict, "href") ?? ""
-            if !id.isEmpty, !href.isEmpty {
-                items.append(
-                    EPUBManifestItem(
-                        id: id, href: href,
-                        mediaType: attribute(attributeDict, "media-type"),
-                        properties: attribute(attributeDict, "properties")))
-            }
         default:
             break
         }
+    }
+
+    private func appendItem(_ attributes: [String: String]) {
+        let id = attribute(attributes, "id") ?? ""
+        let href = attribute(attributes, "href") ?? ""
+        guard !id.isEmpty, !href.isEmpty else { return }
+        items.append(
+            EPUBManifestItem(
+                id: id, href: href,
+                mediaType: attribute(attributes, "media-type"),
+                properties: attribute(attributes, "properties")))
     }
 
     func parser(
@@ -367,6 +411,11 @@ private final class OPFXMLDelegate: NSObject, XMLParserDelegate {
         buffer += string
     }
 
+    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+        guard currentElement != nil else { return }
+        buffer += String(decoding: CDATABlock, as: UTF8.self)
+    }
+
     func parser(
         _ parser: XMLParser, didEndElement elementName: String,
         namespaceURI: String?, qualifiedName qName: String?
@@ -374,6 +423,10 @@ private final class OPFXMLDelegate: NSObject, XMLParserDelegate {
         let local = localName(elementName)
         if local == "metadata" {
             inMetadata = false
+            return
+        }
+        if local == "manifest" {
+            inManifest = false
             return
         }
         if local == "spine" {
