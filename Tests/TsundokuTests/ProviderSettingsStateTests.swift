@@ -231,6 +231,53 @@ struct AIProviderAdoptionTests {
         #expect(!message.hasPrefix("spawn 2"))
     }
 
+    @Test func endpointUsabilityMatchesTheTransportRule() {
+        #expect(AIService.endpointIsUsable(URL(string: "https://api.deepseek.com")!))
+        #expect(AIService.endpointIsUsable(URL(string: "http://127.0.0.1:11434/v1")!))
+        #expect(AIService.endpointIsUsable(URL(string: "http://localhost:1234/v1")!))
+        #expect(!AIService.endpointIsUsable(URL(string: "http://api.example.com")!))
+        #expect(!AIService.endpointIsUsable(URL(string: "example.com")!))
+        #expect(!AIService.endpointIsUsable(URL(string: "ftp://example.com")!))
+    }
+
+    @Test func aPastedEndpointIsTrimmedBeforeUse() throws {
+        // A leading space is invisible in the field and makes URL(string:) nil.
+        let settings = AISettings(
+            provider: .http, model: "m", endpoint: " https://api.deepseek.com\n",
+            httpProfileID: "custom")
+        #expect(AIService.httpBaseURL(settings)?.absoluteString == "https://api.deepseek.com")
+        let json = #"{"provider":"http","endpoint":" https://api.deepseek.com "}"#
+        let decoded = try JSONDecoder().decode(AISettings.self, from: Data(json.utf8))
+        #expect(decoded.endpoint == "https://api.deepseek.com")
+    }
+
+    @Test func aPaddedEndpointStillFetchesModels() async {
+        let state = ProviderSettingsState(loadKey: { _ in "" }, saveKey: { _, _ in 0 },
+            modelFetch: { _, base, _ in
+                #expect(base.absoluteString == "https://api.deepseek.com")
+                return [AIModel(id: "deepseek-chat")]
+            })
+        state.loadKeyIfNeeded(profileID: "custom")
+        state.loadModels(settings: AISettings(
+            provider: .http, model: "", endpoint: " https://api.deepseek.com",
+            httpProfileID: "custom"))
+        for _ in 0..<100 where state.loadingModels { await Task.yield() }
+        #expect(state.models.map(\.id) == ["deepseek-chat"])
+        #expect(state.modelStatus == "1 models")
+    }
+
+    @Test func catalogueFailuresNameTheActualProblem() async {
+        let state = ProviderSettingsState(loadKey: { _ in "" }, saveKey: { _, _ in 0 },
+            modelFetch: { _, _, _ in [] })
+        state.loadKeyIfNeeded(profileID: "custom")
+        state.loadModels(settings: AISettings(provider: .http, model: "", endpoint: "  ", httpProfileID: "custom"))
+        for _ in 0..<20 { await Task.yield() }
+        #expect(state.modelStatus == "Set the endpoint first.")
+        state.loadModels(settings: AISettings(provider: .http, model: "", endpoint: "example.com", httpProfileID: "custom"))
+        for _ in 0..<20 { await Task.yield() }
+        #expect(state.modelStatus == "The endpoint is not a valid URL.")
+    }
+
     @Test func aCatalogueFromTheOldServiceIsDropped() async {
         let state = ProviderSettingsState(loadKey: { _ in "" }, saveKey: { _, _ in 0 },
             modelFetch: { _, _, _ in

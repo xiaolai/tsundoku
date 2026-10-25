@@ -81,6 +81,18 @@ public enum AIService {
         AIProviderProfile.known.map(\.id)
     }
 
+    /// Whether an address is one the HTTP provider accepts: HTTPS anywhere, or
+    /// plain HTTP only on this Mac. `URL(string:)` accepts a scheme-less string
+    /// like `example.com`, so parsing alone proves nothing.
+    public static func endpointIsUsable(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), let host = url.host,
+            !host.isEmpty
+        else { return false }
+        if scheme == "https" { return true }
+        guard scheme == "http" else { return false }
+        return host == "127.0.0.1" || host == "localhost"
+    }
+
     /// The base sayso appends `chat/completions` to. The old client accepted an
     /// endpoint that already named the full path, so a saved one must not get
     /// the suffix twice.
@@ -100,11 +112,15 @@ public enum AIService {
     }
 
     /// The base address the provider will use: the profile's own for a known
-    /// service, the typed one for `custom`.
+    /// service, the typed one for `custom`. Whitespace is trimmed: the field
+    /// hides a pasted leading space, and `URL(string:)` refuses the string
+    /// while a reader sees a perfectly good address.
     public static func httpBaseURL(_ settings: AISettings) -> URL? {
         let profile = httpProfile(settings)
         if profile.id == AIProviderProfile.custom.id {
-            return URL(string: settings.endpoint)
+            return URL(
+                string: settings.endpoint.trimmingCharacters(
+                    in: .whitespacesAndNewlines))
         }
         return profile.baseURL
     }

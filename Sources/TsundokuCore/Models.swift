@@ -407,8 +407,9 @@ public struct AISettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(String.self, forKey: .model)
             ?? defaults.model
         endpoint =
-            try container.decodeIfPresent(String.self, forKey: .endpoint)
-            ?? defaults.endpoint
+            (try container.decodeIfPresent(String.self, forKey: .endpoint)
+                ?? defaults.endpoint)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         httpProfileID = AIService.normalizedProfileID(
             try container.decodeIfPresent(
                 String.self, forKey: .httpProfileID)
@@ -476,8 +477,13 @@ public struct AISettings: Codable, Sendable, Equatable {
         return settings
     }
 
+    /// Persist a normalised copy: a pasted endpoint often carries a leading or
+    /// trailing space, which the field hides and `URL(string:)` refuses.
     public func save() {
-        guard let data = try? JSONEncoder().encode(self) else { return }
+        var normalised = self
+        normalised.endpoint = endpoint.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        guard let data = try? JSONEncoder().encode(normalised) else { return }
         UserDefaults.standard.set(data, forKey: "ai.settings")
     }
 }

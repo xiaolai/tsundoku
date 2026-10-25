@@ -201,11 +201,19 @@ import TsundokuCore
     /// The service's own model list, a configuration aid, not an answer.
     public func loadModels(settings: AISettings) {
         guard settings.provider == .http else { return }
-        guard let base = AIService.httpBaseURL(settings).map(AIService.httpBase)
+        guard
+            let url = AIService.httpBaseURL(settings),
+            AIService.endpointIsUsable(url)
         else {
-            modelStatus = "Set the endpoint first."
+            let typed = settings.endpoint.trimmingCharacters(
+                in: .whitespacesAndNewlines)
+            modelStatus =
+                typed.isEmpty
+                ? "Set the endpoint first."
+                : "The endpoint is not a valid URL."
             return
         }
+        let base = AIService.httpBase(url)
         invalidateCatalogue()
         let generation = modelGeneration
         loadingModels = true
