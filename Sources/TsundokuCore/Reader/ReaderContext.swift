@@ -140,6 +140,21 @@ public extension ReaderContext {
     func selectedText() -> String? { nil }
 }
 
+/// Joins a selection that spans several Accessibility nodes.
+///
+/// Books sets `AXSelectedText` per selected static text, so one drag can
+/// produce several parts. They are joined in tree order with a newline; empty
+/// or whitespace-only nodes contribute nothing, and no selection is nil rather
+/// than an empty string.
+public enum SelectionText {
+    public static func joined(_ parts: [String]) -> String? {
+        let kept = parts.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+        return kept.isEmpty ? nil : kept.joined(separator: "\n")
+    }
+}
+
 public enum ReaderContextLocator {
     public static func context(for kind: ReaderKind) -> any ReaderContext {
         switch kind {

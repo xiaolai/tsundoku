@@ -15,7 +15,8 @@ public struct AIContext: Codable, Hashable, Sendable {
     /// or a non-DRM EPUB's navigation.
     public var chapter: String?
     /// The reader's selected text, when the reader exposes it. Apple Books
-    /// does; Kindle does not (see the companion-context record).
+    /// does; Kindle does not. The measured evidence is in the private
+    /// companion-context record, dated 2026-10-26.
     public var selection: String?
     /// The page text the answer was based on, bounded so a long page does not
     /// duplicate the whole prompt in the archive.
@@ -149,6 +150,39 @@ public struct ConversationSummary: Identifiable, Hashable, Sendable {
     public var preview: String {
         let text = lastAnswer ?? firstQuestion
         return String(text.prefix(160))
+    }
+}
+
+/// Which conversations belong to a library book, and which are only
+/// tentatively filed.
+///
+/// A chat keyed by the book's ASIN is filed. One keyed by the book's title,
+/// by an older `kindle:` title key, or by a capture fingerprint of a capture
+/// made from this book is the same book under weaker evidence: it is shown
+/// under the book and marked unfiled until the reader files it.
+public enum ConversationFiling {
+    public static func keys(
+        for book: Book, captureFingerprints: [String]
+    ) -> Set<String> {
+        var keys: Set<String> = [book.asin]
+        let normalized = ConversationKey.normalize(book.title)
+        if !normalized.isEmpty,
+            !ReadingIdentityResolver.isPlaceholder(book.title)
+        {
+            keys.insert("books:\(normalized)")
+            keys.insert("kindle:\(normalized)")
+        }
+        for fingerprint in captureFingerprints where !fingerprint.isEmpty {
+            keys.insert("text:\(fingerprint)")
+        }
+        return keys
+    }
+
+    public static func isFiled(
+        _ conversation: Conversation, under book: Book
+    ) -> Bool {
+        conversation.bookKey.caseInsensitiveCompare(book.asin)
+            == .orderedSame
     }
 }
 

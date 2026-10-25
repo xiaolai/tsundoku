@@ -793,6 +793,39 @@ public final class Archive: @unchecked Sendable {
         }
     }
 
+    /// Moves a book's conversations to a stronger key.
+    ///
+    /// Rows are updated in place, so no thread is duplicated and none is
+    /// lost; the operation is idempotent. A blank stored title or source is
+    /// filled from the improved identity, and an existing one is left alone.
+    public func migrateConversations(
+        from oldKey: String, to newKey: String, title: String? = nil,
+        source: BookSource? = nil
+    ) throws {
+        guard !oldKey.isEmpty, !newKey.isEmpty, oldKey != newKey else {
+            return
+        }
+        try queue.sync {
+            try database.execute(
+                "UPDATE conversations SET book_key = ? WHERE book_key = ?",
+                [.text(newKey), .text(oldKey)])
+            if let title, !title.isEmpty {
+                try database.execute(
+                    """
+                    UPDATE conversations SET book_title = ?
+                    WHERE book_key = ? AND (book_title IS NULL OR book_title = '')
+                    """, [.text(title), .text(newKey)])
+            }
+            if let source {
+                try database.execute(
+                    """
+                    UPDATE conversations SET book_source = ?
+                    WHERE book_key = ? AND book_source IS NULL
+                    """, [.text(source.rawValue), .text(newKey)])
+            }
+        }
+    }
+
     private static func conversation(from row: Row) -> Conversation {
         Conversation(
             id: row.int("id") ?? 0,

@@ -432,6 +432,34 @@ struct TsundokuCoreTests {
         #expect(prompt.contains("The reader's request: Focus on the metaphor"))
     }
 
+    @Test("a chapter note appears once in every action's prompt")
+    func chapterNoteOnce() {
+        for action in AIAction.allCases {
+            let prompt = AIComposer.prompt(
+                for: AIRequest(
+                    action: action, pageText: "Passage", bookTitle: "A Book",
+                    chapter: "Ch. 2"),
+                settings: AISettings.defaults)
+            #expect(
+                prompt.components(
+                    separatedBy: "The passage is from Ch. 2."
+                ).count == 2, "\(action.rawValue)")
+        }
+    }
+
+    @Test("no chapter note is invented when the local text has none")
+    func noChapterNoteWithoutAChapter() {
+        for action in AIAction.allCases {
+            let prompt = AIComposer.prompt(
+                for: AIRequest(
+                    action: action, pageText: "Passage", bookTitle: "A Book"),
+                settings: AISettings.defaults)
+            #expect(
+                !prompt.contains("The passage is from"),
+                "\(action.rawValue)")
+        }
+    }
+
     @Test("Kindle's last-opened book id yields its ASIN")
     func kindleBookIDParsing() {
         #expect(

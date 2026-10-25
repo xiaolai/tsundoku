@@ -115,6 +115,35 @@ struct ConversationStoreTests {
                 "Selection · 18 characters"))
     }
 
+    @Test("a book's chats include its unfiled title and capture keys")
+    func filingKeys() {
+        let book = Book(
+            asin: "ASSET-2", title: "Alice's Adventures", author: "Carroll",
+            bookType: 10, readState: 0, source: .appleBooks)
+        let keys = ConversationFiling.keys(
+            for: book, captureFingerprints: ["f00d", ""])
+        #expect(keys.contains("ASSET-2"))
+        #expect(keys.contains("books:alice's adventures"))
+        #expect(keys.contains("kindle:alice's adventures"))
+        #expect(keys.contains("text:f00d"))
+        #expect(!keys.contains("text:"))
+        let titleKeyed = Conversation(
+            id: 1, bookKey: "books:alice's adventures", bookTitle: "Alice",
+            bookSource: .appleBooks, createdAt: Date(), updatedAt: Date())
+        #expect(!ConversationFiling.isFiled(titleKeyed, under: book))
+        let filed = Conversation(
+            id: 2, bookKey: "asset-2", bookTitle: "Alice",
+            bookSource: .appleBooks, createdAt: Date(), updatedAt: Date())
+        #expect(ConversationFiling.isFiled(filed, under: book))
+
+        let placeholder = Book(
+            asin: "B9", title: "Kindle", author: "", bookType: 10,
+            readState: 0)
+        let placeholderKeys = ConversationFiling.keys(
+            for: placeholder, captureFingerprints: [])
+        #expect(placeholderKeys == ["B9"])
+    }
+
     @Test("a stable identifier keys a book before the library knows it")
     func keyUsesAStableIdentifier() {
         #expect(

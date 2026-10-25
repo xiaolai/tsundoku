@@ -98,6 +98,14 @@ struct ReadingTextIndexTests {
         #expect(result.pageNumber == 2)
         #expect(result.chapter == "Ch. 1")
         #expect(result.fingerprint != nil)
+
+        // A page no local text covers is honestly unresolved: no guessed
+        // page, no guessed chapter.
+        #expect(
+            ReadingContextResolver.resolve(
+                pageText:
+                    "A page this capture never saw, with enough words to be a real page.",
+                kind: .kindle, identifier: nil, captures: [record]) == nil)
     }
 
     @Test("an EPUB's navigation supplies the chapter, and DRM is refused")

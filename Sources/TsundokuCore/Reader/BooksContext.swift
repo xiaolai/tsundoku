@@ -10,9 +10,9 @@ import Vision
 
 /// Apple Books page text through Accessibility, with a labelled OCR fallback.
 ///
-/// Selection is deliberately out of scope: the spike measured
-/// `AXSelectedText` as empty and a drag selecting nothing, so this type never
-/// claims a selection it did not read.
+/// Books exposes a selection as `AXSelectedText` on each selected static text
+/// node; the words are joined in tree order. The web area's own attribute
+/// stays empty, so reading only the page element would miss every selection.
 public struct BooksContext: ReaderContext {
     public let kind: ReaderKind = .appleBooks
     public let bundleID: String
@@ -105,9 +105,7 @@ public struct BooksContext: ReaderContext {
             collectSelection(window, source: source, depth: 0, into: &parts)
             if parts.count >= 50 { break }
         }
-        let text = parts.joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? nil : text
+        return SelectionText.joined(parts)
     }
 
     private func collectSelection(

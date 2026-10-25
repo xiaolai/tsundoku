@@ -231,7 +231,7 @@ public enum AIComposer {
             return """
                 List the key terms in \(target) from \(book) and define each \
                 in one sentence, in \(language). Do not add terms that are not \
-                in the passage. \(guardLine)\(selectionNote)\(readerNote)\(chapterNote)\(chapterNote)
+                in the passage. \(guardLine)\(selectionNote)\(readerNote)\(chapterNote)
 
                 <passage>
                 \(passage)

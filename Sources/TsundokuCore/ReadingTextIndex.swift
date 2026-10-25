@@ -268,6 +268,15 @@ public struct EPUBBookIndex: Sendable {
     }
 
     public func chapter(containing pageText: String) -> String? {
+        guard let best = bestChapter(pageText), best.score >= 0.4 else {
+            return nil
+        }
+        return best.title
+    }
+
+    /// The chapter match and its score. Two editions of one book can both
+    /// contain the page; the score is what lets the stronger edition win.
+    func bestChapter(_ pageText: String) -> (title: String, score: Double)? {
         let live = BookTextIndex.shingles(
             BookTextIndex.words(BookTextIndex.normalize(pageText)))
         guard live.count >= 3 else { return nil }
@@ -279,8 +288,7 @@ public struct EPUBBookIndex: Sendable {
                 Double(live.intersection(shingles).count) / Double(live.count)
             if score > (best?.score ?? 0) { best = (chapter.title, score) }
         }
-        guard let best, best.score >= 0.4 else { return nil }
-        return best.title
+        return best
     }
 
     // MARK: Navigation
@@ -441,15 +449,20 @@ public enum ReadingContextResolver {
         public let pageNumber: Int?
         public let fingerprint: String?
         public let capture: CaptureRecord?
+        /// The archive asset ID whose EPUB contained the live page. Only a
+        /// text-validated edition supplies one; it is the identity that
+        /// replaces a title key.
+        public let assetID: String?
 
         public init(
             chapter: String?, pageNumber: Int?, fingerprint: String?,
-            capture: CaptureRecord?
+            capture: CaptureRecord?, assetID: String? = nil
         ) {
             self.chapter = chapter
             self.pageNumber = pageNumber
             self.fingerprint = fingerprint
             self.capture = capture
+            self.assetID = assetID
         }
     }
 
@@ -471,15 +484,16 @@ public enum ReadingContextResolver {
                     $0.source == .appleBooks && $0.title == title
                 }.map(\.asin)
             }
-            for candidate in candidates {
-                guard
-                    let path = EPUBIndexCache.shared.epubPath(for: candidate),
-                    let index = EPUBIndexCache.shared.index(at: path),
-                    let chapter = index.chapter(containing: pageText)
-                else { continue }
+            if let match = edition(
+                matching: pageText, identifiers: candidates,
+                index: { identifier in
+                    EPUBIndexCache.shared.epubPath(for: identifier)
+                        .flatMap { EPUBIndexCache.shared.index(at: $0) }
+                })
+            {
                 return Result(
-                    chapter: chapter, pageNumber: nil, fingerprint: nil,
-                    capture: nil)
+                    chapter: match.chapter, pageNumber: nil, fingerprint: nil,
+                    capture: nil, assetID: match.identifier)
             }
             // The Books library's own container can be unreadable while its
             // unpacked EPUBs are still in the iCloud Books folder. Name
@@ -509,6 +523,30 @@ public enum ReadingContextResolver {
                 fingerprint: index.fingerprint, capture: record)
         }
         return nil
+    }
+
+    /// Picks the edition whose EPUB best contains the live page.
+    ///
+    /// Several editions can share a title, and the same page often appears in
+    /// more than one of them. The highest shingle score wins; a tie is broken
+    /// by identifier, so the answer never depends on archive row order.
+    public static func edition(
+        matching pageText: String, identifiers: [String],
+        index: (String) -> EPUBBookIndex?
+    ) -> (identifier: String, chapter: String)? {
+        var best: (identifier: String, chapter: String, score: Double)?
+        for identifier in identifiers.sorted() {
+            guard
+                let book = index(identifier),
+                let match = book.bestChapter(pageText),
+                match.score >= 0.4
+            else { continue }
+            if match.score > (best?.score ?? 0) {
+                best = (identifier, match.title, match.score)
+            }
+        }
+        guard let best else { return nil }
+        return (best.identifier, best.chapter)
     }
 }
 
@@ -552,60 +590,74 @@ public extension ReadingContextResolver {
     }
 }
 
-private final class CaptureIndexCache: @unchecked Sendable {
-    static let shared = CaptureIndexCache()
+/// A bounded, insertion-ordered cache.
+///
+/// Eviction removes the oldest entry, not the whole cache: clearing every
+/// index on the 33rd book would turn one page turn into a cold load of all
+/// of them. Parsing happens outside the lock; two callers may parse the same
+/// book once, and the first result is kept.
+private final class BoundedIndexCache<Value>: @unchecked Sendable {
     private let lock = NSLock()
-    private var values: [String: BookTextIndex] = [:]
+    private let capacity: Int
+    private var values: [String: Value] = [:]
+    private var order: [String] = []
 
-    func index(directory: String) -> BookTextIndex? {
+    init(capacity: Int) {
+        self.capacity = capacity
+    }
+
+    func value(for key: String, load: () -> Value?) -> Value? {
+        lock.lock()
+        if let value = values[key] {
+            lock.unlock()
+            return value
+        }
+        lock.unlock()
+        guard let loaded = load() else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        if let value = values[directory] { return value }
-        guard
-            let index = try? BookTextIndex.load(
+        if let existing = values[key] { return existing }
+        if values.count >= capacity, let oldest = order.first {
+            values.removeValue(forKey: oldest)
+            order.removeFirst()
+        }
+        values[key] = loaded
+        order.append(key)
+        return loaded
+    }
+}
+
+private final class CaptureIndexCache: @unchecked Sendable {
+    static let shared = CaptureIndexCache()
+    private let cache = BoundedIndexCache<BookTextIndex>(capacity: 32)
+
+    func index(directory: String) -> BookTextIndex? {
+        cache.value(for: directory) {
+            try? BookTextIndex.load(
                 directory: URL(fileURLWithPath: directory))
-        else { return nil }
-        if values.count >= 32 { values.removeAll() }
-        values[directory] = index
-        return index
+        }
     }
 }
 
 private final class EPUBIndexCache: @unchecked Sendable {
     static let shared = EPUBIndexCache()
-    private let lock = NSLock()
-    private var paths: [String: URL] = [:]
-    private var values: [String: EPUBBookIndex] = [:]
+    private let paths = BoundedIndexCache<URL>(capacity: 16)
+    private let values = BoundedIndexCache<EPUBBookIndex>(capacity: 16)
 
     func epubPath(for identifier: String) -> URL? {
         let key = identifier.uppercased()
-        lock.lock()
-        if let url = paths[key] {
-            lock.unlock()
-            return url
+        return paths.value(for: key) {
+            guard
+                let asset = try? BooksAssetReader().asset(for: key),
+                asset.drm == .clear, let path = asset.path
+            else { return nil }
+            return path
         }
-        lock.unlock()
-        guard
-            let asset = try? BooksAssetReader().asset(for: key),
-            asset.drm == .clear, let path = asset.path
-        else { return nil }
-        lock.lock()
-        if paths.count >= 16 { paths.removeAll() }
-        paths[key] = path
-        lock.unlock()
-        return path
     }
 
     func index(at path: URL) -> EPUBBookIndex? {
-        lock.lock()
-        defer { lock.unlock() }
-        let key = path.path
-        if let value = values[key] { return value }
-        guard let index = try? EPUBBookIndex(epubDirectory: path) else {
-            return nil
+        values.value(for: path.path) {
+            try? EPUBBookIndex(epubDirectory: path)
         }
-        if values.count >= 16 { values.removeAll() }
-        values[key] = index
-        return index
     }
 }
