@@ -44,6 +44,8 @@ struct TsundokuCLI {
             original(Array(arguments.dropFirst()))
         case "books-probe":
             BooksProbe.run(Array(arguments.dropFirst()))
+        case "context-index":
+            contextIndex(Array(arguments.dropFirst()))
         default:
             usage()
             exit(2)
@@ -770,6 +772,68 @@ struct TsundokuCLI {
         return arguments[index + 1]
     }
 
+    /// Prints the local text index the companion uses: a capture's chapters
+    /// and page match, or a non-DRM EPUB's navigation.
+    private static func contextIndex(_ arguments: [String]) {
+        let liveText = value("--text", arguments).flatMap {
+            try? String(contentsOfFile: $0, encoding: .utf8)
+        }
+        do {
+            if let epub = value("--epub", arguments) {
+                let index = try EPUBBookIndex(
+                    epubDirectory: URL(fileURLWithPath: epub))
+                print("epub chapters=\(index.chapters.count)")
+                for chapter in index.chapters.prefix(40) {
+                    print("  \(chapter.title) [\(chapter.text.count) chars]")
+                }
+                if let liveText {
+                    print(
+                        "match chapter="
+                            + (index.chapter(containing: liveText) ?? "none"))
+                }
+                return
+            }
+            guard
+                let directory = arguments.first(where: {
+                    !$0.hasPrefix("--")
+                })
+            else {
+                print("context-index needs a capture directory or --epub")
+                exit(2)
+            }
+            let index = try BookTextIndex.load(
+                directory: URL(fileURLWithPath: directory))
+            print(
+                "capture pages=\(index.pages.count) "
+                    + "chapters=\(index.chapters.count) "
+                    + "fingerprint=\(index.fingerprint)")
+            for mark in index.chapters.prefix(60) {
+                print("  page \(mark.page): \(mark.title)")
+            }
+            if let liveText {
+                if let match = index.match(pageText: liveText) {
+                    print(
+                        "match page=\(match.page) "
+                            + "chapter=\(match.chapter ?? "none")")
+                } else {
+                    print("match none")
+                }
+            }
+        } catch {
+            print("error: \(error)")
+            exit(1)
+        }
+    }
+
+    private static func value(_ flag: String, _ arguments: [String])
+        -> String?
+    {
+        guard let index = arguments.firstIndex(of: flag),
+            arguments.indices.contains(index + 1)
+        else { return nil }
+        return arguments[index + 1]
+    }
+
     private static func usage() {
         print(
             """
@@ -796,6 +860,8 @@ struct TsundokuCLI {
                     [--out DIR]
               original --asin ID [--source kindle|books] [--out DIR] [--copy]
                        | --path PATH
+              context-index CAPTURE_DIR [--text FILE]
+                       | --epub EPUB_DIR [--text FILE]
             """)
     }
 }

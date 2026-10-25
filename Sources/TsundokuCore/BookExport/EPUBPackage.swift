@@ -51,6 +51,8 @@ public struct EPUBPackage: Sendable, Equatable {
     public let identifierScheme: String?
     public let coverImageURL: URL?
     public let items: [EPUBManifestItem]
+    /// Manifest item ids in reading order, from the package document's spine.
+    public let spine: [String]
 
     public init(
         rootURL: URL,
@@ -63,7 +65,8 @@ public struct EPUBPackage: Sendable, Equatable {
         identifier: String?,
         identifierScheme: String?,
         coverImageURL: URL?,
-        items: [EPUBManifestItem]
+        items: [EPUBManifestItem],
+        spine: [String] = []
     ) {
         self.rootURL = rootURL
         self.opfURL = opfURL
@@ -76,6 +79,7 @@ public struct EPUBPackage: Sendable, Equatable {
         self.identifierScheme = identifierScheme
         self.coverImageURL = coverImageURL
         self.items = items
+        self.spine = spine
     }
 
     /// Parse an unpacked EPUB directory: read `META-INF/container.xml` for the
@@ -140,7 +144,8 @@ public struct EPUBPackage: Sendable, Equatable {
             identifier: identifier,
             identifierScheme: delegate.identifierScheme,
             coverImageURL: coverURL,
-            items: delegate.items)
+            items: delegate.items,
+            spine: delegate.spine)
     }
 
     private static func coverURL(
@@ -284,8 +289,10 @@ private final class OPFXMLDelegate: NSObject, XMLParserDelegate {
     var identifierScheme: String?
     var metaCoverID: String?
     var items: [EPUBManifestItem] = []
+    var spine: [String] = []
 
     private var inMetadata = false
+    private var inSpine = false
     private var currentElement: String?
     private var currentScheme: String?
     private var buffer = ""
@@ -298,6 +305,16 @@ private final class OPFXMLDelegate: NSObject, XMLParserDelegate {
         let local = localName(elementName)
         if local == "metadata" {
             inMetadata = true
+            return
+        }
+        if local == "spine" {
+            inSpine = true
+            return
+        }
+        if inSpine, local == "itemref" {
+            if let idref = attribute(attributeDict, "idref"), !idref.isEmpty {
+                spine.append(idref)
+            }
             return
         }
         guard inMetadata else {
@@ -357,6 +374,10 @@ private final class OPFXMLDelegate: NSObject, XMLParserDelegate {
         let local = localName(elementName)
         if local == "metadata" {
             inMetadata = false
+            return
+        }
+        if local == "spine" {
+            inSpine = false
             return
         }
         guard inMetadata, let currentElement, local == currentElement else {
