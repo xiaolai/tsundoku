@@ -263,6 +263,7 @@ public struct EPUBBookIndex: Sendable {
         var chapters: [Chapter] = []
         var seen = Set<String>()
         var htmlByPath: [String: String] = [:]
+        var chapterForPath: [String: Int] = [:]
         for (index, entry) in entries.enumerated() {
             // Two chapters can live in one XHTML file as fragments. Their
             // identities differ, and each chapter slices its own range; the
@@ -281,18 +282,58 @@ public struct EPUBBookIndex: Sendable {
             let nextFragment = entries.dropFirst(index + 1).first {
                 $0.url.path == entry.url.path && !($0.fragment ?? "").isEmpty
             }?.fragment
+            let firstFragment = entries.first {
+                $0.url.path == entry.url.path && !($0.fragment ?? "").isEmpty
+            }?.fragment
             let text: String
             if let fragment = entry.fragment, !fragment.isEmpty,
                 let sliced = Self.fragmentText(
                     in: html, fragment: fragment, next: nextFragment)
             {
                 text = sliced
+            } else if entry.fragment == nil,
+                let firstFragment,
+                let range = Self.markerRange(
+                    in: html, fragment: firstFragment)
+            {
+                // A fragmentless nav entry owns only the preamble before the
+                // first fragment; indexing the whole file would let later
+                // chapters match under this title.
+                let end = Self.startOfTag(html, at: range.lowerBound)
+                text = Self.plainText(String(html[..<end]))
             } else {
                 text = Self.plainText(html)
             }
             if !text.isEmpty {
                 chapters.append(Chapter(title: entry.title, text: text))
+                chapterForPath[entry.url.path] = chapters.count - 1
             }
+        }
+        // Spine files the navigation does not link are continuation text for
+        // the chapter that precedes them in the spine, not new chapters with
+        // invented titles.
+        let indexedPaths = Set(entries.map(\.url.path))
+        // Leading spine files with no chapter before them have no title to
+        // continue; start before the first chapter.
+        var currentChapter = -1
+        for idref in package.spine {
+            guard
+                let item = package.items.first(where: { $0.id == idref }),
+                let url = try? EPUBPackage.resolve(
+                    item.href, relativeTo: base, root: package.rootURL),
+                let html = Self.readText(url)
+            else { continue }
+            if let index = chapterForPath[url.path] {
+                currentChapter = index
+                continue
+            }
+            guard !indexedPaths.contains(url.path) else { continue }
+            let text = Self.plainText(html)
+            guard !text.isEmpty, currentChapter >= 0 else { continue }
+            let previous = chapters[currentChapter]
+            chapters[currentChapter] = Chapter(
+                title: previous.title,
+                text: previous.text + "\n" + text)
         }
         self.chapters = chapters
         self.chapterShingles = chapters.map {
@@ -376,12 +417,20 @@ public struct EPUBBookIndex: Sendable {
                 separator: "#", maxSplits: 1,
                 omittingEmptySubsequences: false)
             let path = String(parts.first ?? "")
+            let rawFragment = parts.count > 1 ? String(parts[1]) : nil
             let fragment =
-                parts.count > 1 ? String(parts[1]) : nil
-            guard
-                let url = try? EPUBPackage.resolve(
-                    path, relativeTo: base, root: package.rootURL)
-            else { return nil }
+                rawFragment?.removingPercentEncoding ?? rawFragment
+            let url: URL
+            if path.isEmpty {
+                // A bare fragment points inside the navigation document.
+                url = document
+            } else if let resolved = try? EPUBPackage.resolve(
+                path, relativeTo: base, root: package.rootURL)
+            {
+                url = resolved
+            } else {
+                return nil
+            }
             return NavigationEntry(
                 url: url, identity: entry.href,
                 fragment: fragment, title: entry.title)
@@ -417,10 +466,10 @@ public struct EPUBBookIndex: Sendable {
         in html: String, fragment: String
     ) -> Range<String.Index>? {
         let escaped = NSRegularExpression.escapedPattern(for: fragment)
-        let pattern = #"(?:id|name)\s*=\s*["']"# + escaped + #"["']"#
-        guard
-            let regex = try? NSRegularExpression(
-                pattern: pattern, options: [.caseInsensitive])
+        // Not `data-id`, and XML identifiers are case-sensitive.
+        let pattern =
+            #"(?<![-\w])(?:id|name)\s*=\s*["']"# + escaped + #"["']"#
+        guard let regex = try? NSRegularExpression(pattern: pattern)
         else { return nil }
         return regex.firstMatch(
             in: html, range: NSRange(html.startIndex..., in: html)
@@ -474,8 +523,8 @@ public struct EPUBBookIndex: Sendable {
     /// marks one.
     static func tocSection(in html: String) -> String? {
         let patterns = [
-            #"<nav\b[^>]*epub:type\s*=\s*["']toc["'][^>]*>([\s\S]*?)</nav>"#,
-            #"<nav\b[^>]*type\s*=\s*["']toc["'][^>]*>([\s\S]*?)</nav>"#,
+            #"<nav\b[^>]*epub:type\s*=\s*["'][^"']*\btoc\b[^"']*["'][^>]*>([\s\S]*?)</nav>"#,
+            #"<nav\b[^>]*type\s*=\s*["'][^"']*\btoc\b[^"']*["'][^>]*>([\s\S]*?)</nav>"#,
         ]
         for pattern in patterns {
             guard
@@ -629,19 +678,37 @@ public enum ReadingContextResolver {
             // The Books library's own container can be unreadable while its
             // unpacked EPUBs are still in the iCloud Books folder. Name
             // matching narrows the field; the page text decides.
+            // Directory enumeration order must not decide between editions;
+            // score every folder EPUB and keep the strongest match.
+            var bestFolder: (chapter: String, score: Double)?
             for index in epubIndexes(named: title) {
-                guard let chapter = index.chapter(containing: pageText)
+                guard let match = index.bestChapter(pageText),
+                    match.score >= 0.4
                 else { continue }
+                if match.score > (bestFolder?.score ?? 0) {
+                    bestFolder = (match.title, match.score)
+                }
+            }
+            if let bestFolder {
                 return Result(
-                    chapter: chapter, pageNumber: nil, fingerprint: nil,
-                    capture: nil)
+                    chapter: bestFolder.chapter, pageNumber: nil,
+                    fingerprint: nil, capture: nil)
             }
         }
         let source = kind == .kindle ? "kindle" : "applebooks"
-        // A full-book capture has the chapter marks; check the largest
-        // captures first so a recent two-page sample cannot hide them.
+        // The book the live page names comes first; otherwise a full-book
+        // capture outranks a recent two-page sample.
         let candidates = captures.filter { $0.source == source }
-            .sorted { $0.pageCount > $1.pageCount }
+            .sorted { left, right in
+                let leftMatches = identifier.map {
+                    left.asin.caseInsensitiveCompare($0) == .orderedSame
+                } ?? false
+                let rightMatches = identifier.map {
+                    right.asin.caseInsensitiveCompare($0) == .orderedSame
+                } ?? false
+                if leftMatches != rightMatches { return leftMatches }
+                return left.pageCount > right.pageCount
+            }
             .prefix(captureLimit)
         for record in candidates {
             guard
@@ -692,9 +759,10 @@ public extension ReadingContextResolver {
         let wanted = folded(title)
         guard !wanted.isEmpty else { return [] }
         let entries =
-            (try? FileManager.default.contentsOfDirectory(
+            ((try? FileManager.default.contentsOfDirectory(
                 at: documents, includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles])) ?? []
+                options: [.skipsHiddenFiles])) ?? [])
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
         return entries.compactMap { url -> EPUBBookIndex? in
             guard url.pathExtension.lowercased() == "epub" else { return nil }
             let name = folded(url.deletingPathExtension().lastPathComponent)

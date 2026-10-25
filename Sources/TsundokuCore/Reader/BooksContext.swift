@@ -46,28 +46,38 @@ public struct BooksContext: ReaderContext {
         }
         // One unreadable window must not sink the reader: capture each
         // independently and keep whatever is readable.
-        let recorded = windows.compactMap { try? recorder.capture($0) }
+        let recorded = windows.compactMap {
+            window -> (element: AXUIElement, node: AXNode)? in
+            guard let node = try? recorder.capture(window) else { return nil }
+            return (window, node)
+        }
         guard !recorded.isEmpty else {
             throw ReaderContextError.unavailable(
                 .appleBooks, reason: "The Accessibility tree is unreadable.")
         }
         let focus = focusedWindow(application)
         guard
-            let window = BooksPageText.bestWindow(
-                recorded,
+            let best = BooksPageText.bestWindow(
+                recorded.map(\.node),
                 preferredTitle: focus?.title,
-                preferredFrame: focus?.frame)
+                preferredFrame: focus?.frame),
+            let index = recorded.firstIndex(where: { $0.node == best })
         else {
             throw ReaderContextError.noReaderWindow(.appleBooks)
         }
+        let window = recorded[index].node
         if Task.isCancelled { throw ReaderContextError.cancelled }
 
         let title = displayTitle(window)
         let text = BooksPageText.text(from: window)
+        // Read the selection from the same window in this same snapshot; a
+        // separate recapture can land after a book switch.
+        let selection = selectionText(
+            in: recorded[index].element, source: source)
         if !text.isEmpty {
             return ReaderPage(
                 text: text, title: title, kind: .appleBooks,
-                source: .accessibility, selection: selectedText())
+                source: .accessibility, selection: selection)
         }
 
         guard let frame = BooksPageText.rect(window.frame) else {
@@ -81,7 +91,7 @@ public struct BooksContext: ReaderContext {
         if Task.isCancelled { throw ReaderContextError.cancelled }
         return ReaderPage(
             text: recognized, title: title, kind: .appleBooks,
-            source: .ocr, selection: selectedText())
+            source: .ocr, selection: selection)
     }
 
     /// Reads the current selection from the live window's text nodes.
@@ -115,11 +125,17 @@ public struct BooksContext: ReaderContext {
                 preferredFrame: focus?.frame),
             let index = recorded.firstIndex(where: { $0.node == best })
         else { return nil }
+        return selectionText(in: recorded[index].element, source: source)
+    }
+
+    private func selectionText(
+        in window: AXUIElement, source: LiveAXSource
+    ) -> String? {
         var parts: [String] = []
         var budget = 4_000
         var visited = Set<CFHashCode>()
         collectSelection(
-            recorded[index].element, source: source, depth: 0,
+            window, source: source, depth: 0,
             budget: &budget, visited: &visited, into: &parts)
         return SelectionText.joined(parts)
     }
@@ -137,7 +153,15 @@ public struct BooksContext: ReaderContext {
         visited.insert(identity)
         budget -= 1
         let role = (try? source.string(element, "AXRole")) ?? ""
-        if role == "AXStaticText" || role == "AXHeading",
+        if role == "AXHeading",
+            let selected = try? source.string(element, "AXSelectedText"),
+            !selected.isEmpty
+        {
+            // Its child static text would repeat the same words.
+            parts.append(selected)
+            return
+        }
+        if role == "AXStaticText",
             let selected = try? source.string(element, "AXSelectedText"),
             !selected.isEmpty
         {

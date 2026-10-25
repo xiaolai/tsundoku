@@ -131,7 +131,14 @@ public enum KindleLive {
             guard let window = try recorder.findWindow(from: application) else {
                 throw KindleLiveError.noWindow
             }
+            // Read the identity on both sides of the text snapshot. A book
+            // switch during the read would otherwise pair book A's text with
+            // book B's ASIN; an unstable id is reported as unknown.
+            let bookIDBefore = lastOpenedBookID()
             let tree = try recorder.capture(window)
+            let bookIDAfter = lastOpenedBookID()
+            let bookID =
+                bookIDBefore == bookIDAfter ? bookIDAfter : nil
             let frame = try? recorder.source.frame(window)
             let number = pageNumber(tree)
             var chrome: CaptureInsets?
@@ -157,7 +164,7 @@ public enum KindleLive {
                 endOfBook: tree.isEndOfBook,
                 pageNumber: number?.current,
                 pageCount: number?.total,
-                bookID: lastOpenedBookID(),
+                bookID: bookID,
                 chromeInsets: chrome)
         } catch let error as KindleLiveError {
             throw error

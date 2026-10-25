@@ -593,10 +593,15 @@ public final class Archive: @unchecked Sendable {
                         page.map { .integer(Int64($0)) } ?? .null,
                         .text(text), .real(timestamp),
                     ])
+                // INSERT OR IGNORE can silently keep a duplicate. Read
+                // changes() before the session UPDATE overwrites it: report
+                // whether a row was actually added, not that SQL ran.
+                inserted =
+                    (try database.query("SELECT changes() AS n")
+                        .first?.int("n") ?? 0) > 0
                 try database.execute(
                     "UPDATE sessions SET ended_at = ? WHERE id = ?",
                     [.real(timestamp), .integer(sessionID)])
-                inserted = true
             }
             return inserted
         }
@@ -673,22 +678,56 @@ public final class Archive: @unchecked Sendable {
     public func createConversation(
         bookKey: String, bookTitle: String, bookSource: BookSource?
     ) throws -> Conversation {
+        try createConversation(
+            bookKey: bookKey, bookTitle: bookTitle, bookSource: bookSource,
+            turns: [])
+    }
+
+    /// Creates a conversation and its turns in one transaction.
+    ///
+    /// Promoting session-only turns must not leave a conversation with only
+    /// the first few turns when a later insert fails.
+    public func createConversation(
+        bookKey: String, bookTitle: String, bookSource: BookSource?,
+        turns: [NewConversationTurn]
+    ) throws -> Conversation {
         try queue.sync {
             let now = Date().timeIntervalSince1970
-            try database.execute(
-                """
-                INSERT INTO conversations
-                (book_key, book_title, book_source, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [
-                    .text(bookKey), .text(bookTitle),
-                    bookSource.map { .text($0.rawValue) } ?? .null,
-                    .real(now), .real(now),
-                ])
+            var id: Int64 = 0
+            try database.transaction {
+                try database.execute(
+                    """
+                    INSERT INTO conversations
+                    (book_key, book_title, book_source, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        .text(bookKey), .text(bookTitle),
+                        bookSource.map { .text($0.rawValue) } ?? .null,
+                        .real(now), .real(now),
+                    ])
+                id = database.lastInsertRowID
+                for turn in turns {
+                    let encoded = try JSONEncoder().encode(turn.context)
+                    let contextJSON = String(decoding: encoded, as: UTF8.self)
+                    try database.execute(
+                        """
+                        INSERT INTO conversation_turns
+                        (conversation_id, action, question, answer, provider,
+                         prompt, context_json, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            .integer(id), .text(turn.action.rawValue),
+                            .text(turn.question), .text(turn.answer),
+                            .text(turn.provider), .text(turn.prompt),
+                            .text(contextJSON), .real(now),
+                        ])
+                }
+            }
             return Conversation(
-                id: database.lastInsertRowID, bookKey: bookKey,
-                bookTitle: bookTitle, bookSource: bookSource,
+                id: id, bookKey: bookKey, bookTitle: bookTitle,
+                bookSource: bookSource,
                 createdAt: Date(timeIntervalSince1970: now),
                 updatedAt: Date(timeIntervalSince1970: now))
         }

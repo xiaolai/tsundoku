@@ -75,16 +75,18 @@ public struct ReadingIdentity: Sendable, Equatable {
         public static func < (lhs: Rank, rhs: Rank) -> Bool {
             lhs.rawValue < rhs.rawValue
         }
+    }
 
-        public var provenance: String {
-            switch self {
-            case .archiveMatch: "archive book"
-            case .lastOpened: "Kindle last-opened ASIN"
-            case .captureText: "capture text fingerprint"
-            case .titleMatch: "Books title"
-            case .sessionOnly: "unidentified"
-            }
-        }
+    /// The evidence behind the identity. Behaviour must branch on this, not
+    /// on the human-readable provenance sentence.
+    public enum Evidence: String, Sendable, Equatable {
+        case archiveIdentifier
+        case archiveEPUB
+        case readerIdentifier
+        case lastOpened
+        case captureText
+        case title
+        case session
     }
 
     /// The archive key, or nil when the page is unidentified. A nil key means
@@ -95,18 +97,19 @@ public struct ReadingIdentity: Sendable, Equatable {
     public let rank: Rank
     /// Why this identity was chosen, for diagnostics and the info menu.
     public let provenance: String
+    public let evidence: Evidence
 
     public init(
-        key: String?, title: String, book: Book?, rank: Rank, provenance: String
+        key: String?, title: String, book: Book?, rank: Rank,
+        provenance: String, evidence: Evidence = .session
     ) {
         self.key = key
         self.title = title
         self.book = book
         self.rank = rank
         self.provenance = provenance
+        self.evidence = evidence
     }
-
-    public var isSessionOnly: Bool { key == nil }
 
     /// The header's title: never a placeholder, never invented.
     public var headerTitle: String {
@@ -149,14 +152,16 @@ public enum ReadingIdentityResolver {
                 return ReadingIdentity(
                     key: book.asin, title: book.title, book: book,
                     rank: .archiveMatch,
-                    provenance: "archive book matched by EPUB text")
+                    provenance: "archive book matched by EPUB text",
+                    evidence: .archiveEPUB)
             }
             if facts.kind == .appleBooks {
                 return ReadingIdentity(
                     key: canonicalID(epubID),
                     title: liveTitle.isEmpty ? captureTitle : liveTitle,
                     book: nil, rank: .archiveMatch,
-                    provenance: "EPUB asset ID; not in the archive")
+                    provenance: "EPUB asset ID; not in the archive",
+                    evidence: .archiveEPUB)
             }
         }
         if !identifier.isEmpty {
@@ -164,7 +169,8 @@ public enum ReadingIdentityResolver {
                 return ReadingIdentity(
                     key: book.asin, title: book.title, book: book,
                     rank: .archiveMatch,
-                    provenance: "archive book matched by reader identifier")
+                    provenance: "archive book matched by reader identifier",
+                    evidence: .archiveIdentifier)
             }
             switch facts.kind {
             case .appleBooks:
@@ -176,7 +182,8 @@ public enum ReadingIdentityResolver {
                     key: canonicalID(identifier),
                     title: liveTitle.isEmpty ? captureTitle : liveTitle,
                     book: nil, rank: .archiveMatch,
-                    provenance: "reader asset ID; not in the archive")
+                    provenance: "reader asset ID; not in the archive",
+                    evidence: .readerIdentifier)
             case .kindle:
                 // Kindle's last-opened ASIN identifies the book even before
                 // its library row exists. The title stays empty unless an
@@ -184,7 +191,8 @@ public enum ReadingIdentityResolver {
                 return ReadingIdentity(
                     key: canonicalID(identifier), title: captureTitle,
                     book: nil, rank: .lastOpened,
-                    provenance: "Kindle last-opened ASIN; not in the archive")
+                    provenance: "Kindle last-opened ASIN; not in the archive",
+                    evidence: .lastOpened)
             }
         }
 
@@ -196,7 +204,8 @@ public enum ReadingIdentityResolver {
                 title: capture.isExact ? captureTitle : "",
                 book: nil,
                 rank: .captureText,
-                provenance: "capture text fingerprint")
+                provenance: "capture text fingerprint",
+                evidence: .captureText)
         }
 
         // Rank 4: a real Books title. The archive supplies the display title
@@ -223,13 +232,13 @@ public enum ReadingIdentityResolver {
                 title: candidates.first?.title ?? liveTitle,
                 book: candidates.count == 1 ? candidates[0] : nil,
                 rank: .titleMatch,
-                provenance: provenance)
+                provenance: provenance, evidence: .title)
         }
 
         // Rank 5: nothing trustworthy. No key, no archive write, no title.
         return ReadingIdentity(
             key: nil, title: "", book: nil, rank: .sessionOnly,
-            provenance: "unidentified")
+            provenance: "unidentified", evidence: .session)
     }
 
     private static func archiveBook(

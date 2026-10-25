@@ -89,6 +89,28 @@ public struct Conversation: Identifiable, Hashable, Sendable {
     }
 }
 
+/// A turn to write with a new conversation, in one transaction.
+public struct NewConversationTurn: Sendable {
+    public let action: AIAction
+    public let question: String
+    public let answer: String
+    public let provider: String
+    public let prompt: String
+    public let context: AIContext
+
+    public init(
+        action: AIAction, question: String, answer: String,
+        provider: String, prompt: String, context: AIContext
+    ) {
+        self.action = action
+        self.question = question
+        self.answer = answer
+        self.provider = provider
+        self.prompt = prompt
+        self.context = context
+    }
+}
+
 /// One stored exchange.
 public struct ConversationTurn: Identifiable, Hashable, Sendable {
     public let id: Int64
