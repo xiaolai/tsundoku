@@ -81,6 +81,69 @@ public enum AIService {
         AIProviderProfile.known.map(\.id)
     }
 
+    /// The known service whose base address a saved endpoint already names, so
+    /// a reader who upgraded from a typed URL lands on that service in the menu
+    /// instead of staying on Custom.
+    public static func matchingProfileID(for endpoint: String) -> String? {
+        let typed = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty, let url = URL(string: typed) else { return nil }
+        var candidate = httpBase(url).absoluteString
+        while candidate.hasSuffix("/") { candidate.removeLast() }
+        return AIProviderProfile.known.first { profile in
+            guard profile.id != AIProviderProfile.custom.id,
+                let base = profile.baseURL?.absoluteString
+            else { return false }
+            var known = base
+            while known.hasSuffix("/") { known.removeLast() }
+            return known == candidate
+        }?.id
+    }
+
+    /// After an upgrade turns a saved custom endpoint into the service it
+    /// names, the key saved under `custom` must move with it; otherwise the
+    /// reader's working setup looks like a lost key. Moves only when the
+    /// service has no key of its own and the endpoint is exactly that
+    /// service's.
+    public static func migrateLegacyKeyIfNeeded(
+        profileID: String, endpoint: String
+    ) {
+        let target = keyAccount(for: profileID)
+        let legacyAccount = keyAccount(for: AIProviderProfile.custom.id)
+        let legacy = Keychain.get(account: legacyAccount)
+        guard
+            shouldMigrateLegacyKey(
+                profileID: profileID, endpoint: endpoint,
+                hasTargetKey: !(Keychain.get(account: target) ?? "").isEmpty,
+                legacyKey: legacy)
+        else { return }
+        guard let legacy,
+            Keychain.set(legacy, account: target) == errSecSuccess
+        else { return }
+        Keychain.remove(account: legacyAccount)
+    }
+
+    /// The decision the migration acts on, as a value, so its matrix is
+    /// testable without a Keychain.
+    static func shouldMigrateLegacyKey(
+        profileID: String, endpoint: String, hasTargetKey: Bool,
+        legacyKey: String?
+    ) -> Bool {
+        profileID != AIProviderProfile.custom.id
+            && matchingProfileID(for: endpoint) == profileID
+            && !hasTargetKey
+            && !(legacyKey ?? "").isEmpty
+    }
+
+    /// A saved id this build knows, with a custom one upgraded to the service
+    /// its endpoint names.
+    public static func migratedProfileID(
+        _ raw: String, endpoint: String
+    ) -> String {
+        let known = normalizedProfileID(raw)
+        guard known == AIProviderProfile.custom.id else { return known }
+        return matchingProfileID(for: endpoint) ?? known
+    }
+
     /// Whether an address is one the HTTP provider accepts: HTTPS anywhere, or
     /// plain HTTP only on this Mac. `URL(string:)` accepts a scheme-less string
     /// like `example.com`, so parsing alone proves nothing.

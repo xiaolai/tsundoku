@@ -410,10 +410,11 @@ public struct AISettings: Codable, Sendable, Equatable {
             (try container.decodeIfPresent(String.self, forKey: .endpoint)
                 ?? defaults.endpoint)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        httpProfileID = AIService.normalizedProfileID(
+        httpProfileID = AIService.migratedProfileID(
             try container.decodeIfPresent(
                 String.self, forKey: .httpProfileID)
-            ?? defaults.httpProfileID)
+            ?? defaults.httpProfileID,
+            endpoint: endpoint)
         language =
             try container.decodeIfPresent(String.self, forKey: .language)
             ?? defaults.language
@@ -474,6 +475,10 @@ public struct AISettings: Codable, Sendable, Equatable {
             let settings = try? JSONDecoder().decode(
                 AISettings.self, from: data)
         else { return .defaults }
+        // Decoding may have recognised a custom endpoint as a known service;
+        // the key moves with it once.
+        AIService.migrateLegacyKeyIfNeeded(
+            profileID: settings.httpProfileID, endpoint: settings.endpoint)
         return settings
     }
 

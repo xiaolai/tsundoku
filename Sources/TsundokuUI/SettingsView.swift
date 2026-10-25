@@ -3,6 +3,15 @@ import SaySoAI
 import SwiftUI
 import TsundokuCore
 
+/// One row of the provider menu: a service on the OpenAI-compatible wire, or
+/// one of the local sources. Settings still store the kind and the service id
+/// separately; this only decides how the menu presents them, so a reader picks
+/// "DeepSeek" rather than knowing what an endpoint is.
+private enum AIProviderChoice: Hashable {
+    case service(String)
+    case kind(TsundokuCore.AIProviderKind)
+}
+
 public struct SettingsView: View {
     let pane: SettingsPane
     @ObservedObject var model: AppModel
@@ -33,26 +42,35 @@ public struct SettingsView: View {
             }
             if pane == .ai {
                 Section("Reading Companion") {
-                    Picker("Provider", selection: $model.settings.provider) {
-                        ForEach(
-                            TsundokuCore.AIProviderKind.allCases, id: \.self
-                        ) { kind in
-                            Text(kind.displayName).tag(kind)
+                    Picker("Provider", selection: providerChoice) {
+                        Section("Services") {
+                            ForEach(
+                                AIProviderProfile.known.filter {
+                                    $0.id != AIProviderProfile.custom.id
+                                }
+                            ) { profile in
+                                Text(profile.name)
+                                    .tag(AIProviderChoice.service(profile.id))
+                            }
+                            Text("Custom endpoint")
+                                .tag(
+                                    AIProviderChoice.service(
+                                        AIProviderProfile.custom.id))
+                        }
+                        Section("Local") {
+                            Text("Claude CLI")
+                                .tag(AIProviderChoice.kind(.claudeCLI))
+                            Text("Codex CLI")
+                                .tag(AIProviderChoice.kind(.codexCLI))
+                            Text("Apple on-device")
+                                .tag(AIProviderChoice.kind(.appleOnDevice))
                         }
                     }
                     .disabled(providerState.testing)
                     .help(providerNote)
 
                     if model.settings.provider == .http {
-                        Picker(
-                            "Service", selection: $model.settings.httpProfileID
-                        ) {
-                            ForEach(AIProviderProfile.known) { profile in
-                                Text(profile.name).tag(profile.id)
-                            }
-                        }
-                        .disabled(providerState.testing)
-                        if model.settings.httpProfileID
+                        if AIService.httpProfile(model.settings).id
                             == AIProviderProfile.custom.id
                         {
                             TextField(
@@ -283,16 +301,41 @@ public struct SettingsView: View {
         .task { if pane == .ai && model.settings.provider == .http { providerState.loadKeyIfNeeded(profileID: model.settings.httpProfileID) } }
     }
 
+    /// The menu's selection, mapped onto the two stored fields.
+    private var providerChoice: Binding<AIProviderChoice> {
+        Binding(
+            get: {
+                let settings = model.settings
+                if settings.provider == .http {
+                    return .service(AIService.httpProfile(settings).id)
+                }
+                return .kind(settings.provider)
+            },
+            set: { choice in
+                switch choice {
+                case .service(let id):
+                    model.settings.provider = .http
+                    model.settings.httpProfileID = id
+                case .kind(let kind):
+                    model.settings.provider = kind
+                }
+            })
+    }
+
     private var providerNote: String {
-        switch model.settings.provider {
+        if model.settings.provider == .http {
+            return AIService.httpProfile(model.settings).note
+                ?? "Any OpenAI-compatible service. The key is kept in the Keychain, one key per service."
+        }
+        return switch model.settings.provider {
         case .claudeCLI:
             "Uses the local Claude CLI and its existing login."
         case .codexCLI:
             "Uses the local Codex CLI in the app's own home. Sign in once with Sign In."
-        case .http:
-            "Any OpenAI-compatible service. The key is kept in the Keychain, one key per service."
         case .appleOnDevice:
             "Apple's on-device model. No page leaves this Mac."
+        case .http:
+            ""
         }
     }
 

@@ -138,10 +138,40 @@ struct ProviderSettingsStateTests {
 
 @MainActor
 struct AIProviderAdoptionTests {
-    @Test func settingsWithoutAProfileDecodeAsCustom() throws {
+    @Test func theLegacyKeyMovesOnlyToTheServiceItBelongsTo() {
+        let endpoint = "https://api.deepseek.com"
+        #expect(AIService.shouldMigrateLegacyKey(
+            profileID: "deepseek", endpoint: endpoint, hasTargetKey: false,
+            legacyKey: "fixture-legacy"))
+        #expect(!AIService.shouldMigrateLegacyKey(
+            profileID: "custom", endpoint: endpoint, hasTargetKey: false,
+            legacyKey: "fixture-legacy"))
+        #expect(!AIService.shouldMigrateLegacyKey(
+            profileID: "deepseek", endpoint: endpoint, hasTargetKey: true,
+            legacyKey: "fixture-legacy"))
+        #expect(!AIService.shouldMigrateLegacyKey(
+            profileID: "deepseek", endpoint: "https://llm.example.com",
+            hasTargetKey: false, legacyKey: "fixture-legacy"))
+        #expect(!AIService.shouldMigrateLegacyKey(
+            profileID: "deepseek", endpoint: endpoint, hasTargetKey: false,
+            legacyKey: nil))
+    }
+
+    @Test func aSavedEndpointAdoptsTheServiceItNames() throws {
+        // An upgrade from a typed URL should land on the service in the menu,
+        // not stay on Custom.
         let json = #"{"provider":"http","model":"deepseek-chat","endpoint":"https://api.deepseek.com"}"#
         let settings = try JSONDecoder().decode(AISettings.self, from: Data(json.utf8))
+        #expect(settings.httpProfileID == "deepseek")
+    }
+
+    @Test func anUnknownEndpointStaysCustom() throws {
+        let json = #"{"provider":"http","model":"m","endpoint":"https://llm.example.com/v1"}"#
+        let settings = try JSONDecoder().decode(AISettings.self, from: Data(json.utf8))
         #expect(settings.httpProfileID == "custom")
+        #expect(AIService.matchingProfileID(for: "https://api.deepseek.com/") == "deepseek")
+        #expect(AIService.matchingProfileID(for: "") == nil)
+        #expect(AIService.matchingProfileID(for: "https://api.deepseek.com/v1") == nil)
     }
 
     @Test func settingsKeepAStoredProfile() throws {
@@ -209,7 +239,10 @@ struct AIProviderAdoptionTests {
     @Test func anUnknownServiceIdNormalisesToCustom() throws {
         let settings = AISettings(provider: .http, model: "m", httpProfileID: "gone")
         #expect(settings.httpProfileID == "custom")
-        let json = #"{"provider":"http","httpProfileID":"gone"}"#
+        // An id this build does not know and an endpoint that names no known
+        // service stays custom; had the default Ollama endpoint been kept, the
+        // migration below would (correctly) call it Ollama.
+        let json = #"{"provider":"http","httpProfileID":"gone","endpoint":"https://llm.example.com/v1"}"#
         let decoded = try JSONDecoder().decode(AISettings.self, from: Data(json.utf8))
         #expect(decoded.httpProfileID == "custom")
     }
