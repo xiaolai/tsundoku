@@ -1,4 +1,5 @@
 import Security
+import SaySoAI
 import SwiftUI
 import TsundokuCore
 
@@ -33,37 +34,104 @@ public struct SettingsView: View {
             if pane == .ai {
                 Section("Reading Companion") {
                     Picker("Provider", selection: $model.settings.provider) {
-                        ForEach(AIProviderKind.allCases, id: \.self) { kind in
+                        ForEach(
+                            TsundokuCore.AIProviderKind.allCases, id: \.self
+                        ) { kind in
                             Text(kind.displayName).tag(kind)
                         }
                     }
                     .disabled(providerState.testing)
                     .help(providerNote)
 
-                    TextField(
-                        "Model", text: $model.settings.model,
-                        prompt: Text(
-                            model.settings.provider == .http
-                                ? "gpt-4o-mini" : "Provider default")
-                    )
-                    .disabled(providerState.testing)
                     if model.settings.provider == .http {
-                        TextField("Endpoint", text: $model.settings.endpoint)
+                        Picker(
+                            "Service", selection: $model.settings.httpProfileID
+                        ) {
+                            ForEach(AIProviderProfile.known) { profile in
+                                Text(profile.name).tag(profile.id)
+                            }
+                        }
+                        .disabled(providerState.testing)
+                        if model.settings.httpProfileID
+                            == AIProviderProfile.custom.id
+                        {
+                            TextField(
+                                "Endpoint", text: $model.settings.endpoint
+                            )
                             .disabled(providerState.testing)
+                        } else if let base = AIService.httpBaseURL(
+                            model.settings)
+                        {
+                            LabeledContent("Endpoint") {
+                                Text(base.absoluteString)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        if let note = AIService.httpProfile(model.settings)
+                            .note
+                        {
+                            Text(note).font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    HStack {
+                        TextField(
+                            "Model", text: $model.settings.model,
+                            prompt: Text(modelPrompt)
+                        )
+                        .disabled(providerState.testing)
+                        if model.settings.provider == .http {
+                            Menu {
+                                ForEach(providerState.models) { option in
+                                    Button(option.name ?? option.id) {
+                                        model.settings.model = option.id
+                                    }
+                                }
+                                if !providerState.models.isEmpty {
+                                    Divider()
+                                }
+                                Button(
+                                    providerState.models.isEmpty
+                                        ? "Fetch Models" : "Refresh Models"
+                                ) {
+                                    providerState.loadModels(
+                                        settings: model.settings)
+                                }
+                                .disabled(providerState.loadingModels)
+                            } label: {
+                                Label("Models", systemImage: "list.bullet")
+                            }
+                            .disabled(providerState.testing)
+                        }
+                    }
+                    if model.settings.provider == .http,
+                        !providerState.modelStatus.isEmpty
+                    {
+                        Text(providerState.modelStatus).font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if model.settings.provider == .http {
                         SecureField("API Key", text: $providerState.draftKey)
                             .accessibilityIdentifier("provider-api-key")
                             .disabled(providerState.testing)
-                            .help("Stored in the Keychain. Environment variables and .env files are not read.")
-                            .onSubmit { providerState.saveKey() }
+                            .help("Stored in the Keychain, one key per service. Environment variables and .env files are not read.")
+                            .onSubmit {
+                                providerState.saveKey(
+                                    profileID: model.settings.httpProfileID)
+                            }
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(providerState.keyStatus.isEmpty && providerState.hasUnsavedKey ? "Unsaved key" : providerState.keyStatus)
-                                Text("Stored in the Keychain; environment variables are not read.")
+                                Text("Stored in the Keychain, one key per service; environment variables are not read.")
                             }
                             .font(.caption).foregroundStyle(.secondary)
                             Spacer()
-                            Button("Save Key", action: providerState.saveKey)
-                                .disabled(!providerState.hasUnsavedKey || providerState.testing)
+                            Button("Save Key") {
+                                providerState.saveKey(
+                                    profileID: model.settings.httpProfileID)
+                            }
+                            .disabled(!providerState.hasUnsavedKey || providerState.testing)
                         }
                     }
                     TextField(
@@ -76,14 +144,34 @@ public struct SettingsView: View {
                     )
                     .disabled(providerState.testing)
 
+                    if !providerState.signInStatus.isEmpty {
+                        Text(providerState.signInStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
                     HStack(spacing: 8) {
                             Text("Connection")
                             Spacer(minLength: 0)
+                            if model.settings.provider == .codexCLI {
+                                IconButton(
+                                    "Sign In",
+                                    systemImage: "person.badge.key"
+                                ) {
+                                    providerState.signIn(
+                                        settings: model.settings)
+                                }
+                                .controlSize(.small)
+                                .disabled(
+                                    providerState.testing
+                                        || providerState.signingIn)
+                            }
                             IconButton("Test Provider", systemImage: "network")
                             { providerState.test(settings: model.settings) }
                             .controlSize(.small)
                             .disabled(providerState.testing || (model.settings.provider == .http && providerState.hasUnsavedKey))
-                            if providerState.testing {
+                            if providerState.testing || providerState.signingIn {
                                 ProgressView().controlSize(.small)
                             }
                             Text(providerState.testStatus)
@@ -92,8 +180,17 @@ public struct SettingsView: View {
                                 .lineLimit(2)
                     }
                     .onChange(of: model.settings.provider) { _, provider in
-                        if provider == .http { providerState.loadKeyIfNeeded() }
+                        if provider != .codexCLI {
+                            providerState.cancelSignIn()
+                        }
+                        if provider == .http {
+                            providerState.loadKeyIfNeeded(
+                                profileID: model.settings.httpProfileID)
+                        }
                         providerState.invalidateTest()
+                    }
+                    .onChange(of: model.settings.httpProfileID) { _, profile in
+                        providerState.loadKeyIfNeeded(profileID: profile)
                     }
                     .onChange(of: model.settings.model) { _, _ in
                         providerState.invalidateTest()
@@ -182,7 +279,7 @@ public struct SettingsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .task { if pane == .ai && model.settings.provider == .http { providerState.loadKeyIfNeeded() } }
+        .task { if pane == .ai && model.settings.provider == .http { providerState.loadKeyIfNeeded(profileID: model.settings.httpProfileID) } }
     }
 
     private var providerNote: String {
@@ -190,12 +287,22 @@ public struct SettingsView: View {
         case .claudeCLI:
             "Uses the local Claude CLI and its existing login."
         case .codexCLI:
-            "Uses the local Codex CLI and its existing login."
+            "Uses the local Codex CLI in the app's own home. Sign in once with Sign In."
         case .http:
-            "Any OpenAI-compatible endpoint. The key is kept in the Keychain."
+            "Any OpenAI-compatible service. The key is kept in the Keychain, one key per service."
         case .appleOnDevice:
             "Apple's on-device model. No page leaves this Mac."
         }
+    }
+
+    /// The model field's placeholder: the service's first known model, or a
+    /// demand, never an invented default that the service may not serve.
+    private var modelPrompt: String {
+        guard model.settings.provider == .http else {
+            return "Provider default"
+        }
+        return AIService.httpProfile(model.settings).hints.first
+            ?? "Required"
     }
 
     private var archiveSummary: String {

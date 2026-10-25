@@ -503,42 +503,11 @@ struct BooksPageTextTests {
 }
 
 // MARK: - CLI cancellation
-
-@Suite("Provider cancellation")
-struct ProviderCancellationTests {
-    @Test("a completed CLI call returns its output")
-    func normalCompletion() async throws {
-        let output = try await AICLI.run(
-            executable: URL(fileURLWithPath: "/bin/echo"),
-            arguments: ["hello"], prompt: "", timeout: 10)
-        #expect(output == "hello")
-    }
-
-    @Test("cancelling the task terminates the child process")
-    func cancellation() async throws {
-        let started = Date()
-        // The child sleeps far longer than the assertion bound, so a pass
-        // proves cancellation killed it rather than waiting it out. The
-        // bound leaves room for test-suite scheduling under load.
-        let task = Task {
-            try await AICLI.run(
-                executable: URL(fileURLWithPath: "/bin/sh"),
-                arguments: ["-c", "sleep 30"], prompt: "x", timeout: 60)
-        }
-        try await Task.sleep(for: .milliseconds(250))
-        task.cancel()
-        do {
-            _ = try await task.value
-            Issue.record("the cancelled call returned an answer")
-        } catch {
-            guard case AIProviderError.cancelled = error else {
-                Issue.record("unexpected error: \(error)")
-                return
-            }
-        }
-        #expect(Date().timeIntervalSince(started) < 5)
-    }
-}
+//
+// The process runner and its cancellation live in sayso now; its
+// AIProviderCLITests prove a cancelled ask kills the child and ends
+// `.cancelled`. Tsundoku keeps the adapter side: a cancelled ask must leave
+// the panel idle rather than show an error (see ProviderSettingsStateTests).
 
 @Suite("AI composer")
 struct AIComposerTests {

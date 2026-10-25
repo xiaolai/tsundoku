@@ -9,14 +9,26 @@ let package = Package(
         .executable(name: "tsundoku-cli", targets: ["TsundokuCLI"]),
     ],
     dependencies: [
-        .package(path: "vendor/kindle-toolkit/packages/ax-driver")
+        .package(path: "vendor/kindle-toolkit/packages/ax-driver"),
+        .package(path: "vendor/sayso"),
     ],
     targets: [
         .target(
             name: "TsundokuCore",
-            dependencies: [.product(name: "KindleAX", package: "ax-driver")]
+            dependencies: [
+                .product(name: "KindleAX", package: "ax-driver"),
+                .product(name: "SaySoAI", package: "sayso"),
+                .product(name: "SaySoAICLI", package: "sayso"),
+                .product(name: "SaySoAIApple", package: "sayso"),
+            ]
         ),
-        .target(name: "TsundokuUI", dependencies: ["TsundokuCore"]),
+        .target(
+            name: "TsundokuUI",
+            dependencies: [
+                "TsundokuCore",
+                .product(name: "SaySoAI", package: "sayso"),
+            ]
+        ),
         .executableTarget(
             name: "TsundokuApp",
             dependencies: ["TsundokuCore", "TsundokuUI"]
@@ -31,6 +43,7 @@ let package = Package(
                 "TsundokuCore",
                 "TsundokuUI",
                 .product(name: "KindleAX", package: "ax-driver"),
+                .product(name: "SaySoAI", package: "sayso"),
             ]
         ),
     ],

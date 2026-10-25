@@ -1,82 +1,215 @@
 import Foundation
+import SaySoAI
 import Security
 import SwiftUI
 import TsundokuCore
 
 /// One window-scoped draft, shared across pane changes. No credential values
-/// enter status strings or diagnostics. Loading is deferred until AI is opened.
+/// enter status strings or diagnostics. Loading is deferred until AI is opened,
+/// and the key is kept per service: switching profiles must never send one
+/// service's key to another.
 @MainActor public final class ProviderSettingsState: ObservableObject {
     @Published public var draftKey = "" {
         didSet {
             guard draftKey != oldValue else { return }
-            if loaded { keyStatus = ""; invalidateTest() }
+            if loadedProfileID != nil { keyStatus = ""; invalidateTest() }
         }
     }
     @Published public private(set) var keyStatus = ""
     @Published public private(set) var testStatus = ""
     @Published public private(set) var testing = false
+    @Published public private(set) var signingIn = false
+    @Published public private(set) var signInStatus = ""
+    @Published public private(set) var models: [AIModel] = []
+    @Published public private(set) var modelStatus = ""
+    @Published public private(set) var loadingModels = false
     private var savedKey = ""
-    private var loaded = false
-    private let loadKey: () -> String
-    private let writeKey: (String) -> OSStatus
+    private var loadedProfileID: String?
+    private let loadKey: (String) -> String
+    private let writeKey: (String, String) -> OSStatus
+    private let forgetLegacyKey: () -> Void
     private let connectionTest: (AISettings) async throws -> String
+    private let modelFetch:
+        (AIProviderProfile, URL, String?) async throws -> [AIModel]
     private var generation = 0
     private var testTask: Task<Void, Never>?
+    private var signInTask: Task<Void, Never>?
+    private var modelTask: Task<Void, Never>?
 
-    public init(loadKey: @escaping () -> String = { Keychain.get(account: "http.apiKey") ?? "" },
-        saveKey: @escaping (String) -> OSStatus = { Keychain.set($0, account: "http.apiKey") },
-        connectionTest: @escaping (AISettings) async throws -> String = { settings in
-            let request = AIRequest(action: .explain, pageText: "The quick brown fox jumps over the lazy dog.",
-                bookTitle: "Tsundoku test", language: settings.language)
-            let answer = try await AIService.answer(for: request, settings: settings)
-            return "Connected · \(answer.provider)"
-        }) {
-        self.loadKey = loadKey; self.writeKey = saveKey; self.connectionTest = connectionTest
+    public init(
+        loadKey: @escaping (String) -> String = {
+            AIService.httpKey(profileID: $0) ?? ""
+        },
+        saveKey: @escaping (String, String) -> OSStatus = {
+            Keychain.set($0, account: AIService.keyAccount(for: $1))
+        },
+        forgetLegacyKey: @escaping () -> Void = {
+            Keychain.remove(account: AIService.legacyKeyAccount)
+        },
+        connectionTest: @escaping (AISettings) async throws -> String = {
+            try await AIConnection.test(settings: $0)
+        },
+        modelFetch: @escaping (AIProviderProfile, URL, String?) async throws
+            -> [AIModel] = { profile, base, key in
+                try await ModelCatalog().fetch(
+                    ModelCatalog.Request(
+                        profile: profile, baseURL: base, apiKey: key))
+            }
+    ) {
+        self.loadKey = loadKey
+        self.writeKey = saveKey
+        self.forgetLegacyKey = forgetLegacyKey
+        self.connectionTest = connectionTest
+        self.modelFetch = modelFetch
     }
-    public var hasUnsavedKey: Bool { loaded && draftKey != savedKey }
-    public func loadKeyIfNeeded() {
-        guard !loaded else { return }
-        savedKey = loadKey(); draftKey = savedKey; loaded = true
+
+    public var hasUnsavedKey: Bool {
+        loadedProfileID != nil && draftKey != savedKey
     }
-    public func saveKey() {
+
+    public func loadKeyIfNeeded(profileID: String) {
+        guard loadedProfileID != profileID else { return }
+        loadedProfileID = profileID
+        savedKey = loadKey(profileID)
+        draftKey = savedKey
+        keyStatus = ""
+        invalidateTest()
+        models = []
+        modelStatus = ""
+    }
+
+    public func saveKey(profileID: String) {
         guard hasUnsavedKey else { return }
-        let status = writeKey(draftKey)
-        if status == errSecSuccess { savedKey = draftKey; keyStatus = "Saved" }
-        else { keyStatus = "Could not save key (\(status)). Try again." }
+        let status = writeKey(draftKey, profileID)
+        if status == errSecSuccess {
+            savedKey = draftKey
+            keyStatus = "Saved"
+            // The old single-key account is superseded by the per-service one.
+            if profileID == AIProviderProfile.custom.id { forgetLegacyKey() }
+        } else {
+            keyStatus = "Could not save key (\(status)). Try again."
+        }
         invalidateTest()
     }
+
     public func invalidateTest() {
-        generation += 1; testTask?.cancel(); testTask = nil
-        testing = false; testStatus = ""
+        generation += 1
+        testTask?.cancel()
+        testTask = nil
+        testing = false
+        testStatus = ""
     }
+
     public func test(settings: AISettings) {
-        guard !testing, settings.provider != .http || !hasUnsavedKey else { return }
-        invalidateTest(); testing = true
+        guard !testing, settings.provider != .http || !hasUnsavedKey else {
+            return
+        }
+        invalidateTest()
+        testing = true
         let current = generation
         testTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let result = try await self.connectionTest(settings)
-                guard !Task.isCancelled, self.generation == current else { return }
+                guard !Task.isCancelled, self.generation == current else {
+                    return
+                }
                 self.testStatus = result
             } catch {
-                guard !Task.isCancelled, self.generation == current else { return }
-                self.testStatus = "Connection failed. "
-                    + Self.detail(for: error, secrets: [self.savedKey, self.draftKey])
+                guard !Task.isCancelled, self.generation == current else {
+                    return
+                }
+                self.testStatus = Self.detail(
+                    for: error, provider: settings.provider,
+                    secrets: [self.savedKey, self.draftKey])
             }
             guard self.generation == current else { return }
-            self.testing = false; self.testTask = nil
+            self.testing = false
+            self.testTask = nil
         }
     }
 
-    /// Why a connection test failed. A bare "check the settings" leaves a
-    /// missing key (401), an unknown model (400) and an unreachable host
-    /// indistinguishable, so the provider's own message is shown, bounded, with
-    /// the stored key removed in case the endpoint echoed it.
-    nonisolated static func detail(for error: any Error, secrets: [String]) -> String {
-        let reason = (error as? AIProviderError)?.description
-            ?? error.localizedDescription
-        var text = reason.isEmpty ? "Unknown error." : reason
+    /// The documented `codex login`, in the app's own Codex home. Its output —
+    /// the URL and the code — is shown as it arrives; the browser is opened by
+    /// the CLI.
+    public func signIn(settings: AISettings) {
+        guard settings.provider == .codexCLI, !signingIn else { return }
+        signingIn = true
+        signInStatus = "Opening the browser…"
+        signInTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await AIConnection.signInToCodex(
+                    settings: settings,
+                    onLine: { [weak self] line in
+                        Task { @MainActor in
+                            guard let self, self.signingIn else { return }
+                            let text = line.trimmingCharacters(
+                                in: .whitespacesAndNewlines)
+                            if !text.isEmpty {
+                                self.signInStatus = String(text.prefix(160))
+                            }
+                        }
+                    })
+                self.signInStatus = "Signed in."
+                self.invalidateTest()
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.signInStatus = AIProviderFailure.message(
+                    for: error, provider: .codexCLI)
+            }
+            self.signingIn = false
+            self.signInTask = nil
+        }
+    }
+
+    /// Stop a pending sign-in and its child; switching away from the provider
+    /// must not leave `codex login` running for up to five minutes.
+    public func cancelSignIn() {
+        guard signingIn else { return }
+        signInTask?.cancel()
+        signInTask = nil
+        signingIn = false
+        signInStatus = ""
+    }
+
+    /// The service's own model list, a configuration aid, not an answer.
+    public func loadModels(settings: AISettings) {
+        guard !loadingModels, settings.provider == .http else { return }
+        guard let base = AIService.httpBaseURL(settings) else {
+            modelStatus = "Set the endpoint first."
+            return
+        }
+        modelTask?.cancel()
+        loadingModels = true
+        modelStatus = ""
+        let profile = AIService.httpProfile(settings)
+        let key = loadedProfileID == profile.id ? savedKey : loadKey(profile.id)
+        modelTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let list = try await self.modelFetch(profile, base, key)
+                guard !Task.isCancelled else { return }
+                self.models = list
+                self.modelStatus =
+                    list.isEmpty
+                    ? "The service listed no models." : "\(list.count) models"
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.modelStatus = AIProviderFailure.modelsMessage(for: error)
+            }
+            self.loadingModels = false
+            self.modelTask = nil
+        }
+    }
+
+    /// Why a connection test failed, bounded, with the stored key removed in
+    /// case an endpoint echoed it.
+    nonisolated static func detail(
+        for error: any Error, provider: TsundokuCore.AIProviderKind,
+        secrets: [String]
+    ) -> String {
+        var text = AIProviderFailure.message(for: error, provider: provider)
         for secret in secrets where secret.count >= 8 {
             text = text.replacingOccurrences(of: secret, with: "<key>")
         }

@@ -141,14 +141,24 @@ struct TsundokuCLI {
             if let endpoint = value("--endpoint", in: arguments) {
                 settings.endpoint = endpoint
             }
+            if let service = value("--service", in: arguments) {
+                settings.httpProfileID = service
+            }
             let request = AIRequest(
                 action: action, pageText: live.text,
                 bookTitle: live.title, question: question,
                 language: settings.language)
-            let answer = try await AIService.answer(
-                for: request, settings: settings)
-            print("provider=\(answer.provider)")
-            print(answer.text)
+            do {
+                let answer = try await AIService.answer(
+                    for: request, settings: settings)
+                print("provider=\(answer.provider)")
+                print(answer.text)
+            } catch {
+                print(
+                    "error: \(AIProviderFailure.message(for: error, provider: settings.provider))"
+                )
+                exit(1)
+            }
         } catch {
             print("error: \(error)")
             exit(1)
@@ -756,6 +766,8 @@ struct TsundokuCLI {
             usage: tsundoku-cli <inspect|page|ask|capture|export|history|track|import|applebooks|clean-page|books-asset|cover|original> [options]
               ask --action explain|translate|summarize|ask|define
                   --question "…" --provider claude|codex|http|apple
+                  [--model M] [--service deepseek|openai|ollama|…]
+                  [--endpoint URL] (custom services only)
               capture --pages 5 --out ~/TsundokuExports [--clean-page]
                       [--page-size a4|display] [--font-size 5..9]
                       [--text-size -2..2]

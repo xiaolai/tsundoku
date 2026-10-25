@@ -47,8 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         {
             var saves = 0
             providerState = ProviderSettingsState(
-                loadKey: { "fixture-key" },
-                saveKey: { _ in
+                loadKey: { _ in "fixture-key" },
+                saveKey: { _, _ in
                     saves += 1
                     return saves == 1 ? -1 : 0
                 },

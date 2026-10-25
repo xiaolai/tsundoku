@@ -210,12 +210,13 @@ public final class AIPanelModel: ObservableObject {
                 guard
                     let self, generation == self.answerGeneration
                 else { return }
-                if case AIProviderError.cancelled = error {
+                if AIProviderFailure.isCancelled(error) {
                     self.phase = .idle
                     return
                 }
                 self.failureKind = .answer
-                self.error = "\(error)"
+                self.error = AIProviderFailure.message(
+                    for: error, provider: settings.provider)
                 self.phase = .failed
             }
         }

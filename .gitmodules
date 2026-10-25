@@ -1,3 +1,6 @@
 [submodule "vendor/kindle-toolkit"]
 	path = vendor/kindle-toolkit
 	url = https://github.com/xiaolai/kindle-toolkit.git
+[submodule "vendor/sayso"]
+	path = vendor/sayso
+	url = https://github.com/xiaolai/sayso

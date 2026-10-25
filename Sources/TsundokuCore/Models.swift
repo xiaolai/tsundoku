@@ -323,6 +323,10 @@ public struct AISettings: Codable, Sendable, Equatable {
     public var provider: AIProviderKind
     public var model: String
     public var endpoint: String
+    /// Which entry of `AIProviderProfile.known` the HTTP provider speaks: it
+    /// fixes the auth header and the token-limit field, and supplies the base
+    /// address when it is not `custom`. Older settings decode as `custom`.
+    public var httpProfileID: String
     public var language: String
     public var sessionLogging: Bool
     /// Turn Kindle's Popular Highlights display off for a capture and restore
@@ -349,6 +353,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         provider: AIProviderKind = .claudeCLI,
         model: String = "",
         endpoint: String = "http://127.0.0.1:11434/v1",
+        httpProfileID: String = "custom",
         language: String = "Simplified Chinese",
         sessionLogging: Bool = false,
         cleanPageDuringCapture: Bool = true,
@@ -364,6 +369,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.provider = provider
         self.model = model
         self.endpoint = endpoint
+        self.httpProfileID = httpProfileID
         self.language = language
         self.sessionLogging = sessionLogging
         self.cleanPageDuringCapture = cleanPageDuringCapture
@@ -379,6 +385,7 @@ public struct AISettings: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case provider, model, endpoint, language, sessionLogging
+        case httpProfileID
         case cleanPageDuringCapture
         case capturePageSize, captureFontSize, booksFontSteps
         case captureCropTop, booksCropBottom, kindleCropBottom
@@ -400,6 +407,10 @@ public struct AISettings: Codable, Sendable, Equatable {
         endpoint =
             try container.decodeIfPresent(String.self, forKey: .endpoint)
             ?? defaults.endpoint
+        httpProfileID =
+            try container.decodeIfPresent(
+                String.self, forKey: .httpProfileID)
+            ?? defaults.httpProfileID
         language =
             try container.decodeIfPresent(String.self, forKey: .language)
             ?? defaults.language
