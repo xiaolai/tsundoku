@@ -16,6 +16,8 @@ struct BookChatsView: View {
     @State private var isLoading = true
     @State private var loadingTurns = false
     @State private var error: String?
+    @State private var turnsGeneration = 0
+    @State private var incompleteCaptures = false
 
     private var liveBookMatches: Bool {
         if let id = model.livePage?.bookID, !id.isEmpty {
@@ -43,12 +45,14 @@ struct BookChatsView: View {
         guard let selected = summary(selectedID),
             let archive = model.archive
         else { return }
-        let key = selected.conversation.bookKey
         Task {
             do {
                 try await Task.detached {
-                    try archive.migrateConversations(
-                        from: key, to: book.asin, title: book.title,
+                    // Move only the chosen chat. A title key can be shared by
+                    // another edition of the same book, and filing one must
+                    // not reassign the others.
+                    try archive.migrateConversation(
+                        id: selected.id, to: book.asin, title: book.title,
                         source: book.source)
                 }.value
                 await loadSummaries()
@@ -73,7 +77,9 @@ struct BookChatsView: View {
         }
         .onChange(of: selectedID) { _, id in
             guard let id else {
+                turnsGeneration += 1
                 turns = []
+                loadingTurns = false
                 return
             }
             Task { await loadTurns(id) }
@@ -91,6 +97,16 @@ struct BookChatsView: View {
                 if isLoading { ProgressView().controlSize(.small) }
             }
             .padding(10)
+            if incompleteCaptures {
+                Label(
+                    "Some captures could not be read; text-linked chats may "
+                        + "be missing.",
+                    systemImage: "exclamationmark.triangle")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+            }
             if summaries.isEmpty, !isLoading {
                 ContentUnavailableView(
                     "No Chats Yet",
@@ -183,7 +199,7 @@ struct BookChatsView: View {
                     IconButton(
                         "Open in Companion", systemImage: "sparkles",
                         tooltip: liveBookMatches
-                            ? "Continue this conversation in the reading companion"
+                            ? "Open the reading companion for this book"
                             : "Open this book in the reader first; the companion answers from the live page."
                     ) {
                         model.showAIPanel()
@@ -262,29 +278,45 @@ struct BookChatsView: View {
         }
         do {
             let loaded = try await Task.detached {
+                () -> (rows: [ConversationSummary], incomplete: Bool) in
                 let all = try archive.conversations()
-                let captures = (try? archive.captures()) ?? []
+                var incomplete = false
+                let captures: [CaptureRecord]
+                do {
+                    captures = try archive.captures()
+                } catch {
+                    captures = []
+                    incomplete = true
+                }
                 var fingerprints: [String] = []
                 for capture in captures
                 where capture.asin.caseInsensitiveCompare(book.asin)
                     == .orderedSame
                 {
-                    if let index = try? BookTextIndex.load(
-                        directory: URL(fileURLWithPath: capture.directory))
-                    {
+                    do {
+                        let index = try BookTextIndex.load(
+                            directory: URL(
+                                fileURLWithPath: capture.directory))
                         fingerprints.append(index.fingerprint)
+                    } catch {
+                        incomplete = true
                     }
                 }
                 let keys = ConversationFiling.keys(
                     for: book, captureFingerprints: fingerprints)
-                return all.filter { keys.contains($0.conversation.bookKey) }
+                return (
+                    all.filter {
+                        ConversationFiling.matches($0.conversation, keys: keys)
+                    },
+                    incomplete)
             }.value
-            summaries = loaded
+            summaries = loaded.rows
+            incompleteCaptures = loaded.incomplete
             isLoading = false
             if selectedID == nil
-                || !loaded.contains(where: { $0.id == selectedID })
+                || !loaded.rows.contains(where: { $0.id == selectedID })
             {
-                selectedID = loaded.first?.id
+                selectedID = loaded.rows.first?.id
             }
         } catch {
             isLoading = false
@@ -294,15 +326,21 @@ struct BookChatsView: View {
 
     private func loadTurns(_ id: Int64) async {
         guard let archive = model.archive else { return }
+        turnsGeneration += 1
+        let generation = turnsGeneration
         loadingTurns = true
+        error = nil
         do {
             let loaded = try await Task.detached {
                 try archive.conversationTurns(conversationID: id)
             }.value
-            guard selectedID == id else { return }
+            guard generation == turnsGeneration, selectedID == id else {
+                return
+            }
             turns = loaded
             loadingTurns = false
         } catch {
+            guard generation == turnsGeneration else { return }
             loadingTurns = false
             self.error = "\(error)"
         }

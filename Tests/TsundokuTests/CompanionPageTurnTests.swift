@@ -169,6 +169,80 @@ struct CompanionPageTurnTests {
         #expect(panel.followedTurns == 1)
     }
 
+    @Test("a page turn away from a captured page keeps its chat")
+    func fingerprintKeySurvivesPageTurn() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsundoku-keep-chat-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let archive = try #require(model.archive)
+        let conversation = try archive.createConversation(
+            bookKey: "text:f00d", bookTitle: "Captured", bookSource: .kindle)
+        try archive.appendConversationTurn(
+            conversationID: conversation.id, action: .ask, question: "Old",
+            answer: "Answer", provider: "p", prompt: "", context: .empty)
+
+        let first = ReaderPage(
+            text: String(repeating: "first page words ", count: 20),
+            title: "Kindle", kind: .kindle, source: .accessibility)
+        let second = ReaderPage(
+            text: String(repeating: "second page words ", count: 20),
+            title: "Kindle", kind: .kindle, source: .accessibility)
+        let reader = SteppingReader(kind: .kindle, pages: [first, second])
+        let panel = AIPanelModel(
+            app: model, context: reader,
+            contextResolver: { page, _, _ in
+                guard page.text.contains("first") else { return nil }
+                return ReadingContextResolver.Result(
+                    chapter: nil, pageNumber: 1, fingerprint: "f00d",
+                    capture: CaptureRecord(
+                        id: 1, asin: "", title: "Captured",
+                        directory: "/tmp/capture", pageCount: 100,
+                        pdfPath: nil, createdAt: Date(), state: "complete",
+                        source: "kindle", identityConfidence: "exact"))
+            },
+            answerProvider: { _, _ in
+                AIAnswer(text: "answer", provider: "test")
+            })
+        panel.followInterval = .seconds(3_600)
+        panel.followDebounce = .zero
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+        #expect(panel.bookKey == "text:f00d")
+        #expect(panel.turns.count == 1)
+
+        reader.show(1)
+        await panel.followPageOnce()
+        await panel.awaitPageLoad()
+        #expect(panel.bookKey == "text:f00d")
+        #expect(panel.turns.count == 1)
+    }
+
+    @Test("stopping an answer leaves page following on")
+    func stopAnswerKeepsFollowing() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsundoku-stop-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let reader = SteppingReader(kind: .kindle, pages: [page(1), page(2)])
+        let panel = panel(reader: reader, model: model)
+        panel.followInterval = .seconds(3_600)
+        panel.followDebounce = .zero
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+
+        panel.stopAnswer()
+        reader.show(1)
+        await panel.followPageOnce()
+        #expect(panel.followedTurns == 1)
+    }
+
     @Test("a sent turn keeps the page it was sent with")
     func sentTurnCaptionIsStable() async throws {
         let directory = FileManager.default.temporaryDirectory

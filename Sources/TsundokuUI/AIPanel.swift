@@ -30,6 +30,14 @@ public final class AIPanelModel: ObservableObject {
     /// True while the book's earlier turns are being read; sending waits, so a
     /// message cannot start a second conversation beside the stored one.
     @Published public private(set) var historyLoading = false
+    /// True while an answer is being written to the archive. Sending waits:
+    /// a second send before the first write finishes would not yet know the
+    /// conversation ID and would start a duplicate thread.
+    @Published public private(set) var persisting = false
+    /// Two writes can overlap: an answer being stored while session-only
+    /// turns are promoted. A single Bool let the first completion clear the
+    /// flag for both; the count keeps it true until the last write ends.
+    private var persistenceCount = 0
     /// The reader's typography, when it could be sampled; nil keeps the
     /// panel's own body style.
     @Published public var textStyle: CompanionTextStyle?
@@ -123,7 +131,6 @@ public final class AIPanelModel: ObservableObject {
     private var localContextGeneration = 0
     private var failureKind: FailureKind?
     private var submittedRequest: AIRequest?
-    private var submittedPrompt: String?
     private var submittedOnDevice = false
     /// The key this page's conversation is filed under; nil while the page
     /// is unidentified. Read-only outside the model.
@@ -198,7 +205,7 @@ public final class AIPanelModel: ObservableObject {
     /// Actions are allowed only on a page that finished loading. A reload
     /// clears the text first, so a stale page can never be sent.
     public var canRun: Bool {
-        !pageText.isEmpty && !historyLoading
+        !pageText.isEmpty && !historyLoading && !persisting
             && (phase == .idle || phase == .ready)
     }
 
@@ -300,7 +307,6 @@ public final class AIPanelModel: ObservableObject {
         saveError = nil
         failureKind = nil
         submittedRequest = nil
-        submittedPrompt = nil
         let context = readerContext
         let work = Task.detached { try context.page() }
         pageWork = work
@@ -311,11 +317,7 @@ public final class AIPanelModel: ObservableObject {
                     let self, !Task.isCancelled,
                     generation == self.pageGeneration
                 else { return }
-                self.pageText = page.text
-                self.readerKind = page.kind
-                self.source = page.source
-                self.pageIdentifier = page.identifier
-                self.livePageNumber = page.pageNumber
+                self.applyLivePage(page)
                 // Kindle hides the title with its chrome; its last-opened
                 // ASIN identifies the book when the app can read Kindle's
                 // container, and the archive supplies the title. Without
@@ -334,17 +336,7 @@ public final class AIPanelModel: ObservableObject {
                 self.identity = identity
                 let title = identity.title
                 self.bookTitle = title
-                self.context = AIContext(
-                    bookTitle: title,
-                    bookSource: identity.book?.source
-                        ?? (page.kind == .appleBooks ? .appleBooks : .kindle),
-                    reader: page.kind,
-                    pageNumber: page.pageNumber,
-                    pageCount: page.pageCount,
-                    selection: page.selection,
-                    excerpt: String(
-                        page.text.prefix(600))
-                        .trimmingCharacters(in: .whitespacesAndNewlines))
+                self.context = self.makeContext(for: page, identity: identity)
                 let key = identity.key
                 self.bookKey = key
                 TsundokuDiagnostics.shared.event(
@@ -411,7 +403,8 @@ public final class AIPanelModel: ObservableObject {
                 let captures = (try? archive?.captures()) ?? []
                 return resolver(page, captures, archive)
             }.value
-            guard let self, generation == self.localContextGeneration
+            guard let self, !Task.isCancelled,
+                generation == self.localContextGeneration
             else { return }
             if let result {
                 if let chapter = result.chapter {
@@ -437,10 +430,28 @@ public final class AIPanelModel: ObservableObject {
                         identifier: page.identifier, capture: capture,
                         epubAssetID: result.assetID),
                     books: books)
-                self.adopt(improved, archive: archive)
-                self.migrateLegacyKeys(
-                    improved, fingerprint: result.fingerprint,
-                    liveTitle: page.title, kind: page.kind)
+                // Equal-ranked live evidence does not outrank an identity the
+                // EPUB text proved: without an asset ID in this result, the
+                // live identifier is a conflict, not an improvement.
+                let currentIsEPUB =
+                    self.identity?.provenance.contains("EPUB") == true
+                let conflictingWithEPUB =
+                    result.assetID == nil && currentIsEPUB
+                    && improved.rank == self.identity?.rank
+                    && improved.key != self.identity?.key
+                let chosen: ReadingIdentity
+                if conflictingWithEPUB, let current = self.identity {
+                    chosen = current
+                    self.migrateLegacyKeys(
+                        current, fingerprint: result.fingerprint,
+                        liveTitle: page.title, kind: page.kind)
+                } else {
+                    self.adopt(improved, archive: archive)
+                    chosen = improved
+                    self.migrateLegacyKeys(
+                        improved, fingerprint: result.fingerprint,
+                        liveTitle: page.title, kind: page.kind)
+                }
                 TsundokuDiagnostics.shared.event(
                     "local_context_resolved",
                     [
@@ -449,8 +460,8 @@ public final class AIPanelModel: ObservableObject {
                         "fingerprint": result.fingerprint ?? "",
                         "capture": result.capture?.directory ?? "",
                         "asset_id": result.assetID ?? "",
-                        "identity_rank": improved.rank.rawValue,
-                        "identity_key": improved.key ?? "unidentified",
+                        "identity_rank": chosen.rank.rawValue,
+                        "identity_key": chosen.key ?? "unidentified",
                     ])
             } else if let identity = self.identity {
                 // No local text covers this page, but a reader-supplied ASIN
@@ -494,6 +505,7 @@ public final class AIPanelModel: ObservableObject {
         guard !candidates.isEmpty else { return }
         let title = identity.title
         let source = identity.book?.source
+        let generation = conversationGeneration
         let task = Task { [weak self] in
             let migrated = await Task.detached { () -> Bool in
                 var moved = false
@@ -512,7 +524,10 @@ public final class AIPanelModel: ObservableObject {
                 }
                 return moved
             }.value
-            guard let self, migrated, self.bookKey == key else { return }
+            guard let self, migrated, self.bookKey == key,
+                generation == self.conversationGeneration,
+                !self.persisting
+            else { return }
             self.loadConversationHistory()
         }
         legacyMigrationTask = task
@@ -560,14 +575,60 @@ public final class AIPanelModel: ObservableObject {
                 "book_identity_migrated",
                 ["from": previousKey, "to": key])
         } else if bookKey == nil, previous?.key == nil {
-            // A session-only page gained a key: adopt it and load its history.
+            // A session-only page gained a key. Turns answered while it had
+            // no key exist only in memory; file them before anything reloads
+            // a stored history over the top of them.
+            let pending = turns
             bookKey = key
             bookTitle = improved.title
             context.bookTitle = improved.title
-            loadConversationHistory()
+            if pending.isEmpty {
+                loadConversationHistory()
+            } else {
+                persistTurns(pending, key: key, archive: archive)
+            }
         } else if bookKey == key, bookTitle.isEmpty, !improved.title.isEmpty {
             bookTitle = improved.title
             context.bookTitle = improved.title
+        }
+    }
+
+    /// Files turns that were answered while the page had no key. They stay in
+    /// memory; the next page load reads the same turns back from the archive.
+    private func persistTurns(
+        _ pending: [AITurn], key: String, archive: Archive?
+    ) {
+        guard let archive else { return }
+        let title = context.bookTitle
+        let source = context.bookSource
+        beginPersistence()
+        Task { [weak self] in
+            let stored = await Task.detached { () -> Conversation? in
+                do {
+                    let conversation = try archive.createConversation(
+                        bookKey: key, bookTitle: title, bookSource: source)
+                    for turn in pending {
+                        try archive.appendConversationTurn(
+                            conversationID: conversation.id,
+                            action: turn.action, question: turn.question,
+                            answer: turn.answer, provider: turn.provider,
+                            prompt: turn.prompt, context: turn.context)
+                    }
+                    return conversation
+                } catch {
+                    return nil
+                }
+            }.value
+            guard let self else { return }
+            self.endPersistence()
+            if let stored {
+                if self.bookKey == key {
+                    self.conversationID = stored.id
+                }
+            } else {
+                self.saveError =
+                    "Could not file this book's earlier chats."
+            }
         }
     }
 
@@ -605,7 +666,9 @@ public final class AIPanelModel: ObservableObject {
     private func followPageOnce(reader: any ReaderContext) async {
         guard phase != .loadingPage else { return }
         let first = await Task.detached { try? reader.page() }.value
-        guard let first, !first.text.isEmpty else { return }
+        guard let first, !first.text.isEmpty, !Task.isCancelled else {
+            return
+        }
         if samePage(first) {
             // The page did not move, but a selection can change without one.
             if first.selection != context.selection {
@@ -627,9 +690,9 @@ public final class AIPanelModel: ObservableObject {
             }
         }
         let settled = await Task.detached { try? reader.page() }.value
-        guard let settled, !settled.text.isEmpty, !samePage(settled) else {
-            return
-        }
+        guard let settled, !settled.text.isEmpty, !Task.isCancelled,
+            !samePage(settled)
+        else { return }
         applyPageTurn(settled)
     }
 
@@ -638,32 +701,28 @@ public final class AIPanelModel: ObservableObject {
             && page.pageNumber == livePageNumber
     }
 
-    /// Adopts the settled page. A turn within a book keeps its conversation;
-    /// a turn that changes the book starts the new book's history and stops an
-    /// answer that belonged to the old one. A turn never rewrites an already
-    /// stored turn: its caption was snapshotted when it was sent.
-    private func applyPageTurn(_ page: ReaderPage) {
+    private func beginPersistence() {
+        persistenceCount += 1
+        persisting = true
+    }
+
+    private func endPersistence() {
+        persistenceCount = max(0, persistenceCount - 1)
+        persisting = persistenceCount > 0
+    }
+
+    private func applyLivePage(_ page: ReaderPage) {
         pageText = page.text
         readerKind = page.kind
         source = page.source
         pageIdentifier = page.identifier
         livePageNumber = page.pageNumber
-        followedTurns += 1
-        if phase == .failed, failureKind == .page {
-            phase = .idle
-            error = nil
-            failureKind = nil
-        }
-        let identity = ReadingIdentityResolver.resolve(
-            facts: ReadingLiveFacts(
-                kind: page.kind, title: page.title,
-                identifier: page.identifier),
-            books: app?.books ?? [])
-        let bookChanged = identity.key != bookKey
-        self.identity = identity
-        bookKey = identity.key
-        bookTitle = identity.title
-        context = AIContext(
+    }
+
+    private func makeContext(
+        for page: ReaderPage, identity: ReadingIdentity
+    ) -> AIContext {
+        AIContext(
             bookTitle: identity.title,
             bookSource: identity.book?.source
                 ?? (page.kind == .appleBooks ? .appleBooks : .kindle),
@@ -673,6 +732,43 @@ public final class AIPanelModel: ObservableObject {
             selection: page.selection,
             excerpt: String(page.text.prefix(600))
                 .trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Adopts the settled page. A turn within a book keeps its conversation;
+    /// a turn that changes the book starts the new book's history and stops an
+    /// answer that belonged to the old one. A turn never rewrites an already
+    /// stored turn: its caption was snapshotted when it was sent.
+    private func applyPageTurn(_ page: ReaderPage) {
+        applyLivePage(page)
+        followedTurns += 1
+        if phase == .failed, failureKind == .page {
+            phase = .idle
+            error = nil
+            failureKind = nil
+        }
+        let liveIdentity = ReadingIdentityResolver.resolve(
+            facts: ReadingLiveFacts(
+                kind: page.kind, title: page.title,
+                identifier: page.identifier),
+            books: app?.books ?? [])
+        // Live-only evidence is weaker than what the local text already
+        // proved. A fingerprint-keyed page loses its capture match on the
+        // next page; that is not a new book, and must not clear the chat.
+        let identity: ReadingIdentity
+        if let current = self.identity,
+            liveIdentity.rank > current.rank
+                || (liveIdentity.rank == .archiveMatch
+                    && current.provenance.contains("EPUB"))
+        {
+            identity = current
+        } else {
+            identity = liveIdentity
+        }
+        let bookChanged = identity.key != bookKey
+        self.identity = identity
+        bookKey = identity.key
+        bookTitle = identity.title
+        context = makeContext(for: page, identity: identity)
         if bookChanged {
             answerTask?.cancel()
             answerTask = nil
@@ -758,6 +854,7 @@ public final class AIPanelModel: ObservableObject {
         }
         let reader = readerContext
         let read = await Task.detached { try? reader.page() }.value
+        guard !Task.isCancelled else { return .unconfirmed }
         guard let read, !read.text.isEmpty else {
             lastFreshness = .unconfirmed
             sendNote =
@@ -775,9 +872,11 @@ public final class AIPanelModel: ObservableObject {
             sendNote = nil
             return .current
         }
+        guard !Task.isCancelled else { return .unconfirmed }
         let previousKey = bookKey
         applyPageTurn(read)
         await localContextTask?.value
+        guard !Task.isCancelled else { return .unconfirmed }
         if bookKey != previousKey {
             lastFreshness = .bookChanged
             sendNote =
@@ -813,7 +912,6 @@ public final class AIPanelModel: ObservableObject {
         submittedRequest = request
         submittedOnDevice = settings.provider == .appleOnDevice
         let prompt = AIComposer.prompt(for: request, settings: settings)
-        submittedPrompt = prompt
         TsundokuDiagnostics.shared.event(
             "ai_request_started",
             [
@@ -924,8 +1022,21 @@ public final class AIPanelModel: ObservableObject {
         saveError = nil
         failureKind = nil
         submittedRequest = nil
-        submittedPrompt = nil
         TsundokuDiagnostics.shared.event("ai_work_cancelled")
+    }
+
+    /// Stops the answer, not the panel: page following continues, so the next
+    /// send uses the current page.
+    public func stopAnswer() {
+        answerTask?.cancel()
+        answerTask = nil
+        sendPreparationTask?.cancel()
+        sendPreparationTask = nil
+        sendGeneration += 1
+        answerGeneration += 1
+        if phase == .loadingAnswer { phase = .idle }
+        error = nil
+        failureKind = nil
     }
 
     /// Starts a fresh conversation about the same book. Earlier conversations
@@ -947,7 +1058,6 @@ public final class AIPanelModel: ObservableObject {
         saveError = nil
         failureKind = nil
         submittedRequest = nil
-        submittedPrompt = nil
         if phase != .loadingPage { phase = .idle }
         TsundokuDiagnostics.shared.event("ai_conversation_cleared")
     }
@@ -955,6 +1065,10 @@ public final class AIPanelModel: ObservableObject {
     /// Switches to an earlier conversation of the same book.
     public func openConversation(_ id: Int64) {
         guard let archive = app?.archive else { return }
+        // Re-selecting the conversation already on screen is a no-op. Doing
+        // this after cancellation would stop its in-flight answer and leave
+        // the phase reading as loading forever.
+        if id == conversationID, !turns.isEmpty { return }
         answerTask?.cancel()
         answerTask = nil
         sendPreparationTask?.cancel()
@@ -965,8 +1079,6 @@ public final class AIPanelModel: ObservableObject {
         conversationGeneration += 1
         selectionGeneration += 1
         let generation = conversationGeneration
-        let localTurns = turns
-        if id == conversationID, !localTurns.isEmpty { return }
         phase = .loadingPage
         Task { [weak self] in
             do {
@@ -979,7 +1091,9 @@ public final class AIPanelModel: ObservableObject {
                 else { return }
                 self.apply(stored: stored, conversationID: id)
             } catch {
-                guard let self else { return }
+                guard let self, !Task.isCancelled,
+                    generation == self.conversationGeneration
+                else { return }
                 self.error = "Could not read this conversation: \(error)"
                 self.phase = .ready
             }
@@ -1085,7 +1199,6 @@ public final class AIPanelModel: ObservableObject {
         saveError = nil
         failureKind = nil
         submittedRequest = nil
-        submittedPrompt = nil
         phase = .ready
     }
 
@@ -1106,6 +1219,7 @@ public final class AIPanelModel: ObservableObject {
         }
         let title = context.bookTitle
         let source = context.bookSource
+        beginPersistence()
         Task { [weak self] in
             do {
                 let result = try await Task.detached {
@@ -1128,6 +1242,7 @@ public final class AIPanelModel: ObservableObject {
                     return (id, summaries)
                 }.value
                 guard let self else { return }
+                self.endPersistence()
                 if conversationAtSend == nil,
                     generationAtSend == self.conversationGeneration,
                     self.bookKey == key
@@ -1140,6 +1255,7 @@ public final class AIPanelModel: ObservableObject {
                 app.refreshConversationCounts()
             } catch {
                 guard let self else { return }
+                self.endPersistence()
                 self.saveError =
                     "This answer could not be saved: \(error)"
             }
@@ -1382,7 +1498,7 @@ public struct AIPanelView: View {
             Text("Asking \(model.provider)…")
                 .foregroundStyle(.secondary)
             Spacer()
-            IconButton("Stop", systemImage: "stop.fill") { model.cancel() }
+            IconButton("Stop", systemImage: "stop.fill") { model.stopAnswer() }
                 .controlSize(.small)
         }
     }
@@ -1533,7 +1649,8 @@ public struct AIPanelView: View {
             Text(
                 "Only this page"
                     + (model.context.selection == nil ? "" : " and your selection")
-                    + " is sent; the rest of the book stays on this Mac.")
+                    + " and up to three earlier exchanges are sent; the rest "
+                    + "of the book stays on this Mac.")
             if !model.identityNote.isEmpty {
                 Divider()
                 Text(model.identityNote)
@@ -1600,7 +1717,7 @@ public struct AIPanelView: View {
                 .frame(height: composerHeight)
                 if model.phase == .loadingAnswer {
                     Button {
-                        model.cancel()
+                        model.stopAnswer()
                     } label: {
                         Image(systemName: "stop.fill")
                             .font(.system(size: 12, weight: .semibold))

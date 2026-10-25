@@ -418,8 +418,12 @@ public final class AppModel: ObservableObject {
     /// Capture-fingerprint keys are not counted here because they need the
     /// capture index, which the column must not read per row.
     public func conversationCount(for book: Book) -> Int {
-        ConversationFiling.keys(for: book, captureFingerprints: [])
-            .reduce(0) { $0 + (conversationCounts[$1] ?? 0) }
+        let keys = ConversationFiling.keys(
+            for: book, captureFingerprints: [])
+        return conversationCounts.reduce(0) { total, entry in
+            keys.contains(ConversationFiling.canonical(entry.key))
+                ? total + entry.value : total
+        }
     }
 
     /// Refreshes the per-book chat counts the library column prints.
