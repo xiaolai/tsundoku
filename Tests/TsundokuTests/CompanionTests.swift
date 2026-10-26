@@ -340,10 +340,12 @@ struct CompanionSettingsTests {
         settings.launchAtLogin = true
         settings.hotKey = CompanionHotKey(
             keyCode: 49, modifiers: [.control, .shift])
+        settings.quickActions = [.summarize, .define]
         settings.save(to: defaults)
         let loaded = CompanionSettings.load(from: defaults)
         #expect(loaded == settings)
         #expect(loaded.hotKey.displayName == "⌃⇧Space")
+        #expect(loaded.quickActions == [.summarize, .define])
     }
 
     @Test("missing data falls back to the documented defaults")

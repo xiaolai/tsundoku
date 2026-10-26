@@ -192,6 +192,7 @@ struct ReaderStyleTests {
         object.removeValue(forKey: "matchReaderTypography")
         object.removeValue(forKey: "matchReaderTheme")
         object.removeValue(forKey: "panelAnimation")
+        object.removeValue(forKey: "quickActions")
         let legacy = try JSONSerialization.data(withJSONObject: object)
         let decoded = try JSONDecoder().decode(
             CompanionSettings.self, from: legacy)
@@ -199,5 +200,6 @@ struct ReaderStyleTests {
         #expect(decoded.matchReaderTypography)
         #expect(decoded.matchReaderTheme)
         #expect(decoded.panelAnimation == .outward)
+        #expect(decoded.quickActions == AIAction.quickActionCases)
     }
 }

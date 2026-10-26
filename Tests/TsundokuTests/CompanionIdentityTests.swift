@@ -38,6 +38,42 @@ struct CompanionIdentityTests {
             readState: 0, source: .appleBooks)
     }
 
+    @Test("the first page waits for archive hydration before naming the book")
+    func firstPageWaitsForHydration() async throws {
+        let directory = try temporaryDirectory("identity-hydration")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let archivePath = directory.appendingPathComponent("archive.sqlite")
+        let seeded = try Archive(path: archivePath)
+        _ = try seeded.importAll(
+            books: [
+                Book(
+                    asin: "B0ASIN0001", title: "The Imported Book",
+                    author: "A", bookType: 10, readState: 0,
+                    source: .kindle)
+            ], annotations: [])
+        let model = AppModel(
+            archiveURL: archivePath,
+            kindlePaths: KindlePaths(
+                container: directory.appendingPathComponent("missing")),
+            booksPaths: BooksPaths(
+                container: directory.appendingPathComponent("missing")),
+            recoverReaderSettings: false)
+        let page = ReaderPage(
+            text: String(repeating: "page words ", count: 30),
+            title: "Kindle", kind: .kindle, source: .accessibility,
+            identifier: "B0ASIN0001")
+        let panel = AIPanelModel(
+            app: model,
+            context: FixedReader(kind: .kindle, pageValue: page),
+            contextResolver: { _, _, _ in nil })
+        panel.loadPage()
+        await panel.awaitPageLoad()
+
+        #expect(panel.identity?.rank == .archiveMatch)
+        #expect(panel.context.bookTitle == "The Imported Book")
+        #expect(panel.bookLabel == "The Imported Book")
+    }
+
     @Test("a title-keyed chat moves under the edition's asset ID")
     func titleKeyMigratesToAssetID() async throws {
         let directory = try temporaryDirectory("identity-migrate")

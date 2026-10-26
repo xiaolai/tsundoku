@@ -125,10 +125,14 @@ public protocol ReaderContext: Sendable {
     /// Accessibility. Kindle's selection popover does not expose the words;
     /// Apple Books sets `AXSelectedText` on each selected text node.
     func selectedText() -> String?
+    /// A typed read when the reader can distinguish no selection from a
+    /// failed one and report a clipboard problem. Defaults to untyped.
+    func selectionReading() -> KindleLive.SelectionCopy?
 }
 
 public extension ReaderContext {
     func selectedText() -> String? { nil }
+    func selectionReading() -> KindleLive.SelectionCopy? { nil }
 }
 
 /// Joins a selection that spans several Accessibility nodes.
@@ -143,6 +147,151 @@ public enum SelectionText {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         }.filter { !$0.isEmpty }
         return kept.isEmpty ? nil : kept.joined(separator: "\n")
+    }
+
+    /// Whether copied text plausibly came from this page.
+    ///
+    /// Kindle's Copy action reports only "the clipboard changed", which any
+    /// other app can cause. Page text is the provenance check available
+    /// without a private API. The selection must carry at least two
+    /// identifying characters and match on word boundaries; punctuation is
+    /// significant, and a short term such as "AI" is still a real selection.
+    public static func belongs(_ selection: String, toPage page: String) -> Bool {
+        let selection = normalized(selection)
+        let page = normalized(page)
+        guard !page.isEmpty else { return false }
+        if containsSignificantSymbol(selection) {
+            // C++, C#, $, % and operators carry meaning; require the literal
+            // phrase at a boundary, and at least two characters in total.
+            guard selection.count >= 2 else { return false }
+            return containsAtASCIIBoundary(selection, in: page)
+        }
+        guard identifyingLength(selection) >= 2 else { return false }
+        if containsCJK(selection) {
+            return containsAtBoundary(selection, in: page)
+        }
+        let selectionWords = words(selection)
+        let pageWords = words(page)
+        guard !selectionWords.isEmpty else { return false }
+        guard selectionWords.count > 1 else {
+            return pageWords.contains(selectionWords[0])
+        }
+        guard pageWords.count >= selectionWords.count else { return false }
+        for start in 0...(pageWords.count - selectionWords.count)
+        where Array(pageWords[start..<(start + selectionWords.count)])
+            == selectionWords
+        {
+            return true
+        }
+        return false
+    }
+
+    private static func normalized(_ value: String) -> String {
+        var collapsed = value.lowercased()
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        // Layout can insert a space between CJK characters that belong to
+        // one word; remove it on both sides of the comparison.
+        var result = ""
+        let characters = Array(collapsed)
+        for (index, character) in characters.enumerated() {
+            if character == " ",
+                index > 0, index + 1 < characters.count,
+                containsCJK(String(characters[index - 1])),
+                containsCJK(String(characters[index + 1]))
+            {
+                continue
+            }
+            result.append(character)
+        }
+        collapsed = result
+        return collapsed
+    }
+
+    private static func identifyingLength(_ value: String) -> Int {
+        value.filter { $0.isLetter || $0.isNumber }.count
+    }
+
+    private static func containsSignificantSymbol(_ value: String) -> Bool {
+        let ordinary: Set<Character> = [
+            " ", ".", ",", "!", "?", ";", ":", "'", "\"", "“", "”", "‘",
+            "’", "—", "–", "…", "(", ")", "[", "]", "\n",
+        ]
+        return value.contains { character in
+            !character.isLetter && !character.isNumber
+                && !ordinary.contains(character)
+        }
+    }
+
+    private static func words(_ value: String) -> [String] {
+        value.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+    }
+
+    /// CJK has no spaces, so substring matching is the only option. It must
+    /// still not match a fragment that runs into a non-CJK letter: "中文
+    /// test" is not a phrase inside "中文 testing".
+    private static func containsAtBoundary(
+        _ selection: String, in page: String
+    ) -> Bool {
+        var start = page.startIndex
+        while let range = page.range(
+            of: selection, range: start..<page.endIndex)
+        {
+            let beforeOK =
+                range.lowerBound == page.startIndex
+                || allowsBoundary(page[page.index(before: range.lowerBound)])
+            let afterOK =
+                range.upperBound == page.endIndex
+                || allowsBoundary(page[range.upperBound])
+            if beforeOK, afterOK { return true }
+            start = page.index(after: range.lowerBound)
+        }
+        return false
+    }
+
+    /// ASCII words and symbols need a real boundary on both sides; this
+    /// rejects "$100" inside a page that only contains "100%".
+    private static func containsAtASCIIBoundary(
+        _ selection: String, in page: String
+    ) -> Bool {
+        var start = page.startIndex
+        while let range = page.range(
+            of: selection, range: start..<page.endIndex)
+        {
+            let beforeOK =
+                range.lowerBound == page.startIndex
+                || !isWordCharacter(page[page.index(before: range.lowerBound)])
+            let afterOK =
+                range.upperBound == page.endIndex
+                || !isWordCharacter(page[range.upperBound])
+            if beforeOK, afterOK { return true }
+            start = page.index(after: range.lowerBound)
+        }
+        return false
+    }
+
+    private static func isWordCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber
+    }
+
+    /// CJK compounds may abut a CJK match; every other letter or digit
+    /// means the match is inside a longer word.
+    private static func allowsBoundary(_ character: Character) -> Bool {
+        guard character.isLetter || character.isNumber else { return true }
+        return containsCJK(String(character))
+    }
+
+    private static func containsCJK(_ value: String) -> Bool {
+        value.unicodeScalars.contains { scalar in
+            (0x3040...0x30FF).contains(scalar.value)
+                || (0x3400...0x4DBF).contains(scalar.value)
+                || (0x4E00...0x9FFF).contains(scalar.value)
+                || (0xF900...0xFAFF).contains(scalar.value)
+                || (0x20000...0x2FA1F).contains(scalar.value)
+                || (0x30000...0x323AF).contains(scalar.value)
+                || (0x323B0...0x33479).contains(scalar.value)
+        }
     }
 }
 

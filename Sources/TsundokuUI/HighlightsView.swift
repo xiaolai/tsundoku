@@ -44,6 +44,34 @@ public struct HighlightsView: View {
         return query
     }
 
+    /// AI cards for the current scope. A card follows its conversation's
+    /// filing key; the title fallback keeps a card visible while its
+    /// conversation still sits under a weak title key.
+    /// The book the annotation scope is showing. A book opened from the
+    /// library supplies `book`; the global Annotations view carries its
+    /// scoped book in `annotationBookID`, which cards must honour too.
+    private var effectiveBook: Book? {
+        if let book { return book }
+        guard let id = model.annotationBookID else { return nil }
+        return model.books.first {
+            $0.asin.caseInsensitiveCompare(id) == .orderedSame
+        }
+    }
+
+    private var aiCards: [AICard] {
+        var cards = AICardFilter.cards(
+            model.aiCards, for: effectiveBook,
+            search: model.annotationSearch)
+        // A book workspace follows the book's own reader; the global list
+        // follows the source picker.
+        if let source = book?.source ?? model.annotationSourceFilter.source {
+            cards = cards.filter {
+                $0.bookSource == nil || $0.bookSource == source
+            }
+        }
+        return cards
+    }
+
     private var rows: [AnnotationTableRow] {
         let catalog = Dictionary(
             model.books.map { ($0.asin, $0) },
@@ -63,19 +91,33 @@ public struct HighlightsView: View {
 
     public var body: some View {
         let snapshot = rows
+        let ai = aiCards
         let ids = snapshot.map(\.id)
         let current = snapshot.first { selection.contains($0.id) }
         VStack(spacing: 0) {
-            if !model.annotations.isEmpty {
+            if !model.annotations.isEmpty || !model.aiCards.isEmpty
+                || !model.annotationSearch.isEmpty
+                || model.annotationSourceFilter != .all
+                || model.annotationBookID != nil
+            {
                 scopeBar(count: snapshot.count)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if snapshot.isEmpty {
-                emptyState.frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if presentation == "list" {
+            if snapshot.isEmpty && ai.isEmpty {
+                if !model.aiCards.isEmpty {
+                    ContentUnavailableView(
+                        "No Matches", systemImage: "sparkles",
+                        description: Text(
+                            "No AI card matches the search or filters.")
+                    ).frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    emptyState.frame(
+                        maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else if presentation == "list" && !snapshot.isEmpty {
                 annotationTable(snapshot)
             } else {
-                cardGrid(snapshot)
+                cardPage(snapshot, ai: ai)
             }
         }
         .frame(minWidth: 320, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
@@ -229,31 +271,47 @@ public struct HighlightsView: View {
         .padding(.horizontal, 16).padding(.vertical, 10)
     }
 
-    private func cardGrid(_ rows: [AnnotationTableRow]) -> some View {
+    private func cardPage(
+        _ rows: [AnnotationTableRow], ai: [AICard]
+    ) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVGrid(
-                    columns: [
-                        GridItem(
-                            .adaptive(minimum: 280, maximum: 440), spacing: 14)
-                    ], spacing: 14
-                ) {
-                    ForEach(rows) { row in
-                        AnnotationCard(
-                            row: row, selected: selection.contains(row.id),
-                            randomBorders: randomBorders,
-                            borderSeed: borderSeed,
-                            showBookMetadata: bookID == nil,
-                            readingSize: CGFloat(max(13, min(28, readingSize))),
-                            excerptLines: max(3, min(10, excerptLines)),
-                            select: { select(row.id, rows: rows) },
-                            inspect: {
-                                select(row.id, rows: rows, plain: true)
-                                showInspector = true
+                VStack(alignment: .leading, spacing: 18) {
+                    if !ai.isEmpty {
+                        aiCardSection(ai)
+                    }
+                    if !rows.isEmpty {
+                        if !ai.isEmpty { Divider() }
+                        LazyVGrid(
+                            columns: [
+                                GridItem(
+                                    .adaptive(minimum: 280, maximum: 440),
+                                    spacing: 14)
+                            ], spacing: 14
+                        ) {
+                            ForEach(rows) { row in
+                                AnnotationCard(
+                                    row: row,
+                                    selected: selection.contains(row.id),
+                                    randomBorders: randomBorders,
+                                    borderSeed: borderSeed,
+                                    showBookMetadata: bookID == nil,
+                                    readingSize: CGFloat(
+                                        max(13, min(28, readingSize))),
+                                    excerptLines: max(
+                                        3, min(10, excerptLines)),
+                                    select: { select(row.id, rows: rows) },
+                                    inspect: {
+                                        select(row.id, rows: rows, plain: true)
+                                        showInspector = true
+                                    }
+                                )
+                                .id(row.id)
+                                .contextMenu {
+                                    itemActions(row, snapshot: rows)
+                                }
                             }
-                        )
-                        .id(row.id)
-                        .contextMenu { itemActions(row, snapshot: rows) }
+                        }
                     }
                 }
                 .padding(16)
@@ -290,6 +348,31 @@ public struct HighlightsView: View {
             .onKeyPress(.space) {
                 showInspector = true
                 return .handled
+            }
+        }
+    }
+
+    private func aiCardSection(_ cards: [AICard]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                Label("AI Cards", systemImage: "sparkles")
+                    .font(.headline)
+                Text("\(cards.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            LazyVGrid(
+                columns: [
+                    GridItem(.adaptive(minimum: 280, maximum: 440), spacing: 14)
+                ], spacing: 14
+            ) {
+                ForEach(cards) { card in
+                    AICardView(
+                        card: card, book: effectiveBook, model: model,
+                        readingSize: CGFloat(max(13, min(28, readingSize))),
+                        excerptLines: max(3, min(10, excerptLines)))
+                }
             }
         }
     }
@@ -519,6 +602,132 @@ struct AnnotationTableRow: Identifiable {
         annotation.passageText ?? annotation.personalNote
             ?? (annotation.kind == .bookmark
                 ? "Saved bookmark" : "Passage text unavailable")
+    }
+}
+
+/// An AI answer card. It is deliberately outside the annotation selection,
+/// inspector and export paths: its content is AI-generated, not a highlight.
+struct AICardView: View {
+    let card: AICard
+    let book: Book?
+    @ObservedObject var model: AppModel
+    let readingSize: CGFloat
+    let excerptLines: Int
+
+    private var targetBook: Book? {
+        // A supplied book is trusted only when it passes the same filter as
+        // the card list it came from.
+        if let book,
+            !AICardFilter.cards([card], for: book, search: "").isEmpty
+        {
+            return book
+        }
+        let key = ConversationFiling.canonical(card.bookKey)
+        if let byKey = model.books.first(where: {
+            ConversationFiling.canonical($0.asin) == key
+        }) { return byKey }
+        guard AICardFilter.isWeakKey(card.bookKey) else { return nil }
+        let cardTitle = ConversationKey.normalize(card.bookTitle)
+        let candidates = model.books.filter { candidate in
+            if let source = card.bookSource, source != candidate.source {
+                return false
+            }
+            let title = ConversationKey.normalize(candidate.title)
+            return ConversationFiling.canonical(candidate.asin) == key
+                || ConversationFiling.canonical("books:\(title)") == key
+                || ConversationFiling.canonical("kindle:\(title)") == key
+                || (!cardTitle.isEmpty && cardTitle == title)
+        }
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+
+    private var contextLabel: String {
+        var parts: [String] = []
+        if let page = card.context.pageLabel { parts.append(page) }
+        if let chapter = card.context.chapter { parts.append(chapter) }
+        return parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Label("AI card", systemImage: "sparkles")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Text(card.provider)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Text(
+                card.question.isEmpty
+                    ? card.action?.displayName ?? "AI answer"
+                    : card.question
+            )
+            .font(.system(size: readingSize, weight: .semibold))
+            .lineLimit(2)
+            .textSelection(.enabled)
+            MarkdownText(
+                text: card.answer,
+                style: CompanionTextStyle(
+                    family: nil, size: readingSize, lineSpacing: 3))
+                .lineLimit(excerptLines)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 6) {
+                if !card.bookTitle.isEmpty {
+                    Text(card.bookTitle).lineLimit(1)
+                }
+                if !contextLabel.isEmpty {
+                    Text("· \(contextLabel)").lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                IconButton(
+                    "Copy Answer", systemImage: "doc.on.doc",
+                    tooltip: "Copy this AI answer"
+                ) {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        card.answer, forType: .string)
+                }
+                .controlSize(.mini)
+                if let targetBook {
+                    IconButton(
+                        "Open Chat", systemImage: "bubble.left.and.bubble.right",
+                        tooltip: "Open the conversation this answer came from"
+                    ) {
+                        model.openChats(
+                            for: targetBook,
+                            conversationID: card.conversationID,
+                            turnID: card.turnID)
+                    }
+                    .controlSize(.mini)
+                }
+                IconButton(
+                    "Remove from Cards",
+                    systemImage: "rectangle.stack.badge.minus",
+                    tooltip: "Remove this card; the saved note remains"
+                ) { model.removeAICard(card) }
+                .controlSize(.mini)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            Text(
+                "AI-generated · \(TsundokuFormat.annotationDate(card.createdAt))"
+            )
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            .quaternary.opacity(0.28),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(
+                    Color.accentColor.opacity(0.25), lineWidth: 0.8))
     }
 }
 

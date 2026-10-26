@@ -270,6 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             self.companion.showPanel()
         }
         model.openSettingsWindow = { [weak self] route in self?.openSettings(route) }
+        model.openLibraryWindow = { [weak self] in self?.openLibrary() }
         model.openSavedNotesWindow = { [weak self] in
             self?.showSavedNotes()
         }

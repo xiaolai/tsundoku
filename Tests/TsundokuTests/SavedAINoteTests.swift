@@ -31,5 +31,11 @@ struct SavedAINoteTests {
         #expect(try archive.aiNotes(asin: "A1").count == 1)
         #expect(try archive.annotations().isEmpty)
         #expect(try Archive(path: url).aiNotes().count == 2)
+        // The card columns are added in place: a note written before they
+        // existed opens as a plain note, not a card.
+        #expect(notes.last?.turnID == nil)
+        #expect(notes.last?.cardedAt == nil)
+        #expect(notes.last?.isCard == false)
+        #expect(try archive.aiCards().isEmpty)
     }
 }

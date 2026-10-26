@@ -80,6 +80,28 @@ public struct BookTextIndex: Sendable {
         chapters.last(where: { $0.page <= page })?.title
     }
 
+    /// The captured pages of the chapter containing `page`, joined in order.
+    /// Nil when the page or a chapter start is unknown.
+    public func chapterText(for page: Int?) -> String? {
+        guard let page,
+            let index = chapters.lastIndex(where: { $0.page <= page })
+        else { return nil }
+        let start = chapters[index].page
+        let end = index + 1 < chapters.count
+            ? chapters[index + 1].page : Int.max
+        let text = pages
+            .filter { $0.page >= start && $0.page < end }
+            .map(\.text)
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        return text.isEmpty ? nil : text
+    }
+
+    public var fullText: String {
+        pages.map(\.text).filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+
     /// Finds the captured page whose text is this live page.
     ///
     /// An exact normalised match is the common case: both texts come from the
@@ -278,9 +300,26 @@ public struct EPUBBookIndex: Sendable {
     }
 
     public let chapters: [Chapter]
+    public let directory: URL
     private let chapterShingles: [Set<String>]
 
+    /// The chapter a navigation entry named, falling back to the first
+    /// normalized title match. Nil when the requested chapter is unknown.
+    public func chapterText(named title: String?) -> String? {
+        guard let title else { return nil }
+        let wanted = ConversationKey.normalize(title)
+        return chapters.first {
+            ConversationKey.normalize($0.title) == wanted
+        }?.text
+    }
+
+    public var fullText: String {
+        chapters.map(\.text).filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+
     public init(epubDirectory: URL) throws {
+        self.directory = epubDirectory
         guard case .clear = EPUBEncryption.status(unpackedEPUB: epubDirectory)
         else {
             throw ReadingIndexError.protected(
@@ -687,16 +726,21 @@ public enum ReadingContextResolver {
         /// text-validated edition supplies one; it is the identity that
         /// replaces a title key.
         public let assetID: String?
+        /// The unpacked EPUB whose text matched the page, when it was read
+        /// from disk. Later chapter/book scopes read the same file.
+        public let epubPath: URL?
 
         public init(
             chapter: String?, pageNumber: Int?, fingerprint: String?,
-            capture: CaptureRecord?, assetID: String? = nil
+            capture: CaptureRecord?, assetID: String? = nil,
+            epubPath: URL? = nil
         ) {
             self.chapter = chapter
             self.pageNumber = pageNumber
             self.fingerprint = fingerprint
             self.capture = capture
             self.assetID = assetID
+            self.epubPath = epubPath
         }
     }
 
@@ -727,26 +771,32 @@ public enum ReadingContextResolver {
             {
                 return Result(
                     chapter: match.chapter, pageNumber: nil, fingerprint: nil,
-                    capture: nil, assetID: match.identifier)
+                    capture: nil, assetID: match.identifier,
+                    epubPath: EPUBIndexCache.shared.epubPath(
+                        for: match.identifier))
             }
             // The Books library's own container can be unreadable while its
             // unpacked EPUBs are still in the iCloud Books folder. Name
             // matching narrows the field; the page text decides.
             // Directory enumeration order must not decide between editions;
             // score every folder EPUB and keep the strongest match.
-            var bestFolder: (chapter: String, score: Double)?
+            var bestFolder: (
+                chapter: String, score: Double, path: URL
+            )?
             for index in epubIndexes(named: title) {
                 guard let match = index.bestChapter(pageText),
                     match.score >= 0.4
                 else { continue }
                 if match.score > (bestFolder?.score ?? 0) {
-                    bestFolder = (match.title, match.score)
+                    bestFolder = (
+                        match.title, match.score, index.directory)
                 }
             }
             if let bestFolder {
                 return Result(
                     chapter: bestFolder.chapter, pageNumber: nil,
-                    fingerprint: nil, capture: nil)
+                    fingerprint: nil, capture: nil,
+                    epubPath: bestFolder.path)
             }
         }
         let source = kind == .kindle ? "kindle" : "applebooks"
@@ -799,6 +849,71 @@ public enum ReadingContextResolver {
         }
         guard let best else { return nil }
         return (best.identifier, best.chapter)
+    }
+}
+
+public extension ReadingContextResolver {
+    /// The local text a context scope asks for. Chapter and book scopes read
+    /// the same index the resolver already matched, so the text is the book
+    /// the page belongs to, not a second guess.
+    /// The capture's own manifest is the only authority on whether it ran
+    /// from the start of the book to the end. A missing or unreadable manifest
+    /// is not evidence of coverage.
+    private static func captureCoversWholeBook(
+        _ record: CaptureRecord
+    ) -> Bool {
+        let url = URL(fileURLWithPath: record.directory)
+            .appendingPathComponent("manifest.json")
+        guard let data = try? Data(contentsOf: url),
+            let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any]
+        else { return false }
+        // CaptureJobEngine writes `${complete: {wholeBook: …}}`; the flat key
+        // is accepted for older manifests.
+        let complete = object["complete"] as? [String: Any]
+        return (complete?["wholeBook"] as? Bool)
+            ?? (object["wholeBook"] as? Bool)
+            ?? false
+    }
+
+    static func scopeText(
+        _ scope: CompanionScope, result: Result, pageNumber: Int?
+    ) -> String? {
+        switch scope {
+        case .currentPage, .selection:
+            return nil
+        case .currentChapter:
+            if let record = result.capture,
+                let index = CaptureIndexCache.shared.index(
+                    directory: record.directory)
+            {
+                // Capture pages are numbered from the capture's first page,
+                // not the live reader's page. The text match's coordinate is
+                // the one that belongs to this index.
+                return index.chapterText(
+                    for: result.pageNumber ?? pageNumber)
+            }
+            if let path = result.epubPath,
+                let index = EPUBIndexCache.shared.index(at: path)
+            {
+                return index.chapterText(named: result.chapter)
+            }
+            return nil
+        case .wholeBook:
+            if let record = result.capture,
+                let index = CaptureIndexCache.shared.index(
+                    directory: record.directory)
+            {
+                // A page-limited or partial capture is not a whole book.
+                return captureCoversWholeBook(record) ? index.fullText : nil
+            }
+            if let path = result.epubPath,
+                let index = EPUBIndexCache.shared.index(at: path)
+            {
+                return index.fullText
+            }
+            return nil
+        }
     }
 }
 

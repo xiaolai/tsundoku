@@ -113,7 +113,15 @@ public final class AppModel: ObservableObject {
     @Published public var sessions: [ReadingSession] = []
     @Published public var captures: [CaptureRecord] = []
     @Published public var counts: ArchiveCounts?
-    @Published public var selectedBookID: String?
+    @Published public var selectedBookID: String? {
+        didSet {
+            // An explicit book choice ends any capture route's override.
+            if selectedBookID != oldValue {
+                captureRouteKind = nil
+                captureRouteWithoutBook = false
+            }
+        }
+    }
     @Published public var search = ""
     @Published public var annotationFilter: AnnotationFilter = .mine
     @Published public var annotationSearch = ""
@@ -123,12 +131,23 @@ public final class AppModel: ObservableObject {
     @Published public var bookWorkspaceID: String?
     @Published public var bookWorkspaceSection: BookWorkspaceSection = .annotations
     @Published public var savedAINotes: [SavedAINote] = []
+    @Published public private(set) var aiCards: [AICard] = []
+    /// The persisted turn IDs that are cards, shared with the companion so a
+    /// removal in the library updates an open panel.
+    @Published public private(set) var cardTurnIDs: Set<Int64> = []
+    /// True once a card load has completed, even if it found none; an empty
+    /// set before the first load means "unknown", not "no cards".
+    @Published public private(set) var aiCardsLoaded = false
+    private var aiCardsGeneration = 0
     /// Turns stored per book key (an ASIN when the archive knows the book).
     @Published public var conversationCounts: [String: Int] = [:]
     @Published public var showSavedAINotes = false
     @Published public var sourceHealth: [BookSource: String] = [:]
     @Published public var sourceLastImport: [BookSource: Date] = [:]
     public var openSettingsWindow: ((SettingsRoute) -> Void)?
+    /// Opens the library window on the Exports section. The companion uses it
+    /// for the capture prompt chapter and whole-book scopes need.
+    public var openLibraryWindow: (() -> Void)?
     public var openSavedNotesWindow: (() -> Void)?
     @Published public var settings = AISettings.load() {
         didSet {
@@ -382,6 +401,31 @@ public final class AppModel: ObservableObject {
         section = .highlights
     }
 
+    /// Loads every AI card. The Cards view filters by book; loading all keeps
+    /// the book query free of capture-index work on the main thread.
+    public func refreshAICards() {
+        guard let archive else { return }
+        aiCardsGeneration += 1
+        let generation = aiCardsGeneration
+        Task {
+            do {
+                let cards = try await Task.detached {
+                    try archive.aiCards()
+                }.value
+                guard generation == self.aiCardsGeneration else { return }
+                aiCards = cards
+                cardTurnIDs = Set(cards.map(\.turnID))
+                aiCardsLoaded = true
+                TsundokuDiagnostics.shared.event(
+                    "ai_cards_loaded", ["cards": cards.count])
+            } catch {
+                TsundokuDiagnostics.shared.event(
+                    "ai_cards_failed", ["error": "\(error)"])
+                post("Could not read AI cards: \(error)", seconds: 12)
+            }
+        }
+    }
+
     public func refreshAINotes() {
         guard let archive else { return }
         aiNotesGeneration += 1
@@ -435,9 +479,115 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    public func openChats(for book: Book) {
+    /// Exports → Capture as PDF, with the companion's book selected when the
+    /// archive knows it. The capture itself remains an explicit action.
+    /// The reader the companion showed when it asked for Capture. The saved
+    /// capture preference must not override the book on screen.
+    private var captureRouteKind: ReaderKind?
+    /// True while a capture route has no archived book. It persists across
+    /// reloads (the first import is not the only one) until the reader picks
+    /// a book or a capture consumes the route.
+    private var captureRouteWithoutBook = false
+
+    public func openCaptureExports(
+        bookID: String?, readerKind: ReaderKind? = nil
+    ) {
+        let match = bookID.flatMap { id in
+            books.first {
+                $0.asin.caseInsensitiveCompare(id) == .orderedSame
+            }
+        }
+        // Set the book first: its didSet clears any previous route state.
+        selectedBookID = match?.asin
+        captureRouteKind = readerKind
+        captureRouteWithoutBook = match == nil
+        bookWorkspaceID = nil
+        section = .exports
+        openLibraryWindow?()
+    }
+
+    public struct PendingChat: Sendable, Equatable {
+        public let bookID: String
+        public let conversationID: Int64
+        public let turnID: Int64?
+    }
+
+    @Published public private(set) var pendingChat: PendingChat?
+
+    public func openChats(
+        for book: Book, conversationID: Int64? = nil, turnID: Int64? = nil
+    ) {
+        // The card can be opened from the global Annotations view, which is
+        // not the library workspace; without this switch the route changes
+        // state that no visible view renders.
+        section = .library
         bookWorkspaceID = book.asin
         bookWorkspaceSection = .chats
+        pendingChat = conversationID.map {
+            PendingChat(
+                bookID: book.asin, conversationID: $0, turnID: turnID)
+        }
+    }
+
+    /// Reads a card route without consuming it; a transient failure keeps it
+    /// available for the next attempt.
+    public func peekPendingChat(for bookID: String) -> PendingChat? {
+        guard let pending = pendingChat, pending.bookID == bookID else {
+            return nil
+        }
+        return pending
+    }
+
+    /// Consumes a card's chat route once the matching Chats view appears.
+    public func takePendingChat(for bookID: String) -> PendingChat? {
+        guard let pending = pendingChat, pending.bookID == bookID else {
+            return nil
+        }
+        pendingChat = nil
+        return pending
+    }
+
+    /// Consumes exactly the route the caller resolved; a newer route for the
+    /// same book must survive an older lookup's completion.
+    public func takePendingChat(_ expected: PendingChat) -> PendingChat? {
+        guard pendingChat == expected else { return nil }
+        pendingChat = nil
+        return expected
+    }
+
+    /// Keeps the shared set in step with a companion write before the next
+    /// full card load finishes.
+    public func registerCard(turnID: Int64) {
+        cardTurnIDs.insert(turnID)
+    }
+
+    private var cardRemovalTask: Task<Void, Never>?
+
+    public func removeAICard(_ card: AICard) {
+        // An in-flight card load may still contain this row; discard it so
+        // its result cannot put "In Cards" back.
+        aiCardsGeneration += 1
+        cardTurnIDs.remove(card.turnID)
+        guard let archive else { return }
+        cardRemovalTask = Task {
+            do {
+                try await Task.detached {
+                    try archive.removeCard(turnID: card.turnID)
+                }.value
+                self.refreshAICards()
+                self.refreshAINotes()
+            } catch {
+                // The row is still there; put the ID back so the companion
+                // does not claim "Add to Cards" over an existing card.
+                self.cardTurnIDs.insert(card.turnID)
+                self.post("Could not remove the AI card: \(error)", seconds: 12)
+            }
+        }
+    }
+
+    /// Waits for the last Remove from Cards write.
+    public func awaitCardRemoval() async {
+        await cardRemovalTask?.value
     }
 
     public var ebookCount: Int {
@@ -514,6 +664,7 @@ public final class AppModel: ObservableObject {
                 self.sessions = sessions
                 self.captures = captures
                 self.refreshAINotes()
+                self.refreshAICards()
                 self.refreshConversationCounts()
                 self.counts = counts
                 self.status =
@@ -526,7 +677,9 @@ public final class AppModel: ObservableObject {
                     ?? self.selectedBookID.flatMap { id in
                         books.contains { $0.asin == id } ? id : nil
                     }
-                if let target = requested
+                if self.captureRouteWithoutBook {
+                    // Keep the route empty through this reload.
+                } else if let target = requested
                     ?? books.first(where: { $0.isEbook })?.asin,
                     self.selectedBookID != target
                 {
@@ -678,6 +831,18 @@ public final class AppModel: ObservableObject {
             permissions?.completeLibrarySetup(
                 importedSources: outcome.committedSources,
                 failures: failures, generation: accessGeneration)
+        }
+    }
+
+    /// Awaits the archive hydration started at launch. The companion opens
+    /// eagerly (`AppModel` is created on first use) and its first page can be
+    /// read before the imported book rows arrive; identity must not race them.
+    public func awaitArchiveLoaded() async {
+        while true {
+            let generation = reloadGeneration
+            guard let task = reloadTask else { return }
+            await task.value
+            if generation == reloadGeneration { return }
         }
     }
 
@@ -1097,7 +1262,8 @@ public final class AppModel: ObservableObject {
     /// present: the selected book, a live Kindle page, the source filter, then
     /// the first ebook.
     public var captureKind: ReaderKind {
-        CaptureReader.resolve(
+        if let captureRouteKind { return captureRouteKind }
+        return CaptureReader.resolve(
             settings.captureReader,
             selected: selectedBook?.source,
             liveReader: livePage == nil ? nil : .kindle,
@@ -1109,6 +1275,9 @@ public final class AppModel: ObservableObject {
     /// reader, otherwise the first (recent) ebook from the same reader. Nil
     /// when the library has no book for it — the live page names the capture.
     public func captureBook(for kind: ReaderKind) -> Book? {
+        // A companion route with no archived match runs from the live page;
+        // it must not borrow the first ebook of the same reader.
+        if captureRouteWithoutBook, selectedBookID == nil { return nil }
         let source: BookSource = kind == .appleBooks ? .appleBooks : .kindle
         if let selected = selectedBook, selected.source == source {
             return selected
@@ -1147,6 +1316,8 @@ public final class AppModel: ObservableObject {
         }
         let kind = captureKind
         let book = captureBook(for: kind)
+        captureRouteKind = nil
+        captureRouteWithoutBook = false
         let title = book?.title ?? livePage?.title ?? "Book"
         let folder = exportFolder.appendingPathComponent(
             "\(slug(title))-\(timestamp())")

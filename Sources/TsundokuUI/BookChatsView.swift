@@ -19,8 +19,11 @@ struct BookChatsView: View {
     /// summary load must not hide why the sidebar is stale.
     @State private var summariesError: String?
     @State private var turnsError: String?
+    /// Routing failures are separate: a later transcript refresh must not
+    /// clear the reason a card's chat did not open.
+    @State private var routeError: String?
 
-    private var error: String? { summariesError ?? turnsError }
+    private var error: String? { summariesError ?? routeError ?? turnsError }
     @State private var turnsGeneration = 0
     @State private var summariesGeneration = 0
     @State private var incompleteCaptures = false
@@ -29,6 +32,17 @@ struct BookChatsView: View {
     @State private var captureCache: (
         captures: [CaptureRecord], fingerprints: [String], incomplete: Bool
     )?
+    @State private var highlightTurnID: Int64?
+    @State private var scrolledHighlight: Int64?
+    /// Set while a card's explicit conversation is being loaded, so the
+    /// selection change handler does not load the same transcript twice.
+    @State private var pendingSelection: Int64?
+    /// A card route can name a conversation the sidebar excludes. Pin it so
+    /// a concurrent summary reload cannot replace it with the newest thread.
+    @State private var pinnedSelection: Int64?
+    /// A routed conversation the sidebar excludes; its metadata is needed so
+    /// the transcript can still be filed under this book.
+    @State private var routedConversation: Conversation?
 
     /// `livePage` tracks Kindle only, so it cannot decide whether an Apple
     /// Books book is open. The companion itself chooses the frontmost reader;
@@ -42,10 +56,16 @@ struct BookChatsView: View {
         return summaries.first { $0.id == id }
     }
 
-    private var selectedIsFiled: Bool {
-        guard let conversation = summary(selectedID)?.conversation else {
-            return true
+    private var selectedConversation: Conversation? {
+        if let conversation = summary(selectedID)?.conversation {
+            return conversation
         }
+        guard routedConversation?.id == selectedID else { return nil }
+        return routedConversation
+    }
+
+    private var selectedIsFiled: Bool {
+        guard let conversation = selectedConversation else { return true }
         return ConversationFiling.isFiled(conversation, under: book)
     }
 
@@ -53,7 +73,7 @@ struct BookChatsView: View {
     /// fingerprint) under this book's ASIN. Rows move in place, so the chat
     /// keeps every turn.
     private func fileUnderBook() {
-        guard let selected = summary(selectedID),
+        guard let selected = selectedConversation,
             let archive = model.archive
         else { return }
         Task {
@@ -84,15 +104,31 @@ struct BookChatsView: View {
         }
         .task(id: book.asin) {
             model.refreshConversationCounts()
-            await loadSummaries()
+            // `loadSummaries` consumes a card route after it succeeds, so a
+            // load invalidated by a concurrent refresh leaves the route for
+            // the replacement load instead of dropping it here.
+            _ = await loadSummaries()
         }
         .onChange(of: selectedID) { _, id in
+            // Deselecting must clear the transcript, not return early just
+            // because no programmatic route is pending.
             guard let id else {
+                pinnedSelection = nil
+                routedConversation = nil
                 turnsGeneration += 1
                 turns = []
                 loadingTurns = false
                 return
             }
+            // Suppress exactly the one selection event the route caused.
+            // Holding the flag for the whole load would swallow a real
+            // re-selection of the same chat and could strand the spinner.
+            guard id != pendingSelection else {
+                pendingSelection = nil
+                return
+            }
+            if id != pinnedSelection { pinnedSelection = nil }
+            if routedConversation?.id != id { routedConversation = nil }
             Task { await loadTurns(id) }
         }
         .onChange(of: model.conversationCounts) { _, _ in
@@ -101,7 +137,7 @@ struct BookChatsView: View {
             // selection has its own handler, so do not load turns twice.
             Task {
                 let previousSelection = selectedID
-                await loadSummaries()
+                guard await loadSummaries() else { return }
                 guard summariesError == nil,
                     selectedID == previousSelection,
                     let id = selectedID
@@ -200,8 +236,9 @@ struct BookChatsView: View {
     }
 
     private var transcript: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
                 HStack(alignment: .firstTextBaseline) {
                     if let first = turns.first {
                         Text(
@@ -232,13 +269,21 @@ struct BookChatsView: View {
                     .disabled(!companionAvailable)
                     .controlSize(.small)
                 }
-                ForEach(turns) { turn in
-                    turnView(turn)
+                    ForEach(turns) { turn in
+                        turnView(turn)
+                    }
                 }
+                .padding(16)
+                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
             }
-            .padding(16)
-            .frame(maxWidth: 760, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .center)
+            .task(id: highlightTurnID) {
+                guard let highlightTurnID,
+                    scrolledHighlight != highlightTurnID
+                else { return }
+                scrolledHighlight = highlightTurnID
+                proxy.scrollTo(highlightTurnID, anchor: .center)
+            }
         }
     }
 
@@ -289,17 +334,24 @@ struct BookChatsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .padding(highlightTurnID == turn.id ? 8 : 0)
+        .background(
+            highlightTurnID == turn.id
+                ? Color.accentColor.opacity(0.10) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .id(turn.id)
     }
 
     // MARK: Loading
 
-    private func loadSummaries() async {
+    @discardableResult
+    private func loadSummaries() async -> Bool {
         isLoading = true
         summariesError = nil
         guard let archive = model.archive else {
             isLoading = false
             summariesError = "The archive is not open."
-            return
+            return false
         }
         summariesGeneration += 1
         let generation = summariesGeneration
@@ -358,7 +410,7 @@ struct BookChatsView: View {
                     },
                     incomplete, captures, fingerprints, cached != nil)
             }.value
-            guard generation == summariesGeneration else { return }
+            guard generation == summariesGeneration else { return false }
             if !loaded.usedCache {
                 captureCache = (
                     loaded.captures, loaded.fingerprints, loaded.incomplete)
@@ -367,15 +419,111 @@ struct BookChatsView: View {
             incompleteCaptures = loaded.incomplete
             isLoading = false
             if selectedID == nil
-                || !loaded.rows.contains(where: { $0.id == selectedID })
+                || (!loaded.rows.contains(where: { $0.id == selectedID })
+                    && pinnedSelection != selectedID)
             {
                 selectedID = loaded.rows.first?.id
             }
+            await applyPendingRoute()
+            return true
         } catch {
-            guard generation == summariesGeneration else { return }
+            guard generation == summariesGeneration else { return false }
             isLoading = false
             self.summariesError = "\(error)"
+            return false
         }
+    }
+
+    /// Opens the conversation a card asked for once summaries are settled.
+    /// A target absent from the sidebar is still resolved by ID, so a card
+    /// whose association failed the sidebar's key check can open its chat.
+    private enum RouteLookup: Sendable {
+        case found(Conversation)
+        case missing
+        case failed(String)
+    }
+
+    private func applyPendingRoute() async {
+        guard let pending = model.peekPendingChat(for: book.asin) else {
+            return
+        }
+        routeError = nil
+        if !summaries.contains(where: { $0.id == pending.conversationID }) {
+            guard let archive = model.archive else {
+                routeError = "The archive is not open."
+                return
+            }
+            let id = pending.conversationID
+            // The lookup runs off the UI actor; `conversation(id:)` uses the
+            // archive's serial queue and may wait on SQLite.
+            let lookup = await Task.detached { () -> RouteLookup in
+                do {
+                    guard let conversation = try archive.conversation(id: id)
+                    else { return .missing }
+                    return .found(conversation)
+                } catch {
+                    return .failed("\(error)")
+                }
+            }.value
+            switch lookup {
+            case .failed(let message):
+                // A read failure is not proof the chat is missing; keep the
+                // route so a retry can open it.
+                routeError = "Could not open this card's chat: \(message)"
+                return
+            case .missing:
+                _ = model.takePendingChat(pending)
+                routeError =
+                    "This card's chat no longer exists. The card's saved "
+                    + "note remains under the book."
+                return
+            case .found(let conversation):
+                guard belongsToThisBook(conversation) else {
+                    _ = model.takePendingChat(pending)
+                    routeError =
+                        "This card's chat is not filed under this book. File "
+                        + "it from Chats, then open the card again."
+                    return
+                }
+                routedConversation = conversation
+            }
+        } else {
+            routedConversation = nil
+        }
+        guard model.takePendingChat(pending) != nil else {
+            // A newer route for this book arrived while the lookup ran; let
+            // its own pass open it.
+            return
+        }
+        scrolledHighlight = nil
+        pinnedSelection = pending.conversationID
+        pendingSelection = pending.conversationID
+        selectedID = pending.conversationID
+        await loadTurns(pending.conversationID)
+        highlightTurnID = pending.turnID
+        pendingSelection = nil
+    }
+
+    private func belongsToThisBook(_ conversation: Conversation) -> Bool {
+        if let source = conversation.bookSource, source != book.source {
+            return false
+        }
+        // An explicit identifier can only match itself; a title cannot
+        // override it, just as in AICardFilter.
+        if !AICardFilter.isWeakKey(conversation.bookKey) {
+            return ConversationFiling.canonical(conversation.bookKey)
+                == ConversationFiling.canonical(book.asin)
+        }
+        let keys = ConversationFiling.keys(
+            for: book,
+            captureFingerprints: captureCache?.fingerprints ?? [])
+        if ConversationFiling.matches(conversation, keys: keys) {
+            return true
+        }
+        let title = ConversationKey.normalize(conversation.bookTitle)
+        return !title.isEmpty
+            && !ReadingIdentityResolver.isPlaceholder(book.title)
+            && title == ConversationKey.normalize(book.title)
     }
 
     private func loadTurns(_ id: Int64) async {

@@ -18,6 +18,10 @@ struct TsundokuCLI {
             inspect()
         case "page":
             page()
+        case "selection":
+            selection()
+        case "cards":
+            cards()
         case "ask":
             await ask(Array(arguments.dropFirst()))
         case "capture":
@@ -94,6 +98,7 @@ struct TsundokuCLI {
             print("state=\(live.state)")
             print("characters=\(live.characters)")
             print("title=\(live.title)")
+            print("book_id=\(live.bookID ?? "nil")")
             print("end_of_book=\(live.endOfBook)")
             print("page=\(live.pageNumber.map(String.init) ?? "?")")
             print("pages=\(live.pageCount.map(String.init) ?? "?")")
@@ -106,6 +111,43 @@ struct TsundokuCLI {
                 print(
                     "text_rect=\(Int(frame.x)),\(Int(frame.y)) "
                         + "\(Int(frame.width))x\(Int(frame.height))")
+            }
+        } catch {
+            print("error: \(error)")
+            exit(1)
+        }
+    }
+
+    /// Reads Kindle's current selection through its Copy button. Prints the
+    /// length only: the words are book data and stay out of terminal logs.
+    private static func selection() {
+        switch KindleLive.copySelection() {
+        case .copied(let text):
+            print("characters=\(text.count)")
+        case .copiedButClipboardNotRestored(let text):
+            print("characters=\(text.count)")
+            FileHandle.standardError.write(
+                Data(
+                    "warning: the clipboard could not be restored\n".utf8))
+        case .noSelection:
+            print("selection=none")
+        case .failed(let reason):
+            print("error: \(reason)")
+            exit(1)
+        }
+    }
+
+    private static func cards() {
+        do {
+            let archive = try Archive.standard()
+            let total = try archive.aiCardCount()
+            let cards = try archive.aiCards(limit: 5)
+            print("cards=\(total)")
+            for card in cards {
+                print(
+                    "id=\(card.id) turn=\(card.turnID) "
+                        + "conversation=\(card.conversationID) "
+                        + "key=\(card.bookKey) chars=\(card.answer.count)")
             }
         } catch {
             print("error: \(error)")
@@ -1001,7 +1043,12 @@ struct TsundokuCLI {
     private static func usage() {
         print(
             """
-            usage: tsundoku-cli <inspect|page|ask|capture|export|history|track|import|applebooks|clean-page|books-asset|cover|original> [options]
+            usage: tsundoku-cli <inspect|page|selection|cards|ask|capture|export|history|track|import|applebooks|clean-page|books-asset|cover|original> [options]
+              selection
+                  reads Kindle's current selection through its Copy action;
+                  prints the character count only, exits 1 on a failed read
+              cards
+                  prints the card count and up to five card summaries
               ask --action explain|translate|summarize|ask|define
                   --question "…" --provider claude|codex|http|apple
                   [--model M] [--service deepseek|openai|ollama|…]

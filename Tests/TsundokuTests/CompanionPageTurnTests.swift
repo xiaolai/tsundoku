@@ -34,7 +34,11 @@ struct CompanionPageTurnTests {
             lock.unlock()
         }
 
-        func selectedText() -> String? { nil }
+        func selectedText() -> String? {
+            lock.lock()
+            defer { lock.unlock() }
+            return pages[min(index, pages.count - 1)].selection
+        }
 
         func show(_ index: Int) {
             lock.lock()
@@ -72,8 +76,23 @@ struct CompanionPageTurnTests {
             recoverReaderSettings: false)
     }
 
+    /// Bounded so a persistence regression fails the test instead of
+    /// defeating the suite's cooperative time limit.
+    private func awaitPersistence(_ panel: AIPanelModel) async {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while panel.persisting, ContinuousClock.now < deadline {
+            do {
+                try await Task.sleep(for: .milliseconds(10))
+            } catch {
+                Issue.record("persistence wait was cancelled")
+                return
+            }
+        }
+        #expect(!panel.persisting)
+    }
+
     private func panel(
-        reader: SteppingReader, model: AppModel,
+        reader: any ReaderContext, model: AppModel,
         answer: @escaping AIPanelModel.AnswerProvider = { _, _ in
             AIAnswer(text: "answer", provider: "test")
         }
@@ -284,9 +303,9 @@ struct CompanionPageTurnTests {
         await panel.awaitPageLoad()
         defer { panel.cancel() }
 
-        reader.setSelection("a selected phrase")
+        reader.setSelection("page 1 words")
         await panel.followPageOnce()
-        #expect(panel.context.selection == "a selected phrase")
+        #expect(panel.context.selection == "page 1 words")
 
         reader.show(1)
         await panel.followPageOnce()
@@ -589,6 +608,511 @@ struct CompanionPageTurnTests {
         #expect(
             try archive.latestConversation(bookKey: "ASSET-A")?.id
                 == conversation.id)
+    }
+
+    @Test("the context scope decides whether the selection is sent")
+    func scopeControlsSelection() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsundoku-scope-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let selection = "Alice was beginning to get very tired"
+        let first = ReaderPage(
+            text: String(repeating: selection + " ", count: 5),
+            title: "Alice", kind: .appleBooks, source: .accessibility,
+            pageNumber: 1, pageCount: 100, selection: selection)
+        let reader = SteppingReader(kind: .appleBooks, pages: [first])
+        let log = RequestLog()
+        let panel = panel(reader: reader, model: model) { request, _ in
+            log.append(request)
+            return AIAnswer(text: "answer", provider: "test")
+        }
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+
+        #expect(panel.scope == .currentPage)
+        #expect(panel.selectionAvailable)
+
+        panel.question = "Explain this"
+        panel.send()
+        await panel.sendPreparationTask?.value
+        await panel.awaitAnswer()
+        await awaitPersistence(panel)
+        #expect(panel.turns.last?.context.selection == nil)
+
+        panel.scope = .selection
+        panel.question = "Explain the selection"
+        panel.send()
+        await panel.sendPreparationTask?.value
+        await panel.awaitAnswer()
+        #expect(panel.turns.last?.context.selection == selection)
+        let requests = log.requests
+        try #require(requests.count == 2)
+        #expect(requests[0].selection == nil)
+        #expect(requests[1].selection == selection)
+    }
+
+    private final class RequestLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [AIRequest] = []
+
+        func append(_ request: AIRequest) {
+            lock.lock()
+            stored.append(request)
+            lock.unlock()
+        }
+
+        var requests: [AIRequest] {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+    }
+
+    @Test("choosing Selection reads the reader's selection")
+    func choosingSelectionReadsIt() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-choose-selection-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let selection = "page words page words"
+        let first = ReaderPage(
+            text: String(repeating: "page words ", count: 20),
+            title: "Alice", kind: .appleBooks, source: .accessibility,
+            pageNumber: 1, pageCount: 100)
+        let reader = SteppingReader(kind: .appleBooks, pages: [first])
+        let panel = panel(reader: reader, model: model)
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+
+        #expect(panel.scope == .currentPage)
+        #expect(!panel.selectionAvailable)
+        // The selection is made after the page loaded; only a real refresh
+        // can see it.
+        reader.setSelection(selection)
+        panel.chooseScope(.selection)
+        await panel.awaitSelectionRefresh()
+        #expect(panel.scope == .selection)
+        #expect(panel.context.selection == selection)
+        #expect(panel.selectionAvailable)
+    }
+
+    @Test("choosing Selection without one explains how to make it")
+    func choosingMissingSelection() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-no-selection-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let reader = SteppingReader(
+            kind: .kindle, pages: [page(1)])
+        let panel = panel(reader: reader, model: model)
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+
+        panel.chooseScope(.selection)
+        await panel.awaitSelectionRefresh()
+        #expect(panel.scope == .selection)
+        #expect(!panel.selectionAvailable)
+        #expect(panel.sendNote?.contains("Copy action") == true)
+    }
+
+    @Test("a copied selection from another app is rejected")
+    func rejectsForeignSelection() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-foreign-selection-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let first = ReaderPage(
+            text: String(repeating: "page words ", count: 20),
+            title: "Alice", kind: .kindle, source: .accessibility,
+            pageNumber: 1, pageCount: 100)
+        let reader = SteppingReader(kind: .kindle, pages: [first])
+        let log = RequestLog()
+        let panel = panel(reader: reader, model: model) { request, _ in
+            log.append(request)
+            return AIAnswer(text: "answer", provider: "test")
+        }
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+
+        reader.setSelection("unrelated clipboard text")
+        panel.chooseScope(.selection)
+        await panel.awaitSelectionRefresh()
+        #expect(!panel.selectionAvailable)
+        #expect(panel.context.selection == nil)
+        #expect(panel.sendNote?.contains("did not match this page") == true)
+
+        // A later send must not resurrect the rejected text via page
+        // confirmation.
+        panel.question = "Explain"
+        panel.send()
+        await panel.sendPreparationTask?.value
+        await panel.awaitAnswer()
+        #expect(log.requests.isEmpty)
+    }
+
+    @Test("selection provenance accepts only page-matching words")
+    func foreignSelectionWords() {
+        #expect(
+            SelectionText.belongs(
+                "Momentum is a value",
+                toPage: "Momentum is a value that pushes."))
+        #expect(
+            !SelectionText.belongs(
+                "unrelated clipboard", toPage: "page words page words"))
+        #expect(
+            SelectionText.belongs(
+                "中文片段", toPage: "这一页包含中文片段和更多文字"))
+        #expect(
+            !SelectionText.belongs(
+                "中文 test", toPage: "这一页包含中文 testing 和更多文字"))
+        #expect(
+            SelectionText.belongs(
+                "中文片段", toPage: "这一页包含中文\n片段和更多文字"))
+        // Short technical terms are real selections; symbols are evidence.
+        #expect(SelectionText.belongs("AI", toPage: "AI is a field."))
+        #expect(SelectionText.belongs("cat", toPage: "The cat sat."))
+        #expect(!SelectionText.belongs("$100", toPage: "The rate is 100%."))
+        #expect(SelectionText.belongs("100%", toPage: "The rate is 100%."))
+        #expect(!SelectionText.belongs("!!!a", toPage: "a"))
+        #expect(SelectionText.belongs("C++", toPage: "C++ is a language."))
+        #expect(SelectionText.belongs("C#", toPage: "C# and F# differ."))
+        #expect(!SelectionText.belongs("10 - 5", toPage: "10 + 5 is 15."))
+        #expect(!SelectionText.belongs("   ", toPage: "page words"))
+        // Boundary-aware: a phrase that only occurs inside longer words is
+        // not provenance, and a single character identifies nothing.
+        #expect(!SelectionText.belongs("is a", toPage: "This argument holds."))
+        #expect(!SelectionText.belongs("a", toPage: "a"))
+        #expect(
+            SelectionText.belongs("momentum", toPage: "Momentum matters."))
+        #expect(!SelectionText.belongs("moment", toPage: "Momentum matters."))
+    }
+
+    @Test("a persisted answer becomes a card and stays one")
+    func answerBecomesCard() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsundoku-card-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let archive = try #require(model.archive)
+        let book = Book(
+            asin: "B0ASIN0001", title: "The Book", author: "A",
+            bookType: 10, readState: 0, source: .kindle)
+        _ = try archive.importAll(books: [book], annotations: [])
+        model.books = [book]
+        let reader = SteppingReader(
+            kind: .kindle, pages: [page(1)])
+        let panel = panel(reader: reader, model: model)
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+
+        panel.question = "What is momentum?"
+        panel.send()
+        await panel.sendPreparationTask?.value
+        await panel.awaitAnswer()
+        await awaitPersistence(panel)
+        let turn = try #require(panel.turns.last)
+        #expect(turn.persistedID != nil)
+
+        panel.addToCards(turn)
+        await panel.awaitCardSave()
+        #expect(panel.isCarded(turn))
+        let cards = try archive.aiCards()
+        #expect(cards.count == 1)
+        #expect(cards.first?.turnID == turn.persistedID)
+
+        // A fresh panel reading the same book keeps the DB turn identity and
+        // the card state; neither is rebuilt from the in-memory turn.
+        let reopened = self.panel(reader: reader, model: model)
+        reopened.loadPage()
+        await reopened.awaitPageLoad()
+        defer { reopened.cancel() }
+        let reloaded = try #require(
+            reopened.turns.first { $0.answer == "answer" })
+        #expect(reloaded.persistedID == turn.persistedID)
+        #expect(reopened.isCarded(reloaded))
+
+        // Removing the card in the library updates the open panel, and the
+        // same turn can be carded again.
+        let stored = try #require(cards.first)
+        model.removeAICard(stored)
+        await model.awaitCardRemoval()
+        #expect(!panel.isCarded(turn))
+        panel.addToCards(turn)
+        await panel.awaitCardSave()
+        #expect(panel.isCarded(turn))
+    }
+
+    @Test("a card needs an archived book")
+    func cardNeedsArchivedBook() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-card-no-book-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let archive = try #require(model.archive)
+        let reader = SteppingReader(kind: .kindle, pages: [page(1)])
+        let panel = panel(reader: reader, model: model)
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+
+        #expect(!panel.canCard)
+        let turn = AITurn(
+            action: .ask, question: "Q", answer: "A", provider: "test",
+            prompt: "prompt", persistedID: 1)
+        panel.addToCards(turn)
+        #expect(panel.saveError?.contains("single archived book") == true)
+        #expect(try archive.aiCards().isEmpty)
+    }
+
+    @Test("a card waits for the turn to be persisted")
+    func cardWaitsForTurn() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-card-unpersisted-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let archive = try #require(model.archive)
+        let book = Book(
+            asin: "B0ASIN0001", title: "The Book", author: "A",
+            bookType: 10, readState: 0, source: .kindle)
+        _ = try archive.importAll(books: [book], annotations: [])
+        model.books = [book]
+        let reader = SteppingReader(kind: .kindle, pages: [page(1)])
+        let panel = panel(reader: reader, model: model)
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+
+        #expect(panel.canCard)
+        let turn = AITurn(
+            action: .ask, question: "Q", answer: "A", provider: "test",
+            prompt: "prompt")
+        panel.addToCards(turn)
+        #expect(panel.saveError?.contains("still being saved") == true)
+        #expect(try archive.aiCards().isEmpty)
+    }
+
+    @Test("a card routes to an explicit older conversation")
+    func cardChatRoute() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-card-route-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let book = Book(
+            asin: "B1", title: "A Book", author: "A", bookType: 10,
+            readState: 0, source: .kindle)
+        model.section = .highlights
+        model.openChats(for: book, conversationID: 42, turnID: 7)
+        #expect(model.section == .library)
+        #expect(model.bookWorkspaceID == "B1")
+        #expect(model.bookWorkspaceSection == .chats)
+        let pending = try #require(model.takePendingChat(for: "B1"))
+        #expect(pending.conversationID == 42)
+        #expect(pending.turnID == 7)
+        #expect(model.takePendingChat(for: "B1") == nil)
+    }
+
+    @Test("capture navigation never keeps an unrelated selected book")
+    func captureNavigationClearsStaleBook() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-capture-route-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        model.selectedBookID = "STALE-BOOK"
+        model.openCaptureExports(bookID: nil)
+        #expect(model.selectedBookID == nil)
+        #expect(model.section == .exports)
+
+        model.selectedBookID = "STALE-BOOK"
+        model.openCaptureExports(bookID: "NOT-IN-ARCHIVE")
+        #expect(model.selectedBookID == nil)
+        #expect(model.section == .exports)
+    }
+
+    private final class CopyOnlyReader: ReaderContext, @unchecked Sendable {
+        let kind: ReaderKind = .kindle
+        let pageValue: ReaderPage
+        let selection: String
+
+        init(page: ReaderPage, selection: String) {
+            self.pageValue = page
+            self.selection = selection
+        }
+
+        func page() throws -> ReaderPage { pageValue }
+        func selectedText() -> String? { selection }
+    }
+
+    @Test("Kindle's Copy-only selection survives page confirmation and sends")
+    func copyOnlySelectionSends() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-copy-only-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let selection = "page words page words"
+        let page = ReaderPage(
+            text: String(repeating: "page words ", count: 20),
+            title: "Kindle", kind: .kindle, source: .accessibility,
+            pageNumber: 1, pageCount: 100, selection: nil)
+        let reader = CopyOnlyReader(page: page, selection: selection)
+        let log = RequestLog()
+        let panelModel = self.panel(reader: reader, model: model) { request, _ in
+            log.append(request)
+            return AIAnswer(text: "answer", provider: "test")
+        }
+        panelModel.loadPage()
+        await panelModel.awaitPageLoad()
+        defer { panelModel.cancel() }
+
+        panelModel.chooseScope(.selection)
+        await panelModel.awaitSelectionRefresh()
+        #expect(panelModel.selectionAvailable)
+
+        panelModel.question = "Explain the selection"
+        panelModel.send()
+        await panelModel.sendPreparationTask?.value
+        await panelModel.awaitAnswer()
+        #expect(log.requests.last?.selection == selection)
+        // The page around a selection is sent too; the disclosure must say so.
+        #expect(panelModel.transmissionLabel.contains("selection and page"))
+        #expect(panelModel.transmissionDetail.contains("surrounding page"))
+    }
+
+    @Test("chapter and whole-book scopes send the matched capture text")
+    func chapterAndBookScopes() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-scope-success-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let captureDirectory = directory.appendingPathComponent("capture")
+        try FileManager.default.createDirectory(
+            at: captureDirectory, withIntermediateDirectories: true)
+        let pages = [
+            (1, "Ch. 1\nChapter one body text."),
+            (2, "Ch. 2\nOther chapter body text."),
+        ]
+        let lines = pages.map { page, text in
+            "{\"page\":\(page),\"text\":\"\(text.replacingOccurrences(of: "\n", with: "\\n"))\"}"
+        }
+        try lines.joined(separator: "\n").write(
+            to: captureDirectory.appendingPathComponent("text.jsonl"),
+            atomically: true, encoding: .utf8)
+        try "{\"complete\":{\"wholeBook\":true}}".write(
+            to: captureDirectory.appendingPathComponent("manifest.json"),
+            atomically: true, encoding: .utf8)
+        let record = CaptureRecord(
+            id: 1, asin: "B0ASIN0001", title: "The Book",
+            directory: captureDirectory.path, pageCount: 2, pdfPath: nil,
+            createdAt: Date(), state: "finished", source: "kindle")
+        let result = ReadingContextResolver.Result(
+            chapter: "Ch. 1", pageNumber: 1, fingerprint: "fp",
+            capture: record)
+        let model = try model(in: directory)
+        let page = ReaderPage(
+            text: String(repeating: "page words ", count: 20),
+            title: "Kindle", kind: .kindle, source: .accessibility,
+            pageNumber: 1, pageCount: 100, identifier: "B0ASIN0001")
+        let reader = SteppingReader(kind: .kindle, pages: [page])
+        let log = RequestLog()
+        let panelModel = AIPanelModel(
+            app: model, context: reader,
+            contextResolver: { _, _, _ in result },
+            answerProvider: { request, _ in
+                log.append(request)
+                return AIAnswer(text: "answer", provider: "test")
+            })
+        panelModel.followInterval = .seconds(3_600)
+        panelModel.followDebounce = .zero
+        panelModel.loadPage()
+        await panelModel.awaitPageLoad()
+        defer { panelModel.cancel() }
+
+        panelModel.scope = .currentChapter
+        panelModel.question = "Summarize the chapter"
+        panelModel.send()
+        await panelModel.sendPreparationTask?.value
+        await panelModel.awaitAnswer()
+        let chapter = try #require(log.requests.last)
+        #expect(chapter.scope == .currentChapter)
+        #expect(chapter.pageText.contains("Chapter one body text."))
+        #expect(!chapter.pageText.contains("Other chapter body text."))
+        #expect(panelModel.sendNote?.contains("sent instead") != true)
+        await awaitPersistence(panelModel)
+
+        panelModel.scope = .wholeBook
+        panelModel.question = "Summarize the book"
+        panelModel.send()
+        await panelModel.sendPreparationTask?.value
+        await panelModel.awaitAnswer()
+        let book = try #require(log.requests.last)
+        #expect(book.scope == .wholeBook)
+        #expect(book.pageText.contains("Chapter one body text."))
+        #expect(book.pageText.contains("Other chapter body text."))
+    }
+
+    @Test("a missing chapter passage sends the page under the page scope")
+    func missingChapterFallsBack() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-scope-fallback-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let reader = SteppingReader(kind: .kindle, pages: [page(1)])
+        let log = RequestLog()
+        let panelModel = self.panel(reader: reader, model: model) { request, _ in
+            log.append(request)
+            return AIAnswer(text: "answer", provider: "test")
+        }
+        panelModel.loadPage()
+        await panelModel.awaitPageLoad()
+        defer { panelModel.cancel() }
+
+        panelModel.scope = .currentChapter
+        panelModel.question = "Summarize the chapter"
+        panelModel.send()
+        await panelModel.sendPreparationTask?.value
+        await panelModel.awaitAnswer()
+        let request = try #require(log.requests.last)
+        #expect(request.scope == .currentPage)
+        #expect(request.pageText.contains("page 1 words"))
+        #expect(panelModel.sendNote?.contains("sent instead") == true)
     }
 
     @Test("a selection spanning several nodes is joined in order")

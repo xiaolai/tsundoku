@@ -210,6 +210,34 @@ public final class Archive: @unchecked Sendable {
         try ensureColumn(
             database, table: "ai_notes", column: "book_source",
             definition: "book_source TEXT")
+        try ensureColumn(
+            database, table: "ai_notes", column: "turn_id",
+            definition: "turn_id INTEGER")
+        try ensureColumn(
+            database, table: "ai_notes", column: "carded_at",
+            definition: "carded_at REAL")
+        // Legacy notes have no turn and must not collide with each other.
+        try database.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ai_notes_turn_id
+            ON ai_notes(turn_id)
+            WHERE turn_id IS NOT NULL
+            """)
+        // Card reads select and sort by carded_at; without this partial
+        // index SQLite scans every linked note and sorts in a temp B-tree.
+        try database.execute(
+            """
+            CREATE INDEX IF NOT EXISTS ai_notes_carded
+            ON ai_notes(carded_at DESC, id DESC)
+            WHERE carded_at IS NOT NULL
+            """)
+        // The case-insensitive book joins need this index; without it each
+        // card row scans the whole books table.
+        try database.execute(
+            """
+            CREATE INDEX IF NOT EXISTS books_asin_nocase
+            ON books(asin COLLATE NOCASE)
+            """)
         for (column, definition) in [
             ("source", "source TEXT NOT NULL DEFAULT 'kindle'"),
             ("identity_confidence", "identity_confidence TEXT"),
@@ -438,7 +466,10 @@ public final class Archive: @unchecked Sendable {
                        a.modified_at, a.source, a.book_source,
                        COALESCE(b.title, '') AS book_title
                 FROM annotations a
-                LEFT JOIN books b ON b.asin = a.asin
+                LEFT JOIN books b ON b.rowid = (
+                    SELECT rowid FROM books
+                    WHERE asin = a.asin COLLATE NOCASE
+                    ORDER BY (asin = a.asin) DESC, rowid LIMIT 1)
                 WHERE 1 = 1
                 """
             var bindings: [SQLValue] = []
@@ -522,7 +553,10 @@ public final class Archive: @unchecked Sendable {
                        s.started_at, s.ended_at,
                        COUNT(p.id) AS page_count
                 FROM sessions s
-                LEFT JOIN books b ON b.asin = s.asin
+                LEFT JOIN books b ON b.rowid = (
+                    SELECT rowid FROM books
+                    WHERE asin = s.asin COLLATE NOCASE
+                    ORDER BY (asin = s.asin) DESC, rowid LIMIT 1)
                 LEFT JOIN page_observations p ON p.session_id = s.id
                 GROUP BY s.id
                 ORDER BY s.started_at DESC
@@ -644,24 +678,218 @@ public final class Archive: @unchecked Sendable {
 
     // MARK: - AI notes and captures
 
+    /// Save an answer, optionally linked to its persisted turn.
+    ///
+    /// One row per turn: Save Note and Add to Cards share it. `markCard`
+    /// nil preserves the existing card state, true makes it a card, false/remove
+    /// is `removeCard(turnID:)`.
+    @discardableResult
     public func saveAISNote(
         asin: String?, position: String?, kind: String, prompt: String,
-        answer: String, provider: String, source: BookSource? = nil
-    ) throws {
+        answer: String, provider: String, source: BookSource? = nil,
+        turnID: Int64? = nil, markCard: Bool? = nil
+    ) throws -> Int64 {
+        try queue.sync {
+            let now = Date().timeIntervalSince1970
+            var savedID: Int64 = 0
+            try database.transaction {
+                if let turnID {
+                    let turn = try database.query(
+                        """
+                        SELECT c.book_key FROM conversation_turns t
+                        JOIN conversations c ON c.id = t.conversation_id
+                        WHERE t.id = ? LIMIT 1
+                        """, [.integer(turnID)])
+                    guard let turnKey = turn.first?.string("book_key"),
+                        !turnKey.isEmpty
+                    else {
+                        throw AICardError.missingTurn(turnID)
+                    }
+                    // A caller may have captured the book key before the
+                    // conversation was re-filed. The turn's current key is
+                    // the only one that cannot undo that migration.
+                    let filingASIN = ConversationFiling.canonical(turnKey)
+                    if let existing = try database.query(
+                        "SELECT id FROM ai_notes WHERE turn_id = ? LIMIT 1",
+                        [.integer(turnID)]).first?.int("id")
+                    {
+                        let cardFlag: SQLValue =
+                            markCard.map { $0 ? .integer(1) : .integer(0) }
+                            ?? .null
+                        let noteASIN = SQLValue.text(filingASIN)
+                        let notePosition: SQLValue =
+                            position.map { .text($0) } ?? .null
+                        let noteSource: SQLValue =
+                            source.map { .text($0.rawValue) } ?? .null
+                        let values: [SQLValue] = [
+                            noteASIN, notePosition, .text(kind),
+                            .text(prompt), .text(answer), .text(provider),
+                            noteSource, cardFlag, cardFlag, .real(now),
+                            .integer(existing),
+                        ]
+                        try database.execute(
+                            """
+                            UPDATE ai_notes SET asin = ?, position = ?,
+                              kind = ?, prompt = ?, answer = ?, provider = ?,
+                              book_source = ?,
+                              carded_at = CASE
+                                WHEN ? IS NULL THEN carded_at
+                                WHEN ? THEN ? ELSE NULL END
+                            WHERE id = ?
+                            """, values)
+                        savedID = existing
+                        return
+                    }
+                    try database.execute(
+                        """
+                        INSERT INTO ai_notes
+                        (asin, position, kind, prompt, answer, provider,
+                         created_at, book_source, turn_id, carded_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            .text(filingASIN),
+                            position.map { .text($0) } ?? .null, .text(kind),
+                            .text(prompt), .text(answer), .text(provider),
+                            .real(now),
+                            source.map { .text($0.rawValue) } ?? .null,
+                            .integer(turnID),
+                            markCard == true ? .real(now) : .null,
+                        ])
+                    savedID = database.lastInsertRowID
+                    return
+                }
+                guard markCard != true else {
+                    throw AICardError.unlinkedCard
+                }
+                try database.execute(
+                    """
+                    INSERT INTO ai_notes
+                    (asin, position, kind, prompt, answer, provider,
+                     created_at, book_source, turn_id, carded_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                    """,
+                    [
+                        asin.map { .text($0) } ?? .null,
+                        position.map { .text($0) } ?? .null, .text(kind),
+                        .text(prompt), .text(answer), .text(provider),
+                        .real(now),
+                        source.map { .text($0.rawValue) } ?? .null,
+                    ])
+                savedID = database.lastInsertRowID
+            }
+            return savedID
+        }
+    }
+
+    public func removeCard(turnID: Int64) throws {
         try queue.sync {
             try database.execute(
+                "UPDATE ai_notes SET carded_at = NULL WHERE turn_id = ?",
+                [.integer(turnID)])
+        }
+    }
+
+    /// Turn IDs that are currently cards in one conversation.
+    public func cardTurnIDs(conversationID: Int64) throws -> Set<Int64> {
+        try queue.sync {
+            let rows = try database.query(
                 """
-                INSERT INTO ai_notes
-                (asin, position, kind, prompt, answer, provider, created_at, book_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    asin.map { .text($0) } ?? .null,
-                    position.map { .text($0) } ?? .null, .text(kind),
-                    .text(prompt), .text(answer), .text(provider),
-                    .real(Date().timeIntervalSince1970),
-                    source.map { .text($0.rawValue) } ?? .null,
-                ])
+                SELECT n.turn_id FROM ai_notes n
+                JOIN conversation_turns t ON t.id = n.turn_id
+                WHERE n.carded_at IS NOT NULL AND t.conversation_id = ?
+                """, [.integer(conversationID)])
+            return Set(rows.compactMap { $0.int("turn_id") })
+        }
+    }
+
+    /// Cards joined to their persisted turn and conversation. A card whose
+    /// turn is gone is not returned.
+    /// The total cards visible through `aiCards`, without loading answers.
+    public func aiCardCount() throws -> Int {
+        try queue.sync {
+            let rows = try database.query(
+                """
+                SELECT COUNT(*) AS count
+                FROM ai_notes n
+                JOIN conversation_turns t ON t.id = n.turn_id
+                JOIN conversations c ON c.id = t.conversation_id
+                WHERE n.carded_at IS NOT NULL
+                """)
+            return Int(rows.first?.int("count") ?? 0)
+        }
+    }
+
+    public func aiCards(
+        bookKeys: Set<String>? = nil, limit: Int? = nil
+    ) throws -> [AICard] {
+        try queue.sync {
+            var sql = """
+                SELECT n.id AS note_id, n.carded_at AS carded_at,
+                       t.id AS turn_id, t.conversation_id, t.action,
+                       t.question, t.answer, t.provider, t.context_json,
+                       t.created_at AS turn_created_at,
+                       c.book_key, c.book_title AS conversation_title,
+                       c.book_source AS conversation_source,
+                       b.title AS book_title, b.source AS book_source
+                FROM ai_notes n
+                JOIN conversation_turns t ON t.id = n.turn_id
+                JOIN conversations c ON c.id = t.conversation_id
+                LEFT JOIN books b ON b.rowid = (
+                    SELECT rowid FROM books
+                    WHERE asin = c.book_key COLLATE NOCASE
+                    ORDER BY (asin = c.book_key) DESC, rowid LIMIT 1)
+                WHERE n.carded_at IS NOT NULL
+                """
+            var bindings: [SQLValue] = []
+            if let bookKeys {
+                guard !bookKeys.isEmpty else { return [] }
+                let keys = Array(bookKeys).sorted()
+                let placeholders = Array(repeating: "?", count: keys.count)
+                    .joined(separator: ",")
+                sql += " AND c.book_key COLLATE NOCASE IN (\(placeholders))"
+                bindings = keys.map { .text($0) }
+            }
+            sql += " ORDER BY n.carded_at DESC, n.id DESC"
+            if let limit {
+                sql += " LIMIT ?"
+                bindings.append(.integer(Int64(max(0, limit))))
+            }
+            return try database.query(sql, bindings).compactMap { row in
+                guard let noteID = row.int("note_id"),
+                    let turnID = row.int("turn_id"),
+                    let conversationID = row.int("conversation_id"),
+                    let cardedAt = row.double("carded_at")
+                else { return nil }
+                let contextJSON = row.string("context_json") ?? "{}"
+                let context =
+                    (try? JSONDecoder().decode(
+                        AIContext.self, from: Data(contextJSON.utf8)))
+                    ?? .empty
+                let conversationTitle = row.string("conversation_title") ?? ""
+                let bookTitle = conversationTitle.isEmpty
+                    ? row.string("book_title") ?? "" : conversationTitle
+                let sourceValue =
+                    row.string("conversation_source")
+                    ?? row.string("book_source")
+                return AICard(
+                    id: noteID, turnID: turnID,
+                    conversationID: conversationID,
+                    action: row.string("action").flatMap(
+                        AIAction.init(rawValue:)),
+                    question: row.string("question") ?? "",
+                    answer: row.string("answer") ?? "",
+                    provider: row.string("provider") ?? "",
+                    context: context,
+                    bookKey: row.string("book_key") ?? "",
+                    bookTitle: bookTitle,
+                    bookSource: sourceValue.flatMap(
+                        BookSource.init(rawValue:)),
+                    createdAt: Date(
+                        timeIntervalSince1970:
+                            row.double("turn_created_at") ?? 0),
+                    cardedAt: Date(timeIntervalSince1970: cardedAt))
+            }
         }
     }
 
@@ -670,11 +898,14 @@ public final class Archive: @unchecked Sendable {
             var sql = """
                 SELECT n.*, COALESCE(b.title, '') AS book_title,
                        COALESCE(n.book_source, b.source) AS resolved_source
-                FROM ai_notes n LEFT JOIN books b ON b.asin = n.asin
+                FROM ai_notes n LEFT JOIN books b ON b.rowid = (
+                    SELECT rowid FROM books
+                    WHERE asin = n.asin COLLATE NOCASE
+                    ORDER BY (asin = n.asin) DESC, rowid LIMIT 1)
                 """
             var bindings: [SQLValue] = []
             if let asin {
-                sql += " WHERE n.asin = ?"
+                sql += " WHERE n.asin = ? COLLATE NOCASE"
                 bindings.append(.text(asin))
             }
             sql += " ORDER BY n.created_at DESC, n.id DESC"
@@ -690,12 +921,24 @@ public final class Archive: @unchecked Sendable {
                     answer: row.string("answer") ?? "",
                     provider: row.string("provider") ?? "",
                     createdAt: Date(
-                        timeIntervalSince1970: row.double("created_at") ?? 0))
+                        timeIntervalSince1970: row.double("created_at") ?? 0),
+                    turnID: row.int("turn_id"),
+                    cardedAt: row.double("carded_at").map {
+                        Date(timeIntervalSince1970: $0)
+                    })
             }
         }
     }
 
     // MARK: - Conversations
+
+    public func conversation(id: Int64) throws -> Conversation? {
+        try queue.sync {
+            try database.query(
+                "SELECT * FROM conversations WHERE id = ? LIMIT 1",
+                [.integer(id)]).first.map(Self.conversation(from:))
+        }
+    }
 
     public func latestConversation(bookKey: String) throws -> Conversation? {
         try queue.sync {
@@ -943,6 +1186,18 @@ public final class Archive: @unchecked Sendable {
                     metadataSelector: "book_key = ?",
                     metadataBindings: [.text(newKey)],
                     to: newKey, title: title, source: source)
+                // A linked note is a card or saved answer for a turn; it
+                // follows the conversation's filing key so it cannot stay
+                // under the old book after the chat moves.
+                try database.execute(
+                    """
+                    UPDATE ai_notes SET asin = ?
+                    WHERE turn_id IN (
+                        SELECT t.id FROM conversation_turns t
+                        JOIN conversations c ON c.id = t.conversation_id
+                        WHERE c.book_key = ?
+                    )
+                    """, [.text(newKey), .text(newKey)])
             }
         }
     }
@@ -960,6 +1215,14 @@ public final class Archive: @unchecked Sendable {
                     selector: "id = ?", bindings: [.integer(id)],
                     metadataSelector: "id = ?", metadataBindings: [.integer(id)],
                     to: newKey, title: title, source: source)
+                try database.execute(
+                    """
+                    UPDATE ai_notes SET asin = ?
+                    WHERE turn_id IN (
+                        SELECT id FROM conversation_turns
+                        WHERE conversation_id = ?
+                    )
+                    """, [.text(newKey), .integer(id)])
             }
         }
     }
@@ -992,6 +1255,20 @@ public final class Archive: @unchecked Sendable {
                 WHERE \(metadataSelector) AND book_source IS NULL
                 """,
                 [.text(source.rawValue)] + metadataBindings)
+        }
+    }
+
+    public enum AICardError: Error, CustomStringConvertible, Sendable {
+        case missingTurn(Int64)
+        case unlinkedCard
+
+        public var description: String {
+            switch self {
+            case .missingTurn(let id):
+                "No persisted turn \(id) exists for this card."
+            case .unlinkedCard:
+                "A card needs a persisted conversation turn."
+            }
         }
     }
 

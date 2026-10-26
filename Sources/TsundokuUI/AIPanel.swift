@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import TsundokuCore
 
@@ -48,6 +49,49 @@ public final class AIPanelModel: ObservableObject {
     /// the system window styling.
     @Published public var theme: CompanionTheme?
     @Published public var action: AIAction = .ask
+    /// What the next request answers about. The page is always available;
+    /// selection is only offered while the reader exposes one.
+    @Published public var scope: CompanionScope = .currentPage
+
+    public var selectionAvailable: Bool {
+        !(context.selection ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The live companion preferences, so the Send menu reflects a change
+    /// made in Settings without reopening the panel.
+    public var companionSettings: CompanionSettingsStore? {
+        app?.companionSettings
+    }
+
+    /// Whether a local capture or EPUB covers this page. Whole-book scope is
+    /// offered only when there is text to read; the check is structural, so
+    /// opening the menu never loads a whole book.
+    public var hasLocalBookText: Bool {
+        guard let result = localResult else { return false }
+        return result.capture != nil || result.epubPath != nil
+    }
+
+    /// Choosing Selection reads the reader now. Kindle's words come from its
+    /// Copy button; Books exposes the selection directly. Keeping the choice
+    /// when nothing is selected lets Send explain instead of silently
+    /// switching the scope back.
+    public func chooseScope(_ scope: CompanionScope) {
+        self.scope = scope
+        guard scope == .selection, !selectionAvailable else { return }
+        sendNote =
+            "Select text in the reader; the companion reads the selection "
+            + "through the reader's Copy action."
+        refreshSelection()
+    }
+
+    /// Opens the library's Exports section with this book selected, where
+    /// Capture as PDF writes the text sidecars chapter/book scopes need.
+    public func openCaptureExports() {
+        app?.openCaptureExports(
+            bookID: identity?.book?.asin ?? pageIdentifier,
+            readerKind: readerKind)
+    }
     @Published public var question = "" {
         didSet {
             guard question.count != oldValue.count else { return }
@@ -62,6 +106,7 @@ public final class AIPanelModel: ObservableObject {
     /// from the latest turn, so a new answer is unsaved even after an earlier
     /// one was saved.
     @Published public var savedTurnID: UUID?
+    @Published public private(set) var cardedTurnIDs: Set<Int64> = []
     @Published public var readerKind: ReaderKind?
     @Published public var source: ReaderTextSource?
     @Published public var pageIdentifier: String?
@@ -135,6 +180,23 @@ public final class AIPanelModel: ObservableObject {
     private var conversationGeneration = 0
     private var selectionGeneration = 0
     private var localContextGeneration = 0
+    /// The resolver result for the current page, kept so chapter and book
+    /// scopes can read the same local index without re-matching the page.
+    private var localResult: ReadingContextResolver.Result?
+    /// Changes whenever a page's local lookup starts, so a send can prove the
+    /// passage it awaited still belongs to the page it confirmed.
+    private var localResultGeneration = 0
+    private var cardTask: Task<Void, Never>?
+    private var cardObservation: AnyCancellable?
+    /// The last selection read through the reader (Kindle's Copy action),
+    /// kept so a page refresh that reports no selection cannot erase it.
+    private var acquiredSelection: String?
+    /// The page identity a cached selection belongs to; a book switch or
+    /// page move invalidates it even when the text repeats.
+    private var acquiredSelectionKey: String?
+    /// A clipboard-restoration warning survives the confirmation that clears
+    /// ordinary notes.
+    private var selectionWarning: String?
     private var failureKind: FailureKind?
     private var submittedRequest: AIRequest?
     private var submittedOnDevice = false
@@ -158,6 +220,12 @@ public final class AIPanelModel: ObservableObject {
         self.readerContext = context
         self.contextResolver = contextResolver
         self.answerProvider = answerProvider
+        // Removing a card in the library changes shared state, not this
+        // model's own properties; forward that change so the per-turn
+        // "In Cards" buttons re-render.
+        cardObservation = app?.$cardTurnIDs.sink { [weak self] _ in
+            Task { @MainActor in self?.objectWillChange.send() }
+        }
     }
 
     public convenience init(app: AppModel?) {
@@ -200,6 +268,21 @@ public final class AIPanelModel: ObservableObject {
         return savedTurnID == turns.last?.id
     }
 
+    /// A book label that never says "No book" while the reader supplied a
+    /// usable identifier. The title arrives when the archive reload finishes;
+    /// until then the ASIN is honest and specific.
+    public var bookLabel: String {
+        if !context.bookTitle.isEmpty { return context.bookTitle }
+        if let title = identity?.book?.title, !title.isEmpty { return title }
+        if let title = identity?.title, !title.isEmpty { return title }
+        if let key = identity?.key, !key.isEmpty { return key }
+        return "No book"
+    }
+
+    public var headerTitle: String {
+        bookLabel == "No book" ? "Current Page" : bookLabel
+    }
+
     public var readerLabel: String {
         let name = readerKind?.displayName ?? "Reader"
         var parts = [name]
@@ -216,7 +299,7 @@ public final class AIPanelModel: ObservableObject {
     }
 
     public var canSave: Bool {
-        turns.last != nil && !saved
+        turns.last?.persistedID != nil && !saved
     }
 
     public var canSend: Bool {
@@ -265,13 +348,58 @@ public final class AIPanelModel: ObservableObject {
     }
 
     public var transmissionLabel: String {
-        guard submittedRequest != nil else { return "Not sent" }
+        guard let request = submittedRequest else { return "Not sent" }
         if submittedOnDevice { return "Processed on this Mac" }
-        if let selection = submittedRequest?.selection, !selection.isEmpty {
-            return "Sent: selection · \(selection.count.formatted()) characters"
+        let count = sentCharacters(for: request)
+        switch request.scope {
+        case .selection:
+            return "Sent: selection and page · "
+                + "\(count.formatted()) characters"
+        case .currentChapter:
+            return "Sent: current chapter · \(count.formatted()) characters"
+        case .wholeBook:
+            return "Sent: whole book · \(count.formatted()) characters"
+        case .currentPage:
+            return source?.disclosure == nil
+                ? "Sent: current page"
+                : "Sent: OCR text from the current page"
         }
-        return source?.disclosure == nil
-            ? "Sent: current page" : "Sent: OCR text from the current page"
+    }
+
+    /// The privacy line beside the info button must match the scope actually
+    /// sent; saying "only this page" after a chapter send is false.
+    public var transmissionDetail: String {
+        guard let request = submittedRequest else {
+            return "Nothing has been sent."
+        }
+        let count = sentCharacters(for: request).formatted()
+        let what: String
+        switch request.scope {
+        case .selection:
+            what = "Only the selection, its surrounding page (up to "
+                + "\(count) characters together),"
+        case .currentPage:
+            what = "Only this page"
+        case .currentChapter:
+            what = "Only this chapter (up to \(count) characters)"
+        case .wholeBook:
+            what = "Only up to \(count) characters of this book"
+        }
+        return what
+            + " and up to three earlier exchanges are sent; the rest of the "
+            + "book stays on this Mac."
+    }
+
+    /// Characters the prompt actually sends: the selection when present,
+    /// otherwise the passage, capped by the scope's budget.
+    private func sentCharacters(for request: AIRequest) -> Int {
+        let limit = AIComposer.limit(for: request.scope)
+        let selection = request.selection?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if selection.isEmpty { return min(request.pageText.count, limit) }
+        // A selection send carries the selection as the passage and the page
+        // around it as appendix; both leave the Mac.
+        return min(selection.count, limit) + min(request.pageText.count, limit)
     }
 
     public func openSavedNotes() { app?.openSavedNotesWindow?() }
@@ -289,6 +417,8 @@ public final class AIPanelModel: ObservableObject {
         followTask = nil
         cancelAnswerWork()
         sendNote = nil
+        acquiredSelection = nil
+        acquiredSelectionKey = nil
         pageGeneration += 1
         conversationGeneration += 1
         selectionGeneration += 1
@@ -297,6 +427,7 @@ public final class AIPanelModel: ObservableObject {
         let generation = pageGeneration
         let previousKey = bookKey
         pageText = ""
+        localResult = nil
         bookTitle = ""
         readerKind = nil
         source = nil
@@ -415,14 +546,24 @@ public final class AIPanelModel: ObservableObject {
     /// for either reader. Live Accessibility alone cannot supply either.
     private func resolveLocalContext(page: ReaderPage) {
         guard let app else { return }
+        // A result belongs to the page it was resolved from. Clear it before
+        // the lookup so a failed resolution cannot leave the previous page's
+        // chapter or book text in place.
+        localResult = nil
+        localResultGeneration += 1
         localContextGeneration += 1
         let generation = localContextGeneration
         // Read the captures from the archive, not the view model's copy:
         // the panel can open before the library reload has assigned it.
         let archive = app.archive
-        let books = app.books
         let resolver = contextResolver
         let task = Task { [weak self] in
+            // The panel is often created by the hotkey, which also creates
+            // AppModel; its archive reload is still in flight here. Reading
+            // `app.books` before it finishes makes a known ASIN look like an
+            // unimported book, so the chip says "No book".
+            await app.awaitArchiveLoaded()
+            let books = app.books
             let result = await Task.detached {
                 let captures = (try? archive?.captures()) ?? []
                 return resolver(page, captures, archive)
@@ -431,6 +572,7 @@ public final class AIPanelModel: ObservableObject {
                 generation == self.localContextGeneration
             else { return }
             if let result {
+                self.localResult = result
                 if let chapter = result.chapter {
                     self.context.chapter = chapter
                 }
@@ -488,8 +630,20 @@ public final class AIPanelModel: ObservableObject {
                         "identity_key": chosen.key ?? "unidentified",
                     ])
             } else if let identity = self.identity {
-                // No local text covers this page, but a reader-supplied ASIN
-                // may still let an older title-keyed chat move under it.
+                // No local text covers this page. The archive may still have
+                // arrived after the first identity pass; resolve again so a
+                // known ASIN gets its book title instead of staying a bare
+                // "last opened" key.
+                let improved = ReadingIdentityResolver.resolve(
+                    facts: ReadingLiveFacts(
+                        kind: page.kind, title: page.title,
+                        identifier: page.identifier),
+                    books: books)
+                if improved.rank <= identity.rank {
+                    self.adopt(improved, archive: archive)
+                }
+                // A reader-supplied ASIN may also let an older title-keyed
+                // chat move under it.
                 self.migrateLegacyKeys(
                     identity, fingerprint: nil, liveTitle: page.title,
                     kind: page.kind)
@@ -552,6 +706,7 @@ public final class AIPanelModel: ObservableObject {
                 generation == self.conversationGeneration,
                 !self.persisting
             else { return }
+            self.app?.refreshAICards()
             self.loadConversationHistory()
         }
         legacyMigrationTask = task
@@ -599,6 +754,7 @@ public final class AIPanelModel: ObservableObject {
                 saveError =
                     "Could not file this book's earlier chats: \(error)"
             }
+            app?.refreshAICards()
             bookKey = key
             bookTitle = improved.title
             context.bookTitle = improved.title
@@ -646,12 +802,18 @@ public final class AIPanelModel: ObservableObject {
         let previous = persistenceChain
         let task = Task { [weak self] in
             await previous?.value
-            let stored = await Task.detached { () -> Conversation? in
+            let stored = await Task.detached {
+                () -> (Conversation, [ConversationTurn])? in
                 // The conversation and every turn are one transaction; a
                 // failure leaves no partially saved thread behind.
-                try? archive.createConversation(
-                    bookKey: key, bookTitle: title, bookSource: source,
-                    turns: turns)
+                guard
+                    let conversation = try? archive.createConversation(
+                        bookKey: key, bookTitle: title, bookSource: source,
+                        turns: turns),
+                    let saved = try? archive.conversationTurns(
+                        conversationID: conversation.id)
+                else { return nil }
+                return (conversation, saved)
             }.value
             guard let self else { return }
             self.endPersistence()
@@ -659,7 +821,16 @@ public final class AIPanelModel: ObservableObject {
                 if self.bookKey == key,
                     generation == self.conversationGeneration
                 {
-                    self.conversationID = stored.id
+                    self.conversationID = stored.0.id
+                }
+                for (index, pendingTurn) in pending.enumerated()
+                where index < stored.1.count
+                {
+                    if let position = self.turns.firstIndex(where: {
+                        $0.id == pendingTurn.id
+                    }) {
+                        self.turns[position].persistedID = stored.1[index].id
+                    }
                 }
             } else {
                 self.saveError =
@@ -708,15 +879,13 @@ public final class AIPanelModel: ObservableObject {
         }
         if samePage(first) {
             // The page did not move, but a selection can change without one.
-            if first.selection != context.selection {
-                context.selection = first.selection
-                TsundokuDiagnostics.shared.event(
-                    "selection_refreshed",
-                    [
-                        "characters": first.selection?.count ?? 0,
-                        "page": first.pageNumber ?? -1,
-                    ])
-            }
+            applyReportedSelection(first.selection)
+            TsundokuDiagnostics.shared.event(
+                "selection_refreshed",
+                [
+                    "characters": context.selection?.count ?? 0,
+                    "page": first.pageNumber ?? -1,
+                ])
             return
         }
         if followDebounce > .zero {
@@ -783,6 +952,7 @@ public final class AIPanelModel: ObservableObject {
     /// answer that belonged to the old one. A turn never rewrites an already
     /// stored turn: its caption was snapshotted when it was sent.
     private func applyPageTurn(_ page: ReaderPage) {
+        let samePageText = page.text == pageText
         // The reader identifier before this turn, not the identity key: an
         // EPUB match can file the book under an archive ASIN while the reader
         // keeps reporting its own unchanged asset ID. Comparing against the
@@ -908,6 +1078,7 @@ public final class AIPanelModel: ObservableObject {
                 saveError =
                     "Could not file this book's earlier chats: \(error)"
             }
+            app?.refreshAICards()
             migratedDuplicateEdition = true
         }
         let identity: ReadingIdentity
@@ -931,6 +1102,17 @@ public final class AIPanelModel: ObservableObject {
         bookKey = identity.key
         bookTitle = identity.title
         context = makeContext(for: page, identity: identity)
+        if page.selection != nil {
+            acquiredSelection = page.selection
+            acquiredSelectionKey = pageMarker
+        } else if readerKind == .kindle, samePageText,
+            let acquiredSelection, acquiredSelectionKey == pageMarker
+        {
+            context.selection = acquiredSelection
+        } else {
+            acquiredSelection = nil
+            acquiredSelectionKey = nil
+        }
         if bookChanged {
             answerTask?.cancel()
             answerTask = nil
@@ -955,6 +1137,11 @@ public final class AIPanelModel: ObservableObject {
     /// Reads the live selection again, without reloading the page. Called when
     /// the composer gains focus, because the reader may have selected text
     /// after the panel opened.
+    /// Awaits the selection refresh started by choosing the Selection scope.
+    public func awaitSelectionRefresh() async {
+        await selectionTask?.value
+    }
+
     public func refreshSelection() {
         guard !pageText.isEmpty, phase == .idle || phase == .ready else {
             return
@@ -962,16 +1149,60 @@ public final class AIPanelModel: ObservableObject {
         selectionGeneration += 1
         let generation = selectionGeneration
         let book = bookTitle
+        let page = pageText
         let reader = readerContext
         selectionTask?.cancel()
         selectionTask = Task { [weak self] in
-            let selected = await Task.detached { reader.selectedText() }.value
+            var read: String?
+            var overrideNote: String?
+            let typed = await Task.detached {
+                reader.selectionReading()
+            }.value
+            if let outcome = typed {
+                read = outcome.text
+                switch outcome {
+                case .copiedButClipboardNotRestored:
+                    overrideNote =
+                        "The selection was read, but the clipboard could not "
+                        + "be restored."
+                case .failed(let reason):
+                    overrideNote = reason
+                case .copied, .noSelection:
+                    break
+                }
+            } else {
+                read = await Task.detached { reader.selectedText() }.value
+            }
             guard
                 let self, !Task.isCancelled,
                 generation == self.selectionGeneration,
-                self.bookTitle == book
+                self.bookTitle == book, self.pageText == page
             else { return }
+            // Another app can change the pasteboard without supplying
+            // Kindle's text; never attach unrelated content to this page.
+            var selected = read
+            var rejected = false
+            if let value = read, !value.isEmpty,
+                !SelectionText.belongs(value, toPage: page)
+            {
+                selected = nil
+                rejected = true
+                self.sendNote =
+                    "The copied text did not match this page; select again "
+                    + "in the reader."
+            }
             self.context.selection = selected
+            self.acquiredSelection = selected
+            self.acquiredSelectionKey = self.pageMarker
+            self.selectionWarning = overrideNote
+            if self.scope == .selection, !rejected {
+                self.sendNote =
+                    overrideNote
+                    ?? (selected?.isEmpty == false
+                        ? nil
+                        : "Select text in the reader; the companion reads the "
+                            + "selection through the reader's Copy action.")
+            }
             TsundokuDiagnostics.shared.event(
                 "selection_refreshed",
                 [
@@ -981,15 +1212,94 @@ public final class AIPanelModel: ObservableObject {
         }
     }
 
+    private struct ScopePassage: Sendable {
+        let text: String
+    }
+
+    /// The local text a chapter or book send needs. Page and selection sends
+    /// return immediately; only the larger scopes wait for, and read, the
+    /// index that already matched this page.
+    private func passageForScope(_ scope: CompanionScope) async -> ScopePassage? {
+        guard scope == .currentChapter || scope == .wholeBook else {
+            return nil
+        }
+        await localContextTask?.value
+        guard let result = localResult, captureMatchesBook(result.capture)
+        else { return nil }
+        let page = context.pageNumber
+        return await Task.detached {
+            guard
+                let text = ReadingContextResolver.scopeText(
+                    scope, result: result, pageNumber: page),
+                !text.trimmingCharacters(
+                    in: .whitespacesAndNewlines).isEmpty
+            else { return nil }
+            return ScopePassage(text: text)
+        }.value
+    }
+
+    /// One policy for a selection reported by the live page: validate it,
+    /// preserve Kindle's Copy-only selection for the same page, and clear it
+    /// authoritatively when Books reports none.
+    private func applyReportedSelection(_ selection: String?) {
+        if let selection {
+            if SelectionText.belongs(selection, toPage: pageText) {
+                context.selection = selection
+                acquiredSelection = selection
+                acquiredSelectionKey = pageMarker
+            } else {
+                context.selection = nil
+                acquiredSelection = nil
+                acquiredSelectionKey = nil
+                sendNote =
+                    "The reader's selection did not match this page; "
+                    + "select again."
+            }
+        } else if readerKind == .kindle, acquiredSelection != nil,
+            acquiredSelectionKey == pageMarker
+        {
+            context.selection = acquiredSelection
+        } else {
+            context.selection = nil
+            acquiredSelection = nil
+            acquiredSelectionKey = nil
+        }
+    }
+
+    private var pageMarker: String {
+        "\(bookKey ?? "")|\(livePageNumber ?? -1)|\(pageText)"
+    }
+
+    /// A page match does not prove the capture is this book: shared front
+    /// matter can match another edition. Chapter/book text is only sent when
+    /// the capture's identifier or title agrees with the panel's book.
+    private func captureMatchesBook(_ record: CaptureRecord?) -> Bool {
+        guard let record else { return true }
+        // A title is supplied by the resolver itself; only an identifier is
+        // independent evidence that this capture belongs to this book.
+        guard !record.asin.isEmpty, let bookKey, !bookKey.isEmpty
+        else { return false }
+        if let confidence = record.identityConfidence {
+            guard confidence.lowercased().hasPrefix("exact:")
+            else { return false }
+        }
+        return record.asin.caseInsensitiveCompare(bookKey) == .orderedSame
+    }
+
     public func run() {
         guard canRun else { return }
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         if action == .ask, text.isEmpty { return }
         let requested = action
+        let requestedScope = scope
         sendGeneration += 1
         let generation = sendGeneration
         let task = Task { [weak self] in
             guard let self else { return }
+            if requestedScope == .selection {
+                self.refreshSelection()
+                await self.awaitSelectionRefresh()
+            }
             let freshness = await self.confirmPageIsCurrent()
             guard !Task.isCancelled, generation == self.sendGeneration else {
                 return
@@ -998,7 +1308,40 @@ public final class AIPanelModel: ObservableObject {
             // written about the book that is no longer on screen, so it must
             // not be sent to the new one.
             guard freshness != .bookChanged else { return }
-            self.startRequest(action: requested, question: text)
+            let bookAtSend = self.bookKey
+            let pageAtSend = self.pageText
+            let resultGeneration = self.localResultGeneration
+            let passage = await self.passageForScope(requestedScope)
+            guard !Task.isCancelled, generation == self.sendGeneration else {
+                return
+            }
+            guard self.bookKey == bookAtSend,
+                self.pageText == pageAtSend,
+                self.localResultGeneration == resultGeneration
+            else {
+                self.sendNote =
+                    "The reader moved while the passage was prepared; send "
+                    + "again for the current page."
+                return
+            }
+            // The page is the only passage actually available; sending it
+            // under a chapter or whole-book label would misdescribe it.
+            let fellBack =
+                passage == nil
+                && (requestedScope == .currentChapter
+                    || requestedScope == .wholeBook)
+            let effectiveScope: CompanionScope =
+                fellBack ? .currentPage : requestedScope
+            if fellBack {
+                self.sendNote =
+                    "No local capture covers this "
+                    + "\(requestedScope.displayName.lowercased()). Capture "
+                    + "the book as PDF in Exports, then retry; the page was "
+                    + "sent instead."
+            }
+            self.startRequest(
+                action: requested, question: text,
+                scope: effectiveScope, passage: passage)
         }
         sendPreparationTask = task
     }
@@ -1026,12 +1369,11 @@ public final class AIPanelModel: ObservableObject {
         }
         if samePage(read) {
             // The page is current; a selection may still have changed since
-            // the last follow.
-            if read.selection != context.selection {
-                context.selection = read.selection
-            }
+            // the last follow. Kindle reports no selection from page(), so an
+            // explicitly acquired selection survives this refresh.
+            applyReportedSelection(read.selection)
             lastFreshness = .current
-            sendNote = nil
+            sendNote = selectionWarning
             return .current
         }
         guard !Task.isCancelled else { return .unconfirmed }
@@ -1052,17 +1394,28 @@ public final class AIPanelModel: ObservableObject {
         return .refreshed(read.pageNumber)
     }
 
-    private func startRequest(action: AIAction, question text: String) {
+    private func startRequest(
+        action: AIAction, question text: String, scope: CompanionScope,
+        passage: ScopePassage?
+    ) {
         guard canRun else { return }
         if action == .ask, text.isEmpty { return }
         let settings = app?.settings ?? .defaults
+        if scope == .selection, !selectionAvailable {
+            sendNote =
+                "Nothing is selected; select text in the reader and retry."
+            return
+        }
+        let selectedPassage: String? =
+            scope == .selection ? context.selection : nil
         let request = AIRequest(
-            action: action, pageText: pageText, bookTitle: bookTitle,
-            question: text, language: settings.language,
-            selection: context.selection,
+            action: action,
+            pageText: passage?.text ?? pageText,
+            bookTitle: bookTitle, question: text,
+            language: settings.language, selection: selectedPassage,
             pageNumber: context.pageNumber, pageCount: context.pageCount,
             chapter: context.chapter,
-            history: turns.suffix(3).map(\.exchange))
+            history: turns.suffix(3).map(\.exchange), scope: scope)
         answerTask?.cancel()
         answerGeneration += 1
         let generation = answerGeneration
@@ -1077,10 +1430,11 @@ public final class AIPanelModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let sourceLength =
             selected.isEmpty ? request.pageText.count : selected.count
-        if sourceLength > AIComposer.passageLimit {
+        let limit = AIComposer.limit(for: scope)
+        if sourceLength > limit {
             let note =
-                "The passage is longer than 8,000 characters; the answer "
-                + "covers its first part only."
+                "The passage is longer than \(limit.formatted()) "
+                + "characters; the answer covers its first part only."
             sendNote = [sendNote, note].compactMap { $0 }
                 .joined(separator: " ")
         }
@@ -1094,7 +1448,15 @@ public final class AIPanelModel: ObservableObject {
                 "turns": turns.count,
                 "selection": request.selection?.count ?? 0,
             ])
-        let turnContext = context
+        // The stored caption must describe what was sent, not a selection
+        // the page scope deliberately left out.
+        var turnContext = context
+        turnContext.scope = scope
+        turnContext.selection = selectedPassage
+        if let passage {
+            turnContext.excerpt = String(passage.text.prefix(600))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         let conversationAtSend = conversationID
         let conversationGenerationAtSend = conversationGeneration
         let provider = answerProvider
@@ -1183,6 +1545,8 @@ public final class AIPanelModel: ObservableObject {
         followTask = nil
         cancelAnswerWork()
         sendNote = nil
+        acquiredSelection = nil
+        acquiredSelectionKey = nil
         pageGeneration += 1
         selectionGeneration += 1
         phase = .idle
@@ -1250,14 +1614,19 @@ public final class AIPanelModel: ObservableObject {
         phase = .loadingPage
         Task { [weak self] in
             do {
-                let stored = try await Task.detached {
-                    try archive.conversationTurns(conversationID: id)
+                let loaded = try await Task.detached {
+                    (
+                        try archive.conversationTurns(conversationID: id),
+                        try archive.cardTurnIDs(conversationID: id)
+                    )
                 }.value
                 guard
                     let self, !Task.isCancelled,
                     generation == self.conversationGeneration
                 else { return }
-                self.apply(stored: stored, conversationID: id)
+                self.apply(
+                    stored: loaded.0, cardIDs: loaded.1,
+                    conversationID: id)
             } catch {
                 guard let self, !Task.isCancelled,
                     generation == self.conversationGeneration
@@ -1292,13 +1661,17 @@ public final class AIPanelModel: ObservableObject {
                 + "Import the library and try again."
             return
         }
+        guard let turnID = turn.persistedID else {
+            saveError = "This answer is still being saved; try again."
+            return
+        }
         do {
-            try archive.saveAISNote(
+            _ = try archive.saveAISNote(
                 asin: asin, position: nil,
                 kind: turn.action.rawValue, prompt: turn.prompt,
                 answer: turn.answer, provider: turn.provider,
-                source: readerKind.map { $0 == .kindle ? .kindle : .appleBooks }
-            )
+                source: readerKind.map { $0 == .kindle ? .kindle : .appleBooks },
+                turnID: turnID)
             savedTurnID = turn.id
             app?.refreshAINotes()
             saveError = nil
@@ -1306,6 +1679,81 @@ public final class AIPanelModel: ObservableObject {
             saveError = "Could not save: \(error)"
         }
     }
+
+    /// Promote a persisted answer to a card in the book's Cards view.
+    /// Add and Save share the same row; the unique turn index makes a second
+    /// click harmless.
+    public func addToCards(_ turn: AITurn) {
+        guard let app, let archive = app.archive, let asin = cardBookASIN
+        else {
+            saveError =
+                "This page could not be matched to a single archived book. "
+                + "Import the library and try again."
+            return
+        }
+        guard let turnID = turn.persistedID else {
+            saveError = "This answer is still being saved; try again."
+            return
+        }
+        let source = readerKind.map {
+            $0 == .kindle ? BookSource.kindle : .appleBooks
+        }
+        let task = Task { [weak self] in
+            // A Remove started earlier must land first; the archive's serial
+            // queue does not preserve user-action order across detached tasks.
+            await app.awaitCardRemoval()
+            do {
+                _ = try await Task.detached {
+                    try archive.saveAISNote(
+                        asin: asin, position: nil,
+                        kind: turn.action.rawValue, prompt: turn.prompt,
+                        answer: turn.answer, provider: turn.provider,
+                        source: source,
+                        turnID: turnID, markCard: true)
+                }.value
+                guard let self else { return }
+                self.cardedTurnIDs.insert(turnID)
+                app.registerCard(turnID: turnID)
+                self.saveError = nil
+                app.refreshAINotes()
+                app.refreshAICards()
+            } catch {
+                self?.saveError = "Could not add this card: \(error)"
+            }
+        }
+        cardTask = task
+    }
+
+    /// Waits for the last Add to Cards write. Tests use it so they assert on
+    /// the stored row rather than race a fixed polling window.
+    public func awaitCardSave() async {
+        await cardTask?.value
+    }
+
+    /// The archived book a card is filed under. Unlike Save Note, a card is
+    /// only for an archived book; a session-only page has no stable home.
+    private var cardBookASIN: String? {
+        if let asin = identity?.book?.asin, !asin.isEmpty { return asin }
+        if let pageIdentifier, !pageIdentifier.isEmpty {
+            return app?.books.first {
+                $0.asin.caseInsensitiveCompare(pageIdentifier) == .orderedSame
+            }?.asin
+        }
+        return matchedBook()?.asin
+    }
+
+    public func isCarded(_ turn: AITurn) -> Bool {
+        guard let id = turn.persistedID else { return false }
+        // The library may remove a card while this panel is open. Once the
+        // shared set has loaded, it is the source of truth so the button can
+        // return to "Add to Cards" without reopening the panel.
+        if let app, app.aiCardsLoaded {
+            return app.cardTurnIDs.contains(id)
+        }
+        return cardedTurnIDs.contains(id)
+    }
+
+    public var canCard: Bool { cardBookASIN != nil }
 
     // MARK: - Conversation history
 
@@ -1329,7 +1777,10 @@ public final class AIPanelModel: ObservableObject {
                     let stored = try latest.map {
                         try archive.conversationTurns(conversationID: $0.id)
                     } ?? []
-                    return (latest, summaries, stored)
+                    let cardIDs = try latest.map {
+                        try archive.cardTurnIDs(conversationID: $0.id)
+                    } ?? []
+                    return (latest, summaries, stored, cardIDs)
                 }.value
                 guard
                     let self, !Task.isCancelled,
@@ -1339,6 +1790,7 @@ public final class AIPanelModel: ObservableObject {
                 self.conversationID = loaded.0?.id
                 self.turns = loaded.2.map(Self.turn(from:))
                 self.conversations = loaded.1
+                self.cardedTurnIDs = loaded.3
                 self.historyLoading = false
                 if self.phase == .loadingPage { self.phase = .idle }
                 TsundokuDiagnostics.shared.event(
@@ -1358,10 +1810,12 @@ public final class AIPanelModel: ObservableObject {
     }
 
     private func apply(
-        stored: [ConversationTurn], conversationID: Int64
+        stored: [ConversationTurn], cardIDs: Set<Int64>,
+        conversationID: Int64
     ) {
         self.conversationID = conversationID
         turns = stored.map(Self.turn(from:))
+        cardedTurnIDs = cardIDs
         historyLoading = false
         savedTurnID = nil
         error = nil
@@ -1376,7 +1830,7 @@ public final class AIPanelModel: ObservableObject {
             action: stored.action, question: stored.question,
             answer: stored.answer, provider: stored.provider,
             prompt: stored.prompt, context: stored.context,
-            createdAt: stored.createdAt)
+            createdAt: stored.createdAt, persistedID: stored.id)
     }
 
     private func persist(
@@ -1403,7 +1857,8 @@ public final class AIPanelModel: ObservableObject {
                 ? self?.conversationID : nil
             do {
                 let result = try await Task.detached {
-                    () -> (Int64, [ConversationSummary]) in
+                    () -> (turnID: Int64, conversationID: Int64,
+                        summaries: [ConversationSummary]) in
                     let id: Int64
                     if let conversationAtSend {
                         id = conversationAtSend
@@ -1415,24 +1870,29 @@ public final class AIPanelModel: ObservableObject {
                             bookSource: source
                         ).id
                     }
-                    try archive.appendConversationTurn(
+                    let stored = try archive.appendConversationTurn(
                         conversationID: id, action: turn.action,
                         question: turn.question, answer: turn.answer,
                         provider: turn.provider, prompt: turn.prompt,
                         context: turn.context)
                     let summaries = try archive.conversations(bookKey: key)
-                    return (id, summaries)
+                    return (stored.id, id, summaries)
                 }.value
                 guard let self else { return }
                 self.endPersistence()
+                if let index = self.turns.firstIndex(where: {
+                    $0.id == turn.id
+                }) {
+                    self.turns[index].persistedID = result.turnID
+                }
                 if conversationAtSend == nil,
                     generationAtSend == self.conversationGeneration,
                     self.bookKey == key
                 {
-                    self.conversationID = result.0
+                    self.conversationID = result.conversationID
                 }
                 if self.bookKey == key {
-                    self.conversations = result.1
+                    self.conversations = result.summaries
                 }
                 app.refreshConversationCounts()
             } catch {
@@ -1469,7 +1929,7 @@ public final class AIPanelModel: ObservableObject {
 
 public struct AIPanelView: View {
     @ObservedObject var model: AIPanelModel
-    @State private var composerHeight: CGFloat = 22
+    @State private var composerHeight: CGFloat = 80
     private let compact: Bool
     private let onActivate: () -> Void
     private let onClose: (() -> Void)?
@@ -1485,10 +1945,6 @@ public struct AIPanelView: View {
         self.onActivate = onActivate
         self.onClose = onClose
     }
-
-    private let quickActions: [AIAction] = [
-        .explain, .translate, .summarize, .define,
-    ]
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -1520,10 +1976,7 @@ public struct AIPanelView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(
-                    model.context.bookTitle.isEmpty
-                        ? "Current Page" : model.context.bookTitle
-                )
+                Text(model.headerTitle)
                 .font(compact ? .subheadline : .headline)
                 .lineLimit(1)
                 Text(model.readerLabel)
@@ -1734,6 +2187,24 @@ public struct AIPanelView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
+                    let carded = model.isCarded(turn)
+                    IconButton(
+                        carded ? "In Cards" : "Add to Cards",
+                        systemImage: carded
+                            ? "rectangle.stack.badge.checkmark"
+                            : "rectangle.stack.badge.plus",
+                        tooltip: carded
+                            ? "This answer is a card in the book's Cards view"
+                            : turn.persistedID == nil
+                                ? "The answer is still being saved"
+                                : !model.canCard
+                                    ? "Card this answer from an imported book"
+                                    : "Add this answer to the book's Cards view"
+                    ) { model.addToCards(turn) }
+                    .controlSize(.mini)
+                    .disabled(
+                        carded || turn.persistedID == nil
+                            || !model.canCard)
                     IconButton(
                         "Copy Answer", systemImage: "doc.on.doc",
                         tooltip: "Copy this answer"
@@ -1765,10 +2236,8 @@ public struct AIPanelView: View {
         HStack(spacing: 6) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    chip(
-                        model.context.bookLabel, systemImage: "book.closed",
-                        help: model.context.bookTitle, maxWidth: 140
-                    )
+                    // The title is already the header; repeating it here
+                    // pushed the chapter chip out of a 400 pt panel.
                     if let reader = model.readerKind {
                         chip(reader.displayName, systemImage: "text.book.closed")
                     }
@@ -1827,11 +2296,7 @@ public struct AIPanelView: View {
                 Divider()
             }
             Text(model.transmissionLabel)
-            Text(
-                "Only this page"
-                    + (model.context.selection == nil ? "" : " and your selection")
-                    + " and up to three earlier exchanges are sent; the rest "
-                    + "of the book stays on this Mac.")
+            Text(model.transmissionDetail)
             if !model.identityNote.isEmpty {
                 Divider()
                 Text(model.identityNote)
@@ -1851,58 +2316,40 @@ public struct AIPanelView: View {
     // MARK: Composer
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(quickActions, id: \.self) { action in
-                        Button {
-                            model.perform(action)
-                        } label: {
-                            Label(
-                                action.displayName,
-                                systemImage: action.symbolName
-                            )
-                            .font(.caption)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(
-                                .quaternary.opacity(0.5), in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(!model.canRun)
-                        .opacity(model.canRun ? 1 : 0.5)
-                        .help(action.displayName)
-                    }
+        VStack(alignment: .leading, spacing: 4) {
+            ZStack(alignment: .topLeading) {
+                ActivatingTextView(
+                    text: $model.question,
+                    height: $composerHeight,
+                    onSubmit: { model.send() },
+                    onActivate: {
+                        onActivate()
+                        model.refreshSelection()
+                    },
+                    onEscape: { onClose?() })
+                if model.question.isEmpty {
+                    Text(
+                        model.scope == .selection
+                            ? "Ask about the selection…"
+                            : "Ask about this page…")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 6)
+                        .allowsHitTesting(false)
                 }
             }
-            HStack(alignment: .bottom, spacing: 8) {
-                ZStack(alignment: .topLeading) {
-                    ActivatingTextView(
-                        text: $model.question,
-                        height: $composerHeight,
-                        onSubmit: { model.send() },
-                        onActivate: {
-                            onActivate()
-                            model.refreshSelection()
-                        },
-                        onEscape: { onClose?() })
-                    if model.question.isEmpty {
-                        Text("Ask about this page…")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 5)
-                            .allowsHitTesting(false)
-                    }
-                }
-                .frame(height: composerHeight)
+            .frame(height: composerHeight)
+            HStack(alignment: .center, spacing: 8) {
+                scopeMenu
+                Spacer(minLength: 0)
                 if model.phase == .loadingAnswer {
                     Button {
                         model.stopAnswer()
                     } label: {
                         Image(systemName: "stop.fill")
                             .font(.system(size: 12, weight: .semibold))
-                            .frame(width: 26, height: 26)
+                            .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.borderedProminent)
                     .buttonBorderShape(.circle)
@@ -1910,28 +2357,120 @@ public struct AIPanelView: View {
                     .help("Stop the answer")
                     .accessibilityLabel("Stop")
                 } else {
-                    Button {
-                        model.send()
-                    } label: {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 12, weight: .bold))
-                            .frame(width: 26, height: 26)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.circle)
-                    .disabled(!model.canSend)
-                    .help("Send")
-                    .accessibilityLabel("Send")
+                    sendControl
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(
-                .quaternary.opacity(0.35),
-                in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(dividerColor, lineWidth: 0.5))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            Color.primary.opacity(0.055),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(dividerColor, lineWidth: 0.5))
+    }
+
+    /// A "+" menu on the composer's bottom row: what the answer covers. The
+    /// collapsed control is an icon; the scope names appear only when open.
+    private var scopeMenu: some View {
+        Menu {
+            ForEach(CompanionScope.allCases) { scope in
+                Button {
+                    model.chooseScope(scope)
+                } label: {
+                    Text(
+                        model.scope == scope
+                            ? "✓ \(scope.displayName)" : scope.displayName)
+                }
+                .disabled(
+                    (scope == .currentChapter
+                        && model.context.chapter == nil)
+                        || (scope == .wholeBook && !model.hasLocalBookText))
+            }
+            if model.scope == .selection && !model.selectionAvailable {
+                Divider()
+                Text(
+                    "Select text in the reader; the companion reads it "
+                        + "through the reader's Copy action.")
+            }
+            if !model.hasLocalBookText {
+                Divider()
+                Text(
+                    "Chapter and whole-book text need a local capture of "
+                        + "this book.")
+                Button("Open Capture as PDF…") {
+                    model.openCaptureExports()
+                    onClose?()
+                }
+            } else if model.context.chapter == nil {
+                Divider()
+                Text("This chapter is not in the local capture yet.")
+                Button("Open Capture as PDF…") {
+                    model.openCaptureExports()
+                    onClose?()
+                }
+            } else if model.scope == .wholeBook {
+                Divider()
+                Text(
+                    "Uses the captured text, up to the model's limit. "
+                        + "Capture more pages to include them.")
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(
+                    model.scope == .currentPage
+                        ? Color.secondary : Color.accentColor)
+                .frame(width: 28, height: 28)
+                .background(
+                    Color.primary.opacity(0.06), in: Circle())
+                .contentShape(Circle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Context: \(model.scope.displayName)")
+        .accessibilityLabel("Context: \(model.scope.displayName)")
+    }
+
+    /// One capsule: Send on the left, the quick-action menu on the chevron.
+    private var sendControl: some View {
+        HStack(spacing: 0) {
+            Button {
+                model.send()
+            } label: {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 30, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canSend)
+            .opacity(model.canSend ? 1 : 0.45)
+            .help("Send")
+            .accessibilityLabel("Send")
+            Rectangle()
+                .fill(Color.white.opacity(0.25))
+                .frame(width: 0.5, height: 14)
+            quickActionsMenu
+        }
+        .foregroundStyle(.white)
+        .background(
+            Color.accentColor.opacity(model.canRun ? 1 : 0.4),
+            in: Capsule())
+        .fixedSize()
+    }
+
+    @ViewBuilder private var quickActionsMenu: some View {
+        if let store = model.companionSettings {
+            ObservedQuickActionsMenu(
+                store: store, canRun: model.canRun
+            ) { model.perform($0) }
+        } else {
+            QuickActionsMenu(
+                actions: AIAction.quickActionCases, canRun: model.canRun
+            ) { model.perform($0) }
         }
     }
 
@@ -1992,6 +2531,55 @@ public struct AIPanelView: View {
     }
 }
 
+/// The dropdown attached to the Send button. Reading the actions from the
+/// settings store keeps the menu and Settings in one source of truth.
+private struct QuickActionsMenu: View {
+    let actions: [AIAction]
+    let canRun: Bool
+    let perform: (AIAction) -> Void
+
+    var body: some View {
+        Menu {
+            if actions.isEmpty {
+                Text("No quick actions — choose them in Settings")
+            } else {
+                ForEach(actions, id: \.self) { action in
+                    Button {
+                        perform(action)
+                    } label: {
+                        Label(
+                            action.displayName,
+                            systemImage: action.symbolName)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .frame(width: 22, height: 28)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(!canRun)
+        .help("Quick actions")
+        .accessibilityLabel("Quick actions")
+    }
+}
+
+private struct ObservedQuickActionsMenu: View {
+    @ObservedObject var store: CompanionSettingsStore
+    let canRun: Bool
+    let perform: (AIAction) -> Void
+
+    var body: some View {
+        QuickActionsMenu(
+            actions: store.settings.quickActions, canRun: canRun,
+            perform: perform)
+    }
+}
+
 // MARK: - Multiline composer
 
 /// A multiline composer for a nonactivating panel.
@@ -2041,7 +2629,7 @@ public struct ActivatingTextView: NSViewRepresentable {
         textView.isEditable = true
         textView.isSelectable = true
         textView.font = .systemFont(ofSize: 13)
-        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.textContainerInset = NSSize(width: 6, height: 6)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -2102,9 +2690,9 @@ public struct ActivatingTextView: NSViewRepresentable {
             updateHeight()
         }
 
-        /// Reports the text's laid-out height to SwiftUI, clamped to one line
-        /// through six. Setting state during a view update is deferred one
-        /// turn of the main queue.
+        /// Reports the text's laid-out height to SwiftUI, clamped to 80–160
+        /// points (about four to eight lines). Setting state during a view
+        /// update is deferred one turn of the main queue.
         func updateHeight() {
             guard !heightUpdatePending else { return }
             heightUpdatePending = true
@@ -2120,8 +2708,8 @@ public struct ActivatingTextView: NSViewRepresentable {
                 layout.ensureLayout(for: container)
                 let used = layout.usedRect(for: container).height
                 let desired = min(
-                    max(used + textView.textContainerInset.height * 2, 22),
-                    96)
+                    max(used + textView.textContainerInset.height * 2, 80),
+                    160)
                 self.heightUpdatePending = false
                 if abs(self.parent.height - desired) > 0.5 {
                     self.parent.height = desired

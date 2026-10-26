@@ -395,7 +395,7 @@ struct TsundokuCoreTests {
         #expect(turn.exchange.question == "Summarize")
     }
 
-    @Test("a selection replaces the page as the passage")
+    @Test("a selection is the passage and the page is appendix")
     func selectionReplacesThePage() {
         let page = String(repeating: "page text ", count: 100)
         let request = AIRequest(
@@ -406,7 +406,8 @@ struct TsundokuCoreTests {
         #expect(prompt.contains("the selected words"))
         #expect(prompt.contains("selected passage"))
         #expect(prompt.contains("page 12 of 300"))
-        #expect(!prompt.contains("page text page text"))
+        #expect(prompt.contains("The page around the selection is context"))
+        #expect(prompt.contains("page text page text"))
     }
 
     @Test("an ask keeps the page behind its selection")

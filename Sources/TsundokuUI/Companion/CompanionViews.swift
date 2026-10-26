@@ -181,14 +181,6 @@ public struct CompanionSettingsSection: View {
                 "A drawer opens from the edge of the reader beside the panel; "
                     + "the direction follows the panel's placement.")
             Toggle("Start at login", isOn: $store.settings.launchAtLogin)
-            Toggle(
-                "Match the reader's typography",
-                isOn: $store.settings.matchReaderTypography
-            )
-            Toggle(
-                "Match the reader's theme",
-                isOn: $store.settings.matchReaderTheme
-            )
             if !store.loginItemStatus.isEmpty
                 && !["Not registered", "Enabled"].contains(
                     store.loginItemStatus)
@@ -198,7 +190,42 @@ public struct CompanionSettingsSection: View {
                         .foregroundStyle(.secondary)
                 }
             }
-
+            Toggle(
+                "Match the reader's typography",
+                isOn: $store.settings.matchReaderTypography
+            )
+            Toggle(
+                "Match the reader's theme",
+                isOn: $store.settings.matchReaderTheme
+            )
+        }
+        Section("Quick actions") {
+            Text(
+                "These actions appear in the Send button's menu in the "
+                    + "companion.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(AIAction.quickActionCases, id: \.self) { action in
+                Toggle(
+                    action.displayName,
+                    isOn: Binding(
+                        get: {
+                            store.settings.quickActions.contains(action)
+                        },
+                        set: { include in
+                            var actions = store.settings.quickActions
+                            if include {
+                                if !actions.contains(action) {
+                                    actions.append(action)
+                                }
+                            } else {
+                                actions.removeAll { $0 == action }
+                            }
+                            store.settings.quickActions = actions
+                        }))
+            }
+        }
+        Section("Companion shortcut") {
             LabeledContent("Shortcut") {
                 HotKeyRecorderButton(store: store)
             }

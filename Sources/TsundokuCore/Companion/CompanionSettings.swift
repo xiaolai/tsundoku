@@ -141,6 +141,37 @@ public struct CompanionHotKey: Codable, Equatable, Sendable {
 
 // MARK: - Settings
 
+/// What the companion answers about. The reader's selection is optional; a
+/// page with no selection still has a page.
+public enum CompanionScope: String, Codable, CaseIterable, Identifiable,
+    Sendable
+{
+    case currentPage
+    case currentChapter
+    case wholeBook
+    case selection
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .currentPage: "Current page"
+        case .currentChapter: "Current chapter"
+        case .wholeBook: "Whole book"
+        case .selection: "Selection"
+        }
+    }
+
+    public var symbolName: String {
+        switch self {
+        case .currentPage: "doc.text"
+        case .currentChapter: "list.bullet.rectangle"
+        case .wholeBook: "book.closed"
+        case .selection: "text.cursor"
+        }
+    }
+}
+
 public struct CompanionSettings: Codable, Equatable, Sendable {
     public enum PanelPlacement: String, Codable, CaseIterable, Sendable {
         case auto
@@ -200,6 +231,9 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
     /// Take the reading surface's background colour into the panel. Off keeps
     /// the system window background.
     public var matchReaderTheme: Bool
+    /// The actions offered by the Send button's menu, in this order. Empty
+    /// means the menu has nothing but its explanation.
+    public var quickActions: [AIAction]
 
     public init(
         panelPlacement: PanelPlacement = .auto,
@@ -208,7 +242,8 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
         hotKey: CompanionHotKey = .defaultShortcut,
         panelAnimation: PanelAnimation = .outward,
         matchReaderTypography: Bool = true,
-        matchReaderTheme: Bool = true
+        matchReaderTheme: Bool = true,
+        quickActions: [AIAction] = AIAction.quickActionCases
     ) {
         self.panelPlacement = panelPlacement
         self.triggerPlacement = triggerPlacement
@@ -217,6 +252,7 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
         self.panelAnimation = panelAnimation
         self.matchReaderTypography = matchReaderTypography
         self.matchReaderTheme = matchReaderTheme
+        self.quickActions = quickActions
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -224,6 +260,7 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
         case panelAnimation
         case matchReaderTypography
         case matchReaderTheme
+        case quickActions
     }
 
     /// Decodes every missing field to its default, so a blob written before a
@@ -258,6 +295,10 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
             try container.decodeIfPresent(
                 Bool.self, forKey: .matchReaderTheme)
             ?? defaults.matchReaderTheme
+        quickActions =
+            try container.decodeIfPresent(
+                [AIAction].self, forKey: .quickActions)
+            ?? defaults.quickActions
     }
 
     public static let defaults = CompanionSettings()

@@ -194,6 +194,52 @@ public struct SavedAINote: Identifiable, Sendable, Hashable {
     public let answer: String
     public let provider: String
     public let createdAt: Date
+    /// The persisted turn this answer came from, when it is linked.
+    public let turnID: Int64?
+    /// Non-nil when this saved answer is also a card.
+    public let cardedAt: Date?
+
+    public var isCard: Bool { cardedAt != nil }
+}
+
+/// A saved AI answer shown as a card. Every field is read from the persisted
+/// turn and its conversation, so a conversation re-key moves the card with it.
+public struct AICard: Identifiable, Sendable, Hashable {
+    public let id: Int64
+    public let turnID: Int64
+    public let conversationID: Int64
+    public let action: AIAction?
+    public let question: String
+    public let answer: String
+    public let provider: String
+    public let context: AIContext
+    public let bookKey: String
+    public let bookTitle: String
+    public let bookSource: BookSource?
+    public let createdAt: Date
+    public let cardedAt: Date
+
+    public init(
+        id: Int64, turnID: Int64, conversationID: Int64,
+        action: AIAction?, question: String, answer: String,
+        provider: String, context: AIContext, bookKey: String,
+        bookTitle: String, bookSource: BookSource?, createdAt: Date,
+        cardedAt: Date
+    ) {
+        self.id = id
+        self.turnID = turnID
+        self.conversationID = conversationID
+        self.action = action
+        self.question = question
+        self.answer = answer
+        self.provider = provider
+        self.context = context
+        self.bookKey = bookKey
+        self.bookTitle = bookTitle
+        self.bookSource = bookSource
+        self.createdAt = createdAt
+        self.cardedAt = cardedAt
+    }
 }
 
 public struct ReadingSession: Identifiable, Hashable, Sendable {

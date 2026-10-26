@@ -6,6 +6,16 @@ public struct KindleContext: ReaderContext {
 
     public init() {}
 
+    /// Kindle's selection is a popover with a Copy button, not
+    /// `AXSelectedText`; pressing that button returns the exact words.
+    public func selectedText() -> String? {
+        selectionReading()?.text
+    }
+
+    public func selectionReading() -> KindleLive.SelectionCopy? {
+        KindleLive.copySelection()
+    }
+
     public func page() throws -> ReaderPage {
         if Task.isCancelled { throw ReaderContextError.cancelled }
         let live: LivePage

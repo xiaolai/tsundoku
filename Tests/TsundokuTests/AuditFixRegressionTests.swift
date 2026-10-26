@@ -139,6 +139,202 @@ struct OCRImageIdentityTests {
     }
 }
 
+@Suite("Reading scope text")
+struct ReadingScopeTextTests {
+    private func captureIndex() throws -> (URL, CaptureRecord) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsundoku-scope-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let pages = [
+            (1, "Ch. 1\nFirst chapter opening."),
+            (2, "First chapter remainder."),
+            (3, "Ch. 2\nSecond chapter opening."),
+            (4, "Second chapter remainder."),
+        ]
+        let lines = pages.map { page, text in
+            let escaped = text.replacingOccurrences(
+                of: "\n", with: "\\n")
+            return "{\"page\":\(page),\"text\":\"\(escaped)\"}"
+        }
+        try lines.joined(separator: "\n").write(
+            to: directory.appendingPathComponent("text.jsonl"),
+            atomically: true, encoding: .utf8)
+        try "{\"complete\":{\"wholeBook\":true}}".write(
+            to: directory.appendingPathComponent("manifest.json"),
+            atomically: true, encoding: .utf8)
+        let record = CaptureRecord(
+            id: 1, asin: "", title: "Captured", directory: directory.path,
+            pageCount: 4, pdfPath: nil, createdAt: Date(), state: "complete",
+            source: "kindle")
+        return (directory, record)
+    }
+
+    @Test("chapter scope reads only the chapter's captured pages")
+    func chapter() throws {
+        let (directory, record) = try captureIndex()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let result = ReadingContextResolver.Result(
+            chapter: "Ch. 1", pageNumber: 2, fingerprint: "fp",
+            capture: record)
+        let text = try #require(
+            ReadingContextResolver.scopeText(
+                .currentChapter, result: result, pageNumber: 2))
+        #expect(text.contains("First chapter opening"))
+        #expect(text.contains("First chapter remainder"))
+        #expect(!text.contains("Second chapter"))
+
+        // A live page number from another edition must not pick a chapter
+        // in capture coordinates.
+        let shifted = try #require(
+            ReadingContextResolver.scopeText(
+                .currentChapter, result: result, pageNumber: 4))
+        #expect(shifted.contains("First chapter opening"))
+        #expect(!shifted.contains("Second chapter"))
+
+        let last = try #require(
+            ReadingContextResolver.scopeText(
+                .currentChapter,
+                result: ReadingContextResolver.Result(
+                    chapter: "Ch. 2", pageNumber: 3, fingerprint: "fp",
+                    capture: record),
+                pageNumber: 3))
+        #expect(last.contains("Second chapter opening"))
+        #expect(last.contains("Second chapter remainder"))
+        #expect(!last.contains("First chapter"))
+    }
+
+    @Test("a partial capture is not whole-book text")
+    func partialCapture() throws {
+        let (directory, record) = try captureIndex()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try "{\"complete\":{\"wholeBook\":false}}".write(
+            to: directory.appendingPathComponent("manifest.json"),
+            atomically: true, encoding: .utf8)
+        let result = ReadingContextResolver.Result(
+            chapter: "Ch. 1", pageNumber: 2, fingerprint: "fp",
+            capture: record)
+        #expect(
+            ReadingContextResolver.scopeText(
+                .wholeBook, result: result, pageNumber: 2) == nil)
+    }
+
+    @Test("whole-book scope reads every captured page in order")
+    func wholeBook() throws {
+        let (directory, record) = try captureIndex()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let result = ReadingContextResolver.Result(
+            chapter: "Ch. 1", pageNumber: 2, fingerprint: "fp",
+            capture: record)
+        let text = try #require(
+            ReadingContextResolver.scopeText(
+                .wholeBook, result: result, pageNumber: 2))
+        let pages = [
+            "First chapter opening.", "First chapter remainder.",
+            "Second chapter opening.", "Second chapter remainder.",
+        ]
+        for page in pages {
+            #expect(text.components(separatedBy: page).count == 2)
+        }
+        let positions = try pages.map {
+            try #require(text.range(of: $0)).lowerBound
+        }
+        #expect(positions == positions.sorted())
+    }
+
+    @Test("chapter and whole-book scope read an EPUB when no capture exists")
+    func epubScopes() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsundoku-epub-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func write(_ text: String, _ path: String) throws {
+            let url = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        }
+        try write(
+            """
+            <?xml version="1.0"?>
+            <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+              <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+            </container>
+            """, "META-INF/container.xml")
+        try write(
+            """
+            <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+              <manifest>
+                <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+                <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+                <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+              </manifest>
+              <spine><itemref idref="ch1"/><itemref idref="ch2"/></spine>
+            </package>
+            """, "OEBPS/content.opf")
+        try write(
+            """
+            <html><body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops">
+              <ol>
+                <li><a href="ch1.xhtml">Chapter One</a></li>
+                <li><a href="ch2.xhtml">Chapter Two</a></li>
+              </ol>
+            </nav></body></html>
+            """, "OEBPS/nav.xhtml")
+        try write(
+            "<html><body><h1>Chapter One</h1><p>EPUB first chapter.</p></body></html>",
+            "OEBPS/ch1.xhtml")
+        try write(
+            "<html><body><h1>Chapter Two</h1><p>EPUB second chapter.</p></body></html>",
+            "OEBPS/ch2.xhtml")
+
+        let result = ReadingContextResolver.Result(
+            chapter: "Chapter Two", pageNumber: 2, fingerprint: nil,
+            capture: nil, epubPath: root)
+        let chapterText = try #require(
+            ReadingContextResolver.scopeText(
+                .currentChapter, result: result, pageNumber: 2))
+        #expect(chapterText.contains("EPUB second chapter."))
+        #expect(!chapterText.contains("EPUB first chapter."))
+        let bookText = try #require(
+            ReadingContextResolver.scopeText(
+                .wholeBook, result: result, pageNumber: 2))
+        #expect(bookText.contains("EPUB first chapter."))
+        #expect(bookText.contains("EPUB second chapter."))
+    }
+
+    @Test("scope budgets grow from page to chapter to book")
+    func budgets() {
+        #expect(
+            AIComposer.limit(for: .currentPage)
+                < AIComposer.limit(for: .currentChapter))
+        #expect(
+            AIComposer.limit(for: .currentChapter)
+                < AIComposer.limit(for: .wholeBook))
+        let limit = AIComposer.limit(for: .currentChapter)
+        #expect(AIComposer.formattedCharacters(limit) == "32,000")
+
+        func prompt(count: Int) -> String {
+            AIComposer.prompt(
+                for: AIRequest(
+                    action: .summarize,
+                    pageText: "BEGIN" + String(repeating: "x", count: count)
+                        + "END",
+                    bookTitle: "A Book", scope: .currentChapter),
+                settings: .defaults)
+        }
+        #expect(!prompt(count: limit - 9).contains("truncated after"))
+        #expect(!prompt(count: limit - 8).contains("truncated after"))
+        let over = prompt(count: limit - 7)
+        #expect(over.contains("truncated after 32,000 characters"))
+        #expect(over.contains("BEGIN"))
+        #expect(over.contains(String(repeating: "x", count: limit - 7)))
+        #expect(!over.contains(String(repeating: "x", count: limit - 4)))
+        // The suffix lies beyond the prefix and must not be sent.
+        #expect(!over.contains("END"))
+    }
+}
+
 @Suite("Identity header")
 struct IdentityHeaderTests {
     @Test("a placeholder title becomes Current Page")
@@ -196,6 +392,20 @@ struct PromptBoundaryTests {
         let prompt = AIComposer.prompt(for: request, settings: .defaults)
         #expect(!prompt.contains("</passage><question>"))
         #expect(!prompt.contains("<reader>chapter</reader>"))
+    }
+}
+
+@Suite("Selection prompt appendix")
+struct SelectionAppendixTests {
+    @Test("the page is appendix to the selected passage")
+    func pageAppendix() {
+        let request = AIRequest(
+            action: .explain, pageText: "the whole page context",
+            bookTitle: "A Book", selection: "the selected words")
+        let prompt = AIComposer.prompt(for: request, settings: .defaults)
+        #expect(prompt.contains("The page around the selection is context"))
+        #expect(prompt.contains("the whole page context"))
+        #expect(prompt.contains("<passage>\nthe selected words\n</passage>"))
     }
 }
 

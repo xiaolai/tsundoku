@@ -10,7 +10,9 @@ struct SavedAINotesView: View {
 
     private var notes: [SavedAINote] {
         model.savedAINotes.filter {
-            (bookID == nil || $0.asin == bookID)
+            (bookID == nil
+                || $0.asin?.caseInsensitiveCompare(bookID ?? "")
+                    == .orderedSame)
                 && (search.isEmpty
                     || [$0.bookTitle, $0.prompt, $0.answer, $0.provider]
                         .contains {
@@ -44,10 +46,18 @@ struct SavedAINotesView: View {
                             note.bookTitle.isEmpty
                                 ? "Book unidentified" : note.bookTitle
                         ).font(.headline)
-                        Text(
-                            "AI-generated · \(note.provider) · \(note.bookSource?.displayName ?? "Source unavailable") · \(TsundokuFormat.annotationDate(note.createdAt))"
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
+                        HStack(spacing: 6) {
+                            if note.isCard {
+                                Label(
+                                    "Card", systemImage: "rectangle.stack")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                            Text(
+                                "AI-generated · \(note.provider) · \(note.bookSource?.displayName ?? "Source unavailable") · \(TsundokuFormat.annotationDate(note.createdAt))"
+                            )
+                            .font(.caption).foregroundStyle(.secondary)
+                        }
                         DisclosureGroup("Prompt") {
                             Text(note.prompt).textSelection(.enabled)
                         }
