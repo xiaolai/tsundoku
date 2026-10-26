@@ -215,6 +215,26 @@ struct PDFWriterTests {
         #expect(partialFiles(in: directory).isEmpty)
     }
 
+    @Test("a free crop is padded onto an A4 page")
+    func freeCropA4Page() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pageURL = try makePNG(width: 200, height: 400, in: directory)
+        let output = directory.appendingPathComponent("a4.pdf")
+        _ = try PDFWriter.write(
+            pageURLs: [pageURL], texts: ["included sentence"],
+            metadata: PDFMetadata(title: "A4"),
+            displayScale: 1, pageSize: CapturePageSize.a4.points,
+            to: output)
+        let pdf = try #require(CGPDFDocument(output as CFURL))
+        let pdfPage = try #require(pdf.page(at: 1))
+        let box = pdfPage.getBoxRect(.mediaBox)
+        #expect(abs(box.width - 595.28) < 0.1)
+        #expect(abs(box.height - 841.89) < 0.1)
+        let document = try #require(PDFDocument(url: output))
+        #expect(document.string?.contains("included sentence") == true)
+    }
+
     @Test("the legacy entry point still writes a PDF")
     func legacyEntryPoint() throws {
         let directory = try temporaryDirectory()

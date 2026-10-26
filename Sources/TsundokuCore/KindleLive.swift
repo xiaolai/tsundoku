@@ -227,6 +227,57 @@ public enum KindleLive {
         return (recorder, window)
     }
 
+    /// The reader window's minimized state. A minimized window can still be
+    /// photographed, but it has no main-window routing for page-turn keys.
+    public static func isWindowMinimized() throws -> Bool {
+        let (_, window) = try scene()
+        return try boolAttribute(window, kAXMinimizedAttribute)
+    }
+
+    public static func isWindowMain() throws -> Bool {
+        let (_, window) = try scene()
+        return try boolAttribute(window, kAXMainAttribute)
+    }
+
+    /// Restore the main-window status without activating Kindle. This is the
+    /// operation that makes PID-directed page turns reach the reader after a
+    /// window has been unminimized; it is deliberately checked by reading the
+    /// attribute back, because setting it on a minimized window reports
+    /// success and does nothing.
+    public static func ensureMainWindow() throws {
+        let (_, window) = try scene()
+        guard !(try boolAttribute(window, kAXMinimizedAttribute)) else {
+            throw KindleLiveError.readFailed(
+                "the window is minimized and cannot receive page turns")
+        }
+        let result = AXUIElementSetAttributeValue(
+            window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        guard result == .success else {
+            throw KindleLiveError.readFailed(
+                "Kindle refused the main-window request (\(result.rawValue))")
+        }
+        guard try boolAttribute(window, kAXMainAttribute) else {
+            throw KindleLiveError.readFailed(
+                "Kindle did not make its reading window main")
+        }
+    }
+
+    private static func boolAttribute(
+        _ element: AXUIElement, _ attribute: String
+    ) throws -> Bool {
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(
+            element, attribute as CFString, &value)
+        guard result == .success, let value else {
+            throw KindleLiveError.readFailed(
+                "Kindle did not expose \(attribute) (\(result.rawValue))")
+        }
+        if let number = value as? NSNumber { return number.boolValue }
+        if let bool = value as? Bool { return bool }
+        throw KindleLiveError.readFailed(
+            "Kindle exposed \(attribute) as an unexpected type")
+    }
+
     public static func currentPage() throws -> LivePage {
         do {
             let (recorder, window) = try scene()

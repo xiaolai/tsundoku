@@ -52,6 +52,12 @@ public final class AIPanelModel: ObservableObject {
     /// What the next request answers about. The page is always available;
     /// selection is only offered while the reader exposes one.
     @Published public var scope: CompanionScope = .currentPage
+    /// A one-shot page image captured from the side pane. It never turns a
+    /// page or participates in an Exports capture.
+    @Published public var quickCapture: QuickPageCapture?
+    @Published public var quickCaptureBusy = false
+    @Published public var quickCaptureError: String?
+    @Published public var showQuickCapture = false
 
     public var selectionAvailable: Bool {
         !(context.selection ?? "")
@@ -91,6 +97,32 @@ public final class AIPanelModel: ObservableObject {
         app?.openCaptureExports(
             bookID: identity?.book?.asin ?? pageIdentifier,
             readerKind: readerKind)
+    }
+
+    /// Capture the page currently visible in the reader, once, for the side
+    /// pane. This is deliberately independent of the Exports crop and page
+    /// range; it never turns a page.
+    public func captureCurrentPage() {
+        if app?.capturePhase == .running {
+            quickCaptureError = "Available when book capture stops."
+            return
+        }
+        quickCaptureBusy = true
+        quickCaptureError = nil
+        Task {
+            let result = await Task.detached {
+                Result { try QuickPageCaptureService().capture() }
+            }.value
+            self.quickCaptureBusy = false
+            switch result {
+            case .success(let capture):
+                self.quickCapture = capture
+                self.showQuickCapture = true
+            case .failure(let error):
+                self.quickCapture = nil
+                self.quickCaptureError = "\(error)"
+            }
+        }
     }
     @Published public var question = "" {
         didSet {
@@ -1969,6 +2001,11 @@ public struct AIPanelView: View {
         .frame(
             maxWidth: .infinity, maxHeight: .infinity,
             alignment: .topLeading)
+        .sheet(isPresented: $model.showQuickCapture) {
+            if let capture = model.quickCapture {
+                QuickPageCaptureView(capture: capture)
+            }
+        }
     }
 
     // MARK: Header
@@ -2008,6 +2045,15 @@ public struct AIPanelView: View {
             .disabled(model.phase == .loadingPage)
             .help("Read the current page and selection again")
             .accessibilityLabel("Reload page")
+            Button {
+                model.captureCurrentPage()
+            } label: {
+                Image(systemName: "camera")
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.quickCaptureBusy)
+            .help("Capture this page as an image")
+            .accessibilityLabel("Capture this page")
             if let onClose {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -2494,6 +2540,12 @@ public struct AIPanelView: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if let captureError = model.quickCaptureError {
+                Text(captureError)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: 6) {
                 Image(systemName: "info.circle")
                     .font(.caption2)
@@ -2823,5 +2875,52 @@ struct MarkdownText: View {
                 .font(font)
                 .lineSpacing(lineSpacing)
         }
+    }
+}
+
+/// The side pane's one-shot page image. It is not an Exports page and cannot
+/// turn the reader.
+struct QuickPageCaptureView: View {
+    let capture: QuickPageCapture
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Captured Page")
+                        .font(.headline)
+                    Text(
+                        "Page \(capture.pageNumber.map(String.init) ?? "?")"
+                            + (capture.pageCount.map { " of \($0)" } ?? ""))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            Image(decorative: capture.image, scale: 1)
+                .resizable()
+                .scaledToFit()
+                .frame(maxHeight: 520)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            if capture.textSource == .ocr {
+                Text("Read with OCR — check the text before relying on it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if !capture.text.isEmpty {
+                ScrollView {
+                    Text(capture.text)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 180)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 520, minHeight: 480)
     }
 }

@@ -671,14 +671,24 @@ public final class KindleCaptureSession: ReaderCaptureSession {
             after.isReading,
             after.text == live.text,
             after.windowFrame == live.windowFrame,
-            after.pageNumber == live.pageNumber,
-            after.pageCount == live.pageCount,
+            // Kindle fills page numbers and the page total late, often while
+            // the screenshot is still being taken. Compare them only when
+            // both reads know them; a nil→value transition is not a page
+            // turn, and treating it as one aborts otherwise valid captures.
+            Self.sameWhenKnown(after.pageNumber, live.pageNumber),
+            Self.sameWhenKnown(after.pageCount, live.pageCount),
             after.endOfBook == live.endOfBook
         else {
             throw ReaderCaptureError.captureFailed(
                 .kindle,
                 reason: "the page changed while its screenshot was taken")
         }
+    }
+
+    private static func sameWhenKnown<T: Equatable>(_ left: T?, _ right: T?)
+        -> Bool
+    {
+        left == nil || right == nil || left == right
     }
 
     /// Fixes the page box from the first page that can take it, after a

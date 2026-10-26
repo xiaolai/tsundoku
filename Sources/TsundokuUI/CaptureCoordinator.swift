@@ -19,11 +19,19 @@ enum CaptureCoordinator {
         let booksPageSetup: PageSetupRequest
         let bundleOptions: CaptureBundleOptions
         let cancellation: CancellationFlag
+        let manual: ManualCaptureConfiguration?
 
         func run(
             progress: @escaping @Sendable (CaptureProgress) -> Void
         ) throws -> CaptureResult {
             let engine = CaptureEngine(archive: archive)
+            if let manual {
+                return try engine.captureManual(
+                    book: book, pageLimit: pageLimit, output: output,
+                    configuration: manual, progress: progress,
+                    isCancelled: { cancellation.isSet },
+                    bundle: CaptureBundleRequest(options: bundleOptions))
+            }
             return try engine.capture(
                 book: book,
                 kind: kind,

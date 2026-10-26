@@ -4,8 +4,20 @@ import TsundokuCore
 
 public struct ExportsView: View {
     @ObservedObject var model: AppModel
+    @State private var confirmCapture = false
+    @State private var showCropEditor = false
     private var pageLimit: Binding<PageLimit> {
-        Binding(get: { PageLimit.allCases.first { $0.pages == model.capturePageLimit } ?? .ten },
+        Binding(
+            get: {
+                if !model.captureTargetIsBooks,
+                    model.capturePageLimit == nil
+                {
+                    return .ten
+                }
+                return PageLimit.allCases.first {
+                    $0.pages == model.capturePageLimit
+                } ?? .ten
+            },
             set: { model.capturePageLimit = $0.pages })
     }
 
@@ -39,6 +51,105 @@ public struct ExportsView: View {
 
     public var body: some View {
         Form {
+            if !model.captureTargetIsBooks {
+                Section("Prepare Kindle") {
+                    Text(
+                        "Set the Kindle window, font, and first page first. "
+                            + "Hide Kindle's chrome, then preview the page and "
+                            + "approve the crop before starting.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button("Fit A4") {
+                            model.fitKindleWindowToA4()
+                        }
+                        .disabled(model.manualPreviewBusy)
+                        .help(
+                            "Resize the Kindle window from its current width "
+                                + "to an A4 page box. The width is reduced if "
+                                + "the display cannot fit the height.")
+                        Button("Preview Current Page") {
+                            model.refreshManualPreview()
+                        }
+                        .disabled(model.manualPreviewBusy)
+                        .help(
+                            "Capture the current page once. This does not "
+                                + "turn a page or activate Kindle.")
+                        if model.manualPreviewBusy {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                    if let message = model.manualFitMessage {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let error = model.manualPreviewError {
+                        Label(error, systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    if let readiness = model.manualReadiness {
+                        if let blocking = readiness.blockingMessage {
+                            Label(
+                                blocking,
+                                systemImage: "exclamationmark.triangle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if let warning = readiness.warnings.first {
+                            Text(warning.message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Label(
+                                "Ready to capture from this page.",
+                                systemImage: "checkmark.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if let preview = model.manualPreview {
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(decorative: preview.image, scale: 1)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxWidth: 240, maxHeight: 180)
+                                .clipShape(
+                                    RoundedRectangle(cornerRadius: 6))
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(
+                                    "Page \(preview.pageNumber.map(String.init) ?? "?")"
+                                        + (preview.pageCount.map {
+                                            " of \($0)"
+                                        } ?? ""))
+                                    .font(.callout.weight(.semibold))
+                                Text(
+                                    "Page box \(Int(preview.pageBox.width))×"
+                                        + "\(Int(preview.pageBox.height)) pt · "
+                                        + "crop "
+                                        + String(
+                                            format: "%.3f",
+                                            preview.pageRatio))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Button("Edit Crop…") {
+                                    showCropEditor = true
+                                }
+                                .disabled(model.manualCrop == nil)
+                            }
+                            Spacer()
+                        }
+                    } else {
+                        Text(
+                            "No preview yet. The first page is the page "
+                                + "Kindle is showing when capture starts.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             Section("Capture") {
                 LabeledContent("Book") {
                     Text(bookLine)
@@ -57,17 +168,75 @@ public struct ExportsView: View {
                 )
 
                 Picker("Pages", selection: pageLimit) {
-                    ForEach(PageLimit.allCases) { limit in
+                    ForEach(
+                        PageLimit.allCases.filter {
+                            model.captureTargetIsBooks || $0 != .all
+                        }
+                    ) { limit in
                         Text(limit.title).tag(limit)
                     }
                 }
                 .disabled(model.capturePhase == .running)
                 .help(
-                    "All Pages first returns to the book's first page, then "
-                        + "captures to the end. 10 and 25 pages start at the "
-                        + "page the reader is showing.")
+                    model.captureTargetIsBooks
+                        ? "All Pages first returns to the book's first page, "
+                            + "then captures to the end. 10 and 25 pages "
+                            + "start at the page the reader is showing."
+                        : "Kindle capture starts at the previewed page. "
+                            + "10 and 25 capture that many pages.")
+
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Hands off while capturing")
+                            .font(.callout.weight(.semibold))
+                        Text(
+                            "Tsundoku sends page-turn keys to the reader and "
+                                + "photographs the screen. Do not use the "
+                                + "mouse or keyboard, switch apps, or move the "
+                                + "reader window until it finishes; input can "
+                                + "turn a page or change focus and fail the "
+                                + "capture."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        Label(
+                            model.captureTargetIsBooks
+                                ? "Do not minimize the Apple Books window. "
+                                    + "Capture needs it open and unminimized "
+                                    + "to turn pages."
+                                : "Do not minimize the Kindle window. "
+                                    + "Capture needs it open and unminimized "
+                                    + "to turn pages.",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        if model.settings.cleanPageDuringCapture,
+                            !model.captureTargetIsBooks
+                        {
+                            Text(
+                                "Hide Popular Highlights also moves the "
+                                    + "pointer briefly to click Kindle's "
+                                    + "settings.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } icon: {
+                    Image(systemName: "hand.raised")
+                        .foregroundStyle(.secondary)
+                }
 
                 DisclosureGroup("Advanced Capture Options") {
+                    if !model.captureTargetIsBooks {
+                        Text(
+                            "Manual Kindle capture uses the previewed crop "
+                                + "and A4 output. Page size, crop, font size, "
+                                + "and Hide Popular Highlights below are not "
+                                + "used by this flow.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Picker(
                         "Page size",
                         selection: $model.settings.capturePageSize
@@ -76,7 +245,9 @@ public struct ExportsView: View {
                             Text(size.title).tag(size)
                         }
                     }
-                    .disabled(model.capturePhase == .running)
+                    .disabled(
+                        model.capturePhase == .running
+                            || !model.captureTargetIsBooks)
                     .help(
                         "A4 temporarily resizes the reader. Layout and text size are restored afterward."
                     )
@@ -86,7 +257,9 @@ public struct ExportsView: View {
                         value: $model.settings.captureCropTop, in: 0...200
                     )
                     .help("Trim points from the top of each captured page.")
-                    .disabled(model.capturePhase == .running)
+                    .disabled(
+                        model.capturePhase == .running
+                            || !model.captureTargetIsBooks)
 
                     if model.captureTargetIsBooks {
                         Stepper(
@@ -96,7 +269,9 @@ public struct ExportsView: View {
                         .help(
                             "Bottom crop in points; zero keeps printed page numbers."
                         )
-                        .disabled(model.capturePhase == .running)
+                        .disabled(
+                            model.capturePhase == .running
+                                || !model.captureTargetIsBooks)
                         Picker(
                             "Text size",
                             selection: $model.settings.booksFontSteps
@@ -116,7 +291,9 @@ public struct ExportsView: View {
                         .help(
                             "Bottom crop in points; zero detects page numbers automatically."
                         )
-                        .disabled(model.capturePhase == .running)
+                        .disabled(
+                            model.capturePhase == .running
+                                || !model.captureTargetIsBooks)
                         Picker(
                             "Font size",
                             selection: $model.settings.captureFontSize
@@ -126,7 +303,9 @@ public struct ExportsView: View {
                                 Text("\(size)").tag(Int?.some(size))
                             }
                         }
-                        .disabled(model.capturePhase == .running)
+                        .disabled(
+                            model.capturePhase == .running
+                                || !model.captureTargetIsBooks)
                     }
 
                     Toggle(
@@ -150,6 +329,7 @@ public struct ExportsView: View {
                     .disabled(
                         model.capturePhase == .running
                             || model.selectedBookIsAppleBooks
+                            || !model.captureTargetIsBooks
                     )
                     .help(
                         "Temporarily hide Amazon popular highlights and restore the setting afterward. Personal annotations remain visible."
@@ -204,13 +384,19 @@ public struct ExportsView: View {
                         }
                     } else {
                         Button {
-                            model.startCapture(pages: model.capturePageLimit)
+                            confirmCapture = true
                         } label: {
                             Label("Start Capture", systemImage: "play.fill")
                         }
                         .labelStyle(.iconOnly)
-                        .help("Start capture")
+                        .help(
+                            model.captureTargetIsBooks
+                                ? "Start capture"
+                                : "Start capture from the previewed page")
                         .buttonStyle(.borderedProminent)
+                        .disabled(
+                            !model.captureTargetIsBooks
+                                && model.manualCrop == nil)
                     }
                 }
 
@@ -218,8 +404,12 @@ public struct ExportsView: View {
             }
 
             Section("Reader") {
-                Text("Open the book and keep its reader visible.")
-                    .font(.callout).foregroundStyle(.secondary)
+                Text(
+                    "Open the book and keep its reader visible and "
+                        + "unminimized. Capture needs the window open to turn "
+                        + "pages."
+                )
+                .font(.callout).foregroundStyle(.secondary)
                 if model.permissionsNeeded {
                     Label(
                         "Capture permissions required.",
@@ -289,6 +479,55 @@ public struct ExportsView: View {
         }
         .onChange(of: model.selectedBookID) { _, _ in
             model.refreshOriginalAvailability()
+        }
+        .sheet(isPresented: $showCropEditor) {
+            if let preview = model.manualPreview {
+                CropEditorView(
+                    preview: preview,
+                    crop: Binding(
+                        get: { model.manualCrop ?? preview.crop },
+                        set: { model.manualCrop = $0 }),
+                    lockA4: $model.manualCropLocksA4,
+                    onRefresh: {
+                        model.refreshManualPreview()
+                    })
+            } else {
+                VStack(spacing: 12) {
+                    Text("The preview is no longer available.")
+                        .font(.headline)
+                    if let error = model.manualPreviewError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    Button("Done") { showCropEditor = false }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(24)
+                .frame(minWidth: 360, minHeight: 180)
+            }
+        }
+        .alert(
+            "Capture Will Control the Reader", isPresented: $confirmCapture
+        ) {
+            Button("Start Capture") {
+                if model.captureTargetIsBooks {
+                    model.startCapture(pages: model.capturePageLimit)
+                } else {
+                    model.startManualCapture(pages: model.capturePageLimit)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Tsundoku sends page-turn keys to the reader and photographs "
+                    + "the screen. Do not move the mouse, type, switch apps, "
+                    + "move the reader window, or minimize it until it "
+                    + "finishes. Input can turn a page, change focus, or make "
+                    + "the capture fail; a minimized reader cannot receive "
+                    + "page turns reliably. Start only after the preview and "
+                    + "crop are approved.")
         }
     }
 
@@ -363,15 +602,22 @@ public struct ExportsView: View {
         switch model.capturePhase {
         case .running:
             VStack(alignment: .leading, spacing: 6) {
-                if model.capturePageLimit == nil {
-                    ProgressView().progressViewStyle(.linear)
-                } else {
+                if model.captureProgress > 0 {
                     ProgressView(value: model.captureProgress)
                         .progressViewStyle(.linear)
+                } else {
+                    ProgressView().progressViewStyle(.linear)
                 }
                 Text(model.captureMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Label(
+                    "Capturing — do not use the mouse or keyboard or "
+                        + "minimize the reader.",
+                    systemImage: "hand.raised"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
             }
         case .finished:
             VStack(alignment: .leading, spacing: 6) {

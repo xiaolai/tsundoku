@@ -325,12 +325,18 @@ public protocol ReaderCaptureSession: AnyObject {
     func advance(after mark: PageMark) throws -> PageTransition
     func restore() -> RestoreReport
     var pageSetupOutcome: PageSetupOutcome? { get }
+    /// A manual capture starts at the prepared page and never restores.
+    var isManualCapture: Bool { get }
+    /// Warnings the session wants recorded in the manifest.
+    var captureWarnings: [String] { get }
     /// Returns to the book's first page before a whole-book capture.
     func rewindToStart() throws -> RewindReport
     var rewindOutcome: RewindReport? { get }
 }
 
 public extension ReaderCaptureSession {
+    var isManualCapture: Bool { false }
+    var captureWarnings: [String] { [] }
     var pageSetupOutcome: PageSetupOutcome? { nil }
     /// Readers that cannot page backward report that they did not try; the
     /// capture then starts at the current page and says so in its manifest.

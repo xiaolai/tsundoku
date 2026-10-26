@@ -24,13 +24,21 @@ public struct CaptureJobEngine: Sendable {
         outputPageSize: CGSize? = nil,
         cropTop: Int = 0,
         cropBottom: Int = 0,
-        cropAutomatic: Bool = false
+        cropAutomatic: Bool = false,
+        cropRect: CGRect? = nil
     ) throws -> CaptureResult {
-        let cropManifest: [String: Any] = [
+        var cropManifest: [String: Any] = [
             "top": cropTop,
             "bottom": cropBottom,
             "automatic": cropAutomatic,
         ]
+        if let cropRect {
+            cropManifest["source"] = "manual"
+            cropManifest["windowLocal"] = [
+                "x": cropRect.minX, "y": cropRect.minY,
+                "width": cropRect.width, "height": cropRect.height,
+            ]
+        }
         try lifecycle.checkReady()
         let activity = lifecycle.begin()
         defer { lifecycle.end(activity) }
@@ -114,23 +122,41 @@ public struct CaptureJobEngine: Sendable {
             restoreCleanPage()
             throw Self.attach(
                 restore: nil, clean: cleanRestore, to: error,
-                kind: subject.kind)
+                kind: subject.kind, manual: session.isManualCapture)
         }
         var pageTexts: [String] = []
         var firstPixelSize: CGSize?
         var termination: Termination = .failed("the run did not start")
-        let snapshot: PageSnapshot
-        do {
-            snapshot = try session.snapshot()
-        } catch {
+        // A previous restore, an alert that just closed, or Kindle finishing
+        // a page animation can leave the first read moving. It is safe to
+        // retry: no page has been committed yet.
+        var snapshot: PageSnapshot?
+        var snapshotError: Error?
+        for attempt in 0..<3 {
+            if isCancelled() {
+                snapshotError = ReaderCaptureError.cancelled
+                break
+            }
+            do {
+                snapshot = try session.snapshot()
+                break
+            } catch {
+                snapshotError = error
+                if attempt < 2 { Thread.sleep(forTimeInterval: 0.4) }
+            }
+        }
+        guard let snapshot else {
             // The reader must leave any terminal sheet first; the display
             // setting cannot be read from a non-reading surface.
             let report = session.restore()
             restoreCleanPage()
+            let failureReason = snapshotError.map { "\($0)" } ?? "unknown"
             var failure = Self.manifestBase(session: session, subject: subject, crop: cropManifest)
             addCleanPage(&failure)
             failure["state"] = "incomplete"
-            failure["termination"] = "failed:initial snapshot"
+            failure["termination"] = "failed:initial snapshot: "
+                + failureReason
+            failure["error"] = failureReason
             failure["complete"] = [
                 "requestedRange": false, "structural": false,
                 "wholeBook": false,
@@ -139,8 +165,9 @@ public struct CaptureJobEngine: Sendable {
             failure["restore"] = Self.restore(report)
             try? store.writeManifest(failure)
             throw Self.attach(
-                restore: report, clean: cleanRestore, to: error,
-                kind: subject.kind)
+                restore: report, clean: cleanRestore,
+                to: snapshotError ?? ReaderCaptureError.cancelled,
+                kind: subject.kind, manual: session.isManualCapture)
         }
         var current = snapshot
         let firstPageNumber = snapshot.pageNumber
@@ -149,6 +176,8 @@ public struct CaptureJobEngine: Sendable {
             ? Double(snapshot.pixelSize.width / snapshot.cropRect.width)
             : 1
         var restored: RestoreReport?
+        let pageClock = PageClock()
+        var totalPages = pageLimit ?? snapshot.location?.pageCount
 
         do {
             var index = 0
@@ -185,10 +214,19 @@ public struct CaptureJobEngine: Sendable {
                 ]
                 try store.writeManifest(running)
                 index += 1
+                if totalPages == nil { totalPages = current.pageCount }
+                let elapsed = pageClock.elapsed()
+                let average = elapsed / Double(index)
+                let remaining = totalPages.map {
+                    max(0, Double($0 - index) * average)
+                }
                 progress(
                     CaptureProgress(
                         page: index, pageLimit: pageLimit,
+                        totalPages: totalPages,
+                        estimatedRemaining: remaining,
                         message: "Captured page \(index)"
+                            + (totalPages.map { " of \($0)" } ?? "")
                             + (current.isEndOfBook
                                 ? " · end of book" : "")))
 
@@ -235,6 +273,7 @@ public struct CaptureJobEngine: Sendable {
             addCleanPage(&failure)
             failure["state"] = Self.state(termination)
             failure["termination"] = Self.termination(termination)
+            failure["error"] = "\(error)"
             failure["complete"] = [
                 "requestedRange": false,
                 "structural": false,
@@ -247,7 +286,7 @@ public struct CaptureJobEngine: Sendable {
             try? store.writeManifest(failure)
             throw Self.attach(
                 restore: restored, clean: cleanRestore, to: error,
-                kind: subject.kind)
+                kind: subject.kind, manual: session.isManualCapture)
         }
         restored = session.restore()
         restoreCleanPage()
@@ -315,6 +354,7 @@ public struct CaptureJobEngine: Sendable {
             addCleanPage(&failure)
             failure["state"] = "incomplete"
             failure["termination"] = Self.termination(termination)
+            failure["error"] = "\(error)"
             failure["complete"] = [
                 "requestedRange": false, "structural": false,
                 "wholeBook": false,
@@ -397,7 +437,8 @@ public struct CaptureJobEngine: Sendable {
             } catch is CancellationError {
                 try store.writeManifest(
                     Self.cancelledFinalization(
-                        manifest, warnings: bundleWarnings))
+                        manifest,
+                        warnings: session.captureWarnings + bundleWarnings))
                 throw ReaderCaptureError.cancelled
             }
             // The copy checks cancellation while it streams, but a stop
@@ -405,17 +446,19 @@ public struct CaptureJobEngine: Sendable {
             if isCancelled() {
                 try store.writeManifest(
                     Self.cancelledFinalization(
-                        manifest, warnings: bundleWarnings))
+                        manifest,
+                        warnings: session.captureWarnings + bundleWarnings))
                 throw ReaderCaptureError.cancelled
             }
         }
-        manifest["warnings"] = bundleWarnings
+        manifest["warnings"] = session.captureWarnings + bundleWarnings
         try store.writeManifest(manifest)
 
         let verification = try CaptureVerifier.verify(directory: output)
-        var warnings = verification.faults
+        var warnings = session.captureWarnings
+        warnings.append(contentsOf: verification.faults)
         warnings.append(contentsOf: bundleWarnings)
-        if restored?.exact == false {
+        if !session.isManualCapture, restored?.exact == false {
             warnings.append("restore not exact")
         }
         if let cleanRestore, !cleanRestore.restored {
@@ -470,6 +513,11 @@ public struct CaptureJobEngine: Sendable {
         return CaptureResult(
             directory: output, pdf: pdfURL, pages: pdfPages, title: title,
             cleanPage: cleanSummary, pageSetup: session.pageSetupOutcome)
+    }
+
+    private struct PageClock {
+        let start = Date()
+        func elapsed() -> TimeInterval { Date().timeIntervalSince(start) }
     }
 
     private static func signature(
@@ -531,10 +579,10 @@ public struct CaptureJobEngine: Sendable {
 
     private static func attach(
         restore: RestoreReport?, clean: CleanPageOutcome?,
-        to error: Error, kind: ReaderKind
+        to error: Error, kind: ReaderKind, manual: Bool = false
     ) -> Error {
         var reasons: [String] = []
-        if let restore, !restore.exact {
+        if !manual, let restore, !restore.exact {
             reasons.append(
                 "restore was not exact: "
                     + (restore.reason ?? "unknown reason"))
@@ -561,8 +609,12 @@ public struct CaptureJobEngine: Sendable {
                 "confidence": confidence(session.identity.confidence),
             ],
             "title": captureTitle(session: session, subject: subject),
-            "warnings": [],
+            "warnings": session.captureWarnings,
         ]
+        if session.isManualCapture {
+            manifest["manual"] = true
+            manifest["restored"] = false
+        }
         if !crop.isEmpty { manifest["crop"] = crop }
         if let rewind = session.rewindOutcome {
             manifest["rewind"] = rewind.manifest

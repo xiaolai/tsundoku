@@ -3,16 +3,28 @@ import Foundation
 public struct CaptureProgress: Sendable {
     public let page: Int
     public let pageLimit: Int?
+    /// The total the capture can know: the requested limit, or the reader's
+    /// page total when it exposes one. Nil means the remaining time cannot be
+    /// estimated honestly.
+    public let totalPages: Int?
+    /// A rough remaining time from the average page so far.
+    public let estimatedRemaining: TimeInterval?
     public let message: String
 
     public var fraction: Double {
-        guard let pageLimit, pageLimit > 0 else { return 0 }
-        return min(1, Double(page) / Double(pageLimit))
+        let total = pageLimit ?? totalPages
+        guard let total, total > 0 else { return 0 }
+        return min(1, Double(page) / Double(total))
     }
 
-    public init(page: Int, pageLimit: Int?, message: String) {
+    public init(
+        page: Int, pageLimit: Int?, totalPages: Int? = nil,
+        estimatedRemaining: TimeInterval? = nil, message: String
+    ) {
         self.page = page
         self.pageLimit = pageLimit
+        self.totalPages = totalPages
+        self.estimatedRemaining = estimatedRemaining
         self.message = message
     }
 }
@@ -46,6 +58,36 @@ public final class CaptureEngine: Sendable {
 
     public init(archive: Archive) {
         self.archive = archive
+    }
+
+    /// Capture Kindle forward from the page the reader prepared. The caller
+    /// supplies the reviewed crop and expected window size; there is no
+    /// activation, page setup, rewind, or restore.
+    public func captureManual(
+        book: Book?,
+        pageLimit: Int?,
+        output: URL,
+        configuration: ManualCaptureConfiguration,
+        progress: @Sendable (CaptureProgress) -> Void,
+        isCancelled: @escaping @Sendable () -> Bool,
+        bundle: CaptureBundleRequest? = nil
+    ) throws -> CaptureResult {
+        let subject = CaptureSubject(book: book, kind: .kindle)
+        let session = ManualKindleCaptureSession(
+            crop: configuration.crop,
+            cancellation: ClosureCancellation(isCancelled),
+            expectedWindow: configuration.expectedWindow,
+            expectedMark: configuration.expectedMark,
+            expectedPageNumber: configuration.expectedPageNumber)
+        try session.prime()
+        return try CaptureJobEngine(archive: archive).run(
+            session: session, subject: subject, pageLimit: pageLimit,
+            output: output, progress: progress, isCancelled: isCancelled,
+            cleanPage: nil,
+            bundle: bundle,
+            outputPageSize: CapturePageSize.a4.points,
+            cropTop: 0, cropBottom: 0, cropAutomatic: false,
+            cropRect: configuration.crop.rect)
     }
 
     public func capture(

@@ -71,6 +71,9 @@ private final class FakeSession: ReaderCaptureSession {
         attempted: true, reachedStart: true, turns: 3, method: "fake",
         reason: nil)
     var rewindCalls = 0
+    var snapshotError: Error?
+    var captureWarnings: [String] = []
+    var isManualCapture = false
 
     func rewindToStart() throws -> RewindReport {
         rewindCalls += 1
@@ -99,6 +102,7 @@ private final class FakeSession: ReaderCaptureSession {
 
     func snapshot() throws -> PageSnapshot {
         snapshotCalls += 1
+        if let snapshotError { throw snapshotError }
         return snapshots.removeFirst()
     }
 
@@ -163,6 +167,42 @@ private func manifest(at result: CaptureResult) throws
 
 @Suite("Capture contracts")
 struct CaptureContractTests {
+    @Test("a manual session does not report its no-restore as a fault")
+    func manualRestoreIsNotAWarning() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = try testSnapshot()
+        let session = FakeSession(
+            identity: page.identity, snapshots: [page],
+            transitions: [.endOfBook(record(terminal: true))],
+            restoreReport: RestoreReport(
+                opening: nil, final: nil, attempted: 0, posted: 0,
+                observed: 0, terminal: 0, unresolved: 0, exact: false,
+                reason: "manual capture does not restore the reader"))
+        session.isManualCapture = true
+        let result = try run(
+            session, archive: archive, directory: directory, pageLimit: 1)
+        let warnings = try #require(
+            try manifest(at: result)["warnings"] as? [String])
+        #expect(!warnings.contains("restore not exact"))
+    }
+
+    @Test("session warnings survive the final manifest")
+    func sessionWarningsSurvive() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = try testSnapshot()
+        let session = FakeSession(
+            identity: page.identity, snapshots: [page],
+            transitions: [.endOfBook(record(terminal: true))])
+        session.captureWarnings = ["the crop removed text and OCR failed"]
+        let result = try run(
+            session, archive: archive, directory: directory, pageLimit: 1)
+        let warnings = try #require(
+            try manifest(at: result)["warnings"] as? [String])
+        #expect(warnings.contains("the crop removed text and OCR failed"))
+    }
+
     @Test("end of book produces one PDF and restores once")
     func endOfBook() throws {
         let (archive, directory) = try temporaryArchive()
@@ -280,6 +320,19 @@ struct CaptureContractTests {
         let result = try run(
             session, archive: archive, directory: directory, pageLimit: 2)
         #expect(result.pages == 2)
+    }
+
+    @Test("capture progress reports a known total and remaining time")
+    func progressEstimate() {
+        let all = CaptureProgress(
+            page: 2, pageLimit: nil, totalPages: 10,
+            estimatedRemaining: 16, message: "Captured page 2 of 10")
+        #expect(all.fraction == 0.2)
+        #expect(all.estimatedRemaining == 16)
+        let limited = CaptureProgress(
+            page: 3, pageLimit: 10, message: "Captured page 3")
+        #expect(limited.fraction == 0.3)
+        #expect(limited.estimatedRemaining == nil)
     }
 
     @Test("a cancelled turn still records the posted key")
@@ -536,6 +589,45 @@ struct CaptureContractTests {
         #expect(report.reachedStart)
         #expect(report.skippedPages == 1)
         #expect(box.index == 1)
+    }
+
+    @Test("a late page number does not fail an otherwise unchanged snapshot")
+    func latePageNumber() throws {
+        let frame = AXNode.Frame(x: 0, y: 0, width: 800, height: 1000)
+        let text = AXNode.Frame(x: 100, y: 100, width: 600, height: 700)
+        final class Box: @unchecked Sendable {
+            var page: LivePage
+            init(_ page: LivePage) { self.page = page }
+        }
+        let initial = LivePage(
+            state: "readingChromeHidden", text: " Image", title: "A Book",
+            characters: 6, windowFrame: frame, pageTextFrame: text,
+            endOfBook: false, pageNumber: nil, pageCount: nil)
+        let known = LivePage(
+            state: "readingChromeHidden", text: " Image", title: "A Book",
+            characters: 6, windowFrame: frame, pageTextFrame: text,
+            endOfBook: false, pageNumber: 6, pageCount: 20)
+        let box = Box(initial)
+        let session = try KindleCaptureSession(
+            subject: CaptureSubject(book: nil, kind: .kindle),
+            cancellation: CancellationFlag(),
+            readPage: { box.page },
+            capture: { _ in
+                // Kindle supplies the page number while the screenshot is
+                // being taken.
+                box.page = known
+                return try testImage()
+            },
+            turnForward: {},
+            turnBackward: {},
+            escape: {},
+            sleep: { _ in },
+            now: Date.init,
+            isTrusted: { true },
+            isRunning: { true },
+            activate: {})
+        let snapshot = try session.snapshot()
+        #expect(snapshot.text == " Image")
     }
 
     @Test("a session can start on a cover and calibrate on the first text page")
@@ -1155,6 +1247,33 @@ struct LayoutSignatureTests {
         let termination = try #require(manifest["termination"] as? String)
         #expect(termination.hasPrefix("failed:"))
         #expect(termination != "failed:the run did not start")
+    }
+
+    @Test("an initial snapshot failure records the real error")
+    func initialSnapshotFailure() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = try testSnapshot()
+        let session = FakeSession(
+            identity: page.identity, snapshots: [], transitions: [])
+        session.snapshotError = ReaderCaptureError.captureFailed(
+            .kindle, reason: "another app is in front of Kindle")
+        #expect(throws: Error.self) {
+            _ = try run(
+                session, archive: archive, directory: directory,
+                pageLimit: 1)
+        }
+        let data = try Data(
+            contentsOf: directory.appendingPathComponent(
+                "capture/manifest.json"))
+        let manifest = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let termination = try #require(manifest["termination"] as? String)
+        #expect(termination.contains("another app is in front"))
+        #expect(
+            (manifest["error"] as? String)?.contains(
+                "another app is in front") == true)
+        #expect(session.snapshotCalls == 3)
     }
 
     @Test("a page-count change stops the run")
