@@ -1129,6 +1129,17 @@ public final class AppModel: ObservableObject {
 
     // MARK: - Live Kindle
 
+    /// Re-reads the reader now instead of waiting for the next two-second
+    /// poll. The library refresh button calls this beside its import.
+    public func refreshLivePage() async {
+        await pollLive(generation: pollGeneration)
+    }
+
+    public func refreshAll() {
+        importLibrary()
+        Task { await refreshLivePage() }
+    }
+
     public func startLivePolling() {
         guard liveTask == nil else { return }
         pollGeneration += 1
@@ -1271,14 +1282,45 @@ public final class AppModel: ObservableObject {
             firstBook: books.first(where: \.isEbook)?.source)
     }
 
-    /// The book a capture will use: the selected book when it belongs to that
-    /// reader, otherwise the first (recent) ebook from the same reader. Nil
-    /// when the library has no book for it — the live page names the capture.
+    /// The Kindle book the reader actually has open. Kindle's own last-opened
+    /// ASIN is authoritative; the title is a fallback only when exactly one
+    /// archived book carries it.
+    public var liveKindleBook: Book? {
+        guard let page = livePage else { return nil }
+        if let id = page.bookID, !id.isEmpty,
+            let byID = books.first(where: {
+                $0.source == .kindle
+                    && $0.asin.caseInsensitiveCompare(id) == .orderedSame
+            })
+        {
+            return byID
+        }
+        let title = ConversationKey.normalize(page.title)
+        guard !title.isEmpty,
+            !ReadingIdentityResolver.isPlaceholder(page.title)
+        else { return nil }
+        let matches = books.filter {
+            $0.isEbook && $0.source == .kindle
+                && ConversationKey.normalize($0.title) == title
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    /// The book a capture will use. The open reader is the target: a Kindle
+    /// capture follows Kindle's last-opened book even when the library has a
+    /// different row selected. The library selection is the fallback only
+    /// when that reader is not open. Nil lets the live page name the capture.
     public func captureBook(for kind: ReaderKind) -> Book? {
         // A companion route with no archived match runs from the live page;
         // it must not borrow the first ebook of the same reader.
         if captureRouteWithoutBook, selectedBookID == nil { return nil }
         let source: BookSource = kind == .appleBooks ? .appleBooks : .kindle
+        if kind == .kindle {
+            if let live = liveKindleBook { return live }
+            // Kindle is open on a book the archive does not know; naming the
+            // library selection here would capture a different book.
+            if livePage != nil { return nil }
+        }
         if let selected = selectedBook, selected.source == source {
             return selected
         }

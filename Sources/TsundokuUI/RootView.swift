@@ -99,7 +99,7 @@ public struct RootView: View {
         }
         ToolbarItem {
             Button {
-                model.importLibrary()
+                model.refreshAll()
             } label: {
                 if model.isImporting {
                     ProgressView().controlSize(.small)

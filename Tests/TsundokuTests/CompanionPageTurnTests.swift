@@ -1115,6 +1115,41 @@ struct CompanionPageTurnTests {
         #expect(panelModel.sendNote?.contains("sent instead") == true)
     }
 
+    @Test("a Kindle capture follows the open book, not the library row")
+    func captureFollowsLiveKindle() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-capture-live-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let selected = Book(
+            asin: "OLD", title: "Surely You're Joking", author: "A",
+            bookType: 10, readState: 0, source: .kindle)
+        let open = Book(
+            asin: "NEW", title: "Built to Grow", author: "B",
+            bookType: 10, readState: 0, source: .kindle)
+        model.books = [selected, open]
+        model.selectedBookID = "OLD"
+        model.livePage = LivePage(
+            state: "readingChromeHidden",
+            text: String(repeating: "words ", count: 20),
+            title: "Built to Grow", characters: 120,
+            windowFrame: nil, pageTextFrame: nil, endOfBook: false,
+            pageNumber: 1, pageCount: 10, bookID: "NEW")
+        #expect(model.captureBook()?.asin == "NEW")
+
+        // An open book the archive does not know must not borrow the row.
+        model.livePage = LivePage(
+            state: "readingChromeHidden",
+            text: String(repeating: "words ", count: 20),
+            title: "A Book Not In The Archive", characters: 120,
+            windowFrame: nil, pageTextFrame: nil, endOfBook: false,
+            pageNumber: 1, pageCount: 10, bookID: "UNKNOWN")
+        #expect(model.captureBook() == nil)
+    }
+
     @Test("a selection spanning several nodes is joined in order")
     func multiNodeSelection() {
         #expect(
