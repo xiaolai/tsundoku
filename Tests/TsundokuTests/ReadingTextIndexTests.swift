@@ -20,6 +20,7 @@ struct ReadingTextIndexTests {
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    @discardableResult
     private func capture(
         pages: [(Int, String)], in directory: URL
     ) throws -> URL {
