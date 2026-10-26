@@ -36,6 +36,19 @@ struct StatusMenuView: View {
                 .keyboardShortcut("o")
             Button("Settings…") { delegate.openSettings() }
                 .keyboardShortcut(",")
+            if let release = delegate.updateChecker.availableRelease {
+                Button("Update Available: \(release.version)…") {
+                    delegate.updateChecker.openReleasePage()
+                }
+            } else {
+                Button(
+                    delegate.updateChecker.isChecking
+                        ? "Checking for Updates…" : "Check for Updates…"
+                ) {
+                    delegate.updateChecker.check()
+                }
+                .disabled(delegate.updateChecker.isChecking)
+            }
             Divider()
             Toggle(
                 "Start at Login",
@@ -114,7 +127,7 @@ struct SettingsSceneView: View {
         case .access: 620
         case .ai: 460
         case .data: 480
-        case .about: 150
+        case .about: 360
         }
     }
 
@@ -126,7 +139,8 @@ struct SettingsSceneView: View {
                         SettingsView(
                             model: model, pane: pane,
                             navigation: navigation,
-                            providerState: delegate.providerState
+                            providerState: delegate.providerState,
+                            updateChecker: delegate.updateChecker
                         )
                         .tabItem {
                             Label(pane.rawValue, systemImage: pane.symbol)

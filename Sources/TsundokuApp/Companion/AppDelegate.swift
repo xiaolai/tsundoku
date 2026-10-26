@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let hotKey = GlobalHotKey()
     let settingsNavigation = SettingsNavigation()
     let providerState: ProviderSettingsState
+    let updateChecker = UpdateController()
     let windowBridge = SceneWindowBridge()
 
     @Published private(set) var appModel: AppModel?
@@ -79,6 +80,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             TypographyGate.run()
             return
         }
+        if !arguments.contains("--no-update-check"),
+            !arguments.contains("--settings-fixture"),
+            !arguments.contains("--shell-only")
+        {
+            updateChecker.start()
+        }
         permissions.onLibraryAccessReady = { [weak self] in
             guard let self else { return }
             self.ensureAppModel().requestLibraryImport()
@@ -114,6 +121,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             self?.refreshStatusMenu()
         }
         companion.start()
+
+        // Update state is owned by its controller, not by AppDelegate's own
+        // published fields; forward it so the status menu refreshes.
+        updateChecker.objectWillChange
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.menuRevision += 1 }
+            }
+            .store(in: &cancellables)
 
         watcher.onSnapshot = { [weak self] snapshot in
             self?.companion.readerChanged(snapshot)

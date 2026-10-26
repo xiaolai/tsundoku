@@ -10,4 +10,6 @@ page, chapter, or book text you choose to an AI provider.
   capture and AI panel; the library and archive need neither.
 - No telemetry. Only the passage you choose leaves the Mac — the page, a
   captured chapter or book excerpt, or a selection with its surrounding page
-  context — and only on an explicit action.
+  context — and only on an explicit action. The update checker asks GitHub for
+  the latest release at most once a day unless disabled; that request carries
+  no library or reading data.

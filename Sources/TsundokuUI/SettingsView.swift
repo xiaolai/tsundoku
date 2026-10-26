@@ -17,10 +17,14 @@ public struct SettingsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var navigation: SettingsNavigation
     @ObservedObject var providerState: ProviderSettingsState
+    @ObservedObject var updateChecker: UpdateController
 
     public init(model: AppModel, pane: SettingsPane, navigation: SettingsNavigation,
-        providerState: ProviderSettingsState) {
-        self.model = model; self.pane = pane; self.navigation = navigation; self.providerState = providerState
+        providerState: ProviderSettingsState,
+        updateChecker: UpdateController) {
+        self.model = model; self.pane = pane; self.navigation = navigation
+        self.providerState = providerState
+        self.updateChecker = updateChecker
     }
 
     public var body: some View {
@@ -295,6 +299,31 @@ public struct SettingsView: View {
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                }
+                Section("Updates") {
+                    Toggle(
+                        "Check for Updates Automatically",
+                        isOn: $updateChecker.automaticallyChecks)
+                    LabeledContent("Status") {
+                        Text(updateChecker.statusText)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 8) {
+                        Button(
+                            updateChecker.isChecking ? "Checking…" : "Check Now"
+                        ) { updateChecker.check() }
+                        .disabled(updateChecker.isChecking)
+                        if updateChecker.availableRelease != nil {
+                            Button("View Release") {
+                                updateChecker.openReleasePage()
+                            }
+                        }
+                    }
+                    Text(
+                        "The check asks GitHub for the latest release and "
+                            + "sends no library or reading data.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
