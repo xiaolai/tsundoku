@@ -216,11 +216,6 @@ struct TsundokuCLI {
                 action: action, pageText: live.text,
                 bookTitle: live.title, question: question,
                 language: settings.language)
-            if live.text.count > AIComposer.passageLimit {
-                print(
-                    "note: the page is longer than 8,000 characters; the "
-                        + "answer covers its first part only.")
-            }
             do {
                 let answer = try await AIService.answer(
                     for: request, settings: settings)

@@ -46,34 +46,35 @@ public enum A4FitPlanner {
     public static let minimumPageSide: CGFloat = 120
     public static let ratio: CGFloat = CaptureCrop.a4Ratio
 
-    /// Plan one fit. The origin is kept; the height is bounded by the display
-    /// below that origin, and the width is reduced when the height cannot
-    /// produce an A4 page.
+    /// Plan one fit. The page keeps the current width when the usable display
+    /// area can hold it at A4 height; otherwise the page shrinks by the
+    /// limiting dimension. The window is moved the minimum distance needed to
+    /// stay inside that area, never to another display.
     public static func plan(
-        measurement: A4Measurement, display: CGRect
+        measurement: A4Measurement, area: PageFrame.DisplayArea
     ) -> A4FitResult {
         let window = measurement.window
         let insets = measurement.insets
-        guard !PageFrame.isFullScreen(window, displays: [display]) else {
+        guard !PageFrame.isFullScreen(
+            window, displays: [area.display])
+        else {
             return refused(
                 measurement: measurement,
                 reason: "full-screen capture is not supported; leave the "
                     + "menu bar visible and retry")
         }
+        let usable = area.usable
         let targetHeight = measurement.pageBox.width / ratio
-        let top = max(
-            window.minY, display.minY + PageSetupGeometry.menuBarHeight)
-        let maxPageHeight = display.maxY - top - insets.top - insets.bottom
+        let maxPageHeight =
+            usable.height - insets.top - insets.bottom
         let maxPageWidth =
-            display.maxX - max(window.minX, display.minX)
-            - insets.left - insets.right
+            usable.width - insets.left - insets.right
         guard maxPageHeight >= minimumPageSide,
             maxPageWidth >= minimumPageSide
         else {
             return refused(
                 measurement: measurement,
-                reason: "the display cannot fit a usable A4 page below the "
-                    + "current window origin")
+                reason: "the usable display area cannot fit an A4 page")
         }
         var pageHeight = min(targetHeight, maxPageHeight)
         var pageWidth = pageHeight * ratio
@@ -92,10 +93,12 @@ public enum A4FitPlanner {
         let size = PageSetupGeometry.windowSize(
             for: CGSize(width: pageWidth, height: pageHeight),
             insets: insets)
-        let frame = CGRect(origin: window.origin, size: size)
+        let frame = CGRect(
+            origin: PageSetupGeometry.clampedOrigin(
+                window.origin, size: size, in: usable),
+            size: size)
         let mode: A4FitMode =
             abs(pageWidth - measurement.pageBox.width) < 1
-                && abs(pageHeight - targetHeight) < 1
             ? .widthFit : .scaledToDisplay
         let pageBox = CGRect(
             x: frame.minX + insets.left, y: frame.minY + insets.top,
@@ -103,7 +106,8 @@ public enum A4FitPlanner {
         return A4FitResult(
             mode: mode, frame: frame, pageBox: pageBox, insets: insets,
             reason: mode == .scaledToDisplay
-                ? "the display could not keep the current width"
+                ? "the usable display area is too small for the current "
+                    + "page width at A4 height"
                 : nil)
     }
 
@@ -149,39 +153,40 @@ public struct A4FitService: Sendable {
     }
 
     public func fit(
-        display: CGRect, measure: Measure, apply: Apply,
-        settle: Settle
+        area: PageFrame.DisplayArea, measure: Measure,
+        apply: Apply, settle: Settle
     ) throws -> A4FitResult {
         var measurement = try measure()
         var last = A4FitPlanner.plan(
-            measurement: measurement, display: display)
+            measurement: measurement, area: area)
         guard last.mode != .refused else {
             throw A4FitError.refused(last.reason ?? "the fit was refused")
         }
         for _ in 0..<maximumAttempts {
-            if abs(measurement.window.width - last.frame.width) < 1,
-                abs(measurement.window.height - last.frame.height) < 1
+            if PageFrame.sameRect(
+                measurement.window, last.frame, tolerance: 1)
             {
                 return last
             }
-            let actual = try apply(last.frame)
+            _ = try apply(last.frame)
             try settle()
             measurement = try measure()
             let next = A4FitPlanner.plan(
-                measurement: measurement, display: display)
+                measurement: measurement, area: area)
             guard next.mode != .refused else {
                 throw A4FitError.refused(
                     next.reason ?? "the fit was refused after resizing")
             }
+            // The reader can clamp its own size. The next pass uses what it
+            // actually accepted; the final result is never the requested
+            // rectangle when the two disagree.
             last = next
-            if abs(actual.width - last.frame.width) > 3
-                || abs(actual.height - last.frame.height) > 3
-            {
-                // The reader can clamp its own size. The next pass uses what
-                // it actually accepted; the final result is never the
-                // requested rectangle when the two disagree.
-                continue
-            }
+        }
+        guard PageFrame.sameRect(
+            measurement.window, last.frame, tolerance: 2)
+        else {
+            throw A4FitError.windowNotAccepted(
+                expected: last.frame, actual: measurement.window)
         }
         if abs(
             measurement.pageBox.width / measurement.pageBox.height

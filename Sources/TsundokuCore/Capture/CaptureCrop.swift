@@ -11,17 +11,13 @@ public struct CaptureCrop: Sendable, Equatable, Codable {
         self.rect = rect
     }
 
-    public static let a4Ratio: CGFloat = 595.28 / 841.89
+    public static let a4Ratio =
+        CapturePageSize.a4Size.width / CapturePageSize.a4Size.height
 
     public var isUsable: Bool {
         rect.minX.isFinite && rect.minY.isFinite
             && rect.width.isFinite && rect.height.isFinite
             && rect.width > 1 && rect.height > 1
-    }
-
-    public func clipped(to window: CGRect) -> CaptureCrop {
-        let clipped = rect.intersection(window)
-        return CaptureCrop(rect: clipped.isNull ? .zero : clipped)
     }
 
     /// The crop in global screen points, for page identity and manifests.

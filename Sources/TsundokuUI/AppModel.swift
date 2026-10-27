@@ -182,8 +182,6 @@ public final class AppModel: ObservableObject {
     @Published public var capturePageSetup: PageSetupOutcome?
     @Published public var selectedBookOriginal: OriginalAvailability?
     @Published public var originalNote: String?
-    @Published public var popularHighlightsState: Bool?
-    @Published public var popularHighlightsNote: String?
     @Published public var capturePageLimit: Int? = 10
     @Published public var manualPreview: PagePreview?
     @Published public var manualCrop: CaptureCrop?
@@ -192,6 +190,14 @@ public final class AppModel: ObservableObject {
     @Published public var manualPreviewError: String?
     @Published public var manualFitMessage: String?
     @Published public var manualReadiness: CaptureReadiness?
+    @Published public private(set) var manualPreviewFollowing = false
+    private var manualPreviewFollowTask: Task<Void, Never>?
+    private var manualPreviewFollowingPaused = false
+    private var manualPreviewRefreshing = false
+    private var manualPreviewRefreshPending = false
+    private var manualPreviewGeneration = 0
+    private var manualPreviewRetryAt = Date.distantPast
+    private var manualPreviewImageProbeAt = Date.distantPast
     private var captureAccessDraft: CaptureAccessDraft?
     private let accessDefaults: UserDefaults
     @Published public var exportFolder: URL = FileManager.default.urls(
@@ -220,7 +226,6 @@ public final class AppModel: ObservableObject {
     private var activityGeneration = 0
     private var permissionCancellables: Set<AnyCancellable> = []
     private var cleanRecoveryRunning = false
-    private var popularHighlightsProbeRunning = false
 
     /// Set by the app shell. The companion owns the reading panel, so the
     /// library window asks it to open rather than creating a second panel.
@@ -320,8 +325,7 @@ public final class AppModel: ObservableObject {
     /// a journal behind. Restore it when Kindle is available; never block the
     /// launch on an Accessibility round trip.
     private func recoverSettingsIfNeeded() {
-        guard capturePhase != .running,
-            !cleanRecoveryRunning, !popularHighlightsProbeRunning,
+        guard capturePhase != .running, !cleanRecoveryRunning,
             KindleLive.isRunning()
         else { return }
         let setupPending = PageSetupJournal().load() != nil
@@ -607,10 +611,6 @@ public final class AppModel: ObservableObject {
 
     public var appleBooksBookCount: Int {
         books.lazy.filter { $0.isEbook && $0.source == .appleBooks }.count
-    }
-
-    public var selectedBookIsAppleBooks: Bool {
-        selectedBook?.source == .appleBooks
     }
 
     public var userAnnotationCount: Int {
@@ -951,34 +951,6 @@ public final class AppModel: ObservableObject {
         permissions.$snapshot.sink { [weak self] snapshot in
             self?.applyPermissions(snapshot)
         }.store(in: &permissionCancellables)
-    }
-
-    /// Read Kindle's Popular Highlights state for the Exports pane. It opens
-    /// and closes the Aa panel, so it is never run during a capture.
-    public func refreshPopularHighlights() {
-        guard capturePhase != .running, !cleanRecoveryRunning,
-            !popularHighlightsProbeRunning, KindleLive.isRunning(),
-            AXIsProcessTrusted()
-        else {
-            popularHighlightsState = nil
-            return
-        }
-        popularHighlightsProbeRunning = true
-        Task.detached { [weak self] in
-            let result = Result { try KindlePopularHighlights().state() }
-            await MainActor.run {
-                self?.popularHighlightsProbeRunning = false
-                switch result {
-                case .success(let on):
-                    self?.popularHighlightsState = on
-                    self?.popularHighlightsNote = nil
-                case .failure(let error):
-                    self?.popularHighlightsState = nil
-                    self?.popularHighlightsNote =
-                        "Popular Highlights: could not be read (\(error))."
-                }
-            }
-        }
     }
 
     public func refreshActivity() {
@@ -1346,62 +1318,182 @@ public final class AppModel: ObservableObject {
     }
 
     public func refreshManualPreview() {
-        guard capturePhase != .running else { return }
-        manualPreviewBusy = true
-        manualPreviewError = nil
-        Task {
-            let result = await Task.detached {
-                Result { try PagePreviewService().preview() }
-            }.value
-            self.manualPreviewBusy = false
-            switch result {
-            case .success(let preview):
-                self.manualPreview = preview
-                let window = CGRect(
-                    origin: .zero, size: preview.windowFrame.size)
-                self.manualCrop = self.manualCropLocksA4
-                    ? preview.crop.a4Locked(in: window)
-                    : preview.crop
-                self.manualFitMessage = nil
-                self.refreshManualReadiness()
-            case .failure(let error):
-                self.manualPreview = nil
-                self.manualCrop = nil
-                self.manualReadiness = nil
-                self.manualPreviewError = "\(error)"
+        requestManualPreview(showBusy: true)
+    }
+
+    /// Keep the preview on the page Kindle is showing while Exports is open.
+    /// The loop reads AX at a low cadence and captures only when the page
+    /// identity changes; image-only pages fall back to a one-second visual
+    /// probe because they expose no text or page number.
+    public func startManualPreviewFollow() {
+        guard manualPreviewFollowTask == nil, captureKind == .kindle else {
+            return
+        }
+        manualPreviewFollowingPaused = false
+        manualPreviewFollowing = true
+        manualPreviewFollowTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.manualPreviewFollowTick()
+                try? await Task.sleep(for: .milliseconds(400))
             }
         }
     }
 
-    public func refreshManualReadiness() {
-        guard let preview = manualPreview else {
-            manualReadiness = nil
+    public func stopManualPreviewFollow() {
+        manualPreviewFollowTask?.cancel()
+        manualPreviewFollowTask = nil
+        manualPreviewFollowing = false
+    }
+
+    public func setManualPreviewFollowPaused(_ paused: Bool) {
+        manualPreviewFollowingPaused = paused
+        if paused {
+            // A refresh already in flight must not replace the crop the
+            // editor is holding.
+            manualPreviewGeneration += 1
+            manualPreviewRefreshPending = false
+            manualPreviewBusy = false
+        } else {
+            manualPreviewRetryAt = .distantPast
+            startManualPreviewFollow()
+        }
+    }
+
+    private func clearManualPreview() {
+        manualPreviewGeneration += 1
+        manualPreviewRefreshPending = false
+        manualPreviewBusy = false
+        manualPreview = nil
+        manualCrop = nil
+        manualReadiness = nil
+    }
+
+    private func requestManualPreview(showBusy: Bool) {
+        guard capturePhase != .running else { return }
+        if manualPreviewRefreshing {
+            manualPreviewRefreshPending = true
+            if showBusy { manualPreviewBusy = true }
             return
         }
-        let live = try? KindleLive.currentPage()
-        let window = live?.windowFrame.map {
-            CGRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height)
+        manualPreviewRefreshing = true
+        manualPreviewRetryAt = .distantPast
+        if showBusy { manualPreviewBusy = true }
+        let generation = manualPreviewGeneration
+        let previousWindowSize = manualPreview?.windowFrame.size
+        let hadPrevious = manualPreview != nil
+        Task {
+            let result = await Task.detached {
+                Result {
+                    try PagePreviewService(
+                        allowTextBoundsFallback: true
+                    ).preview()
+                }
+            }.value
+            self.manualPreviewRefreshing = false
+            let pending = self.manualPreviewRefreshPending
+            self.manualPreviewRefreshPending = false
+            if !pending { self.manualPreviewBusy = false }
+            defer {
+                if pending {
+                    self.requestManualPreview(showBusy: self.manualPreviewBusy)
+                }
+            }
+            guard self.manualPreviewGeneration == generation else {
+                return
+            }
+            switch result {
+            case .success(let preview):
+                self.manualPreviewError = nil
+                self.manualPreview = preview
+                let window = CGRect(
+                    origin: .zero, size: preview.windowFrame.size)
+                let sameSize = previousWindowSize.map {
+                    PageFrame.sameSize(
+                        $0, preview.windowFrame.size, tolerance: 4)
+                } ?? false
+                let currentCrop = self.manualCrop
+                let locksA4 = self.manualCropLocksA4
+                if let currentCrop, sameSize, currentCrop.isUsable {
+                    self.manualCrop = locksA4
+                        ? currentCrop.a4Locked(in: window)
+                        : currentCrop
+                } else {
+                    self.manualCrop = locksA4
+                        ? preview.crop.a4Locked(in: window)
+                        : preview.crop
+                }
+                if showBusy { self.manualFitMessage = nil }
+                self.refreshManualReadiness(live: preview.live)
+            case .failure(let error):
+                if case PagePreviewError.pageChanged = error, hadPrevious {
+                    self.manualPreviewRetryAt =
+                        Date().addingTimeInterval(0.3)
+                    self.refreshManualReadiness()
+                    return
+                }
+                self.manualPreviewError = "\(error)"
+                self.manualPreviewRetryAt = Date().addingTimeInterval(1.5)
+                if self.manualPreview == nil {
+                    self.manualReadiness = nil
+                }
+            }
         }
+    }
+
+    private func manualPreviewFollowTick() async {
+        guard manualPreviewFollowing, !manualPreviewFollowingPaused,
+            capturePhase != .running, captureKind == .kindle,
+            permissionAccessibility, permissionScreen
+        else { return }
+        let live = await Task.detached {
+            try? KindleLive.currentPage()
+        }.value
+        guard !Task.isCancelled, manualPreviewFollowing,
+            !manualPreviewFollowingPaused, capturePhase != .running,
+            captureKind == .kindle
+        else { return }
+        guard let live else {
+            refreshManualReadiness(live: nil)
+            return
+        }
+        refreshManualReadiness(live: live)
+        guard live.isReading else { return }
+        let now = Date()
+        guard now >= manualPreviewRetryAt else { return }
+        guard !manualPreviewRefreshing else { return }
+        guard let preview = manualPreview else {
+            requestManualPreview(showBusy: false)
+            return
+        }
+        if PagePreviewFollower.needsRefresh(preview: preview, live: live) {
+            requestManualPreview(showBusy: false)
+            return
+        }
+        if PagePreviewFollower.needsImageProbe(live: live),
+            now.timeIntervalSince(manualPreviewImageProbeAt) >= 1
+        {
+            manualPreviewImageProbeAt = now
+            requestManualPreview(showBusy: false)
+        }
+    }
+
+    public func refreshManualReadiness() {
+        refreshManualReadiness(live: try? KindleLive.currentPage())
+    }
+
+    private func refreshManualReadiness(live: LivePage?) {
+        guard let preview = manualPreview else {
+            if manualReadiness != nil { manualReadiness = nil }
+            return
+        }
+        let window = PageFrame.rect(live?.windowFrame)
         let windowMatches: Bool = {
             guard let window else { return false }
-            return abs(window.width - preview.windowFrame.width) <= 4
-                && abs(window.height - preview.windowFrame.height) <= 4
+            return PageFrame.sameSize(
+                window.size, preview.windowFrame.size, tolerance: 4)
         }()
-        let bookMatches: Bool = {
-            guard let live else { return false }
-            if case .exact(let expected) = preview.identity.confidence,
-                let observed = live.bookID,
-                !expected.isEmpty, !observed.isEmpty
-            {
-                return expected == observed
-            }
-            if !preview.identity.title.isEmpty, !live.title.isEmpty {
-                return preview.identity.title.compare(
-                    live.title, options: [.caseInsensitive, .diacriticInsensitive]
-                ) == .orderedSame
-            }
-            return true
-        }()
+        let bookMatches = live.map { preview.identity.matches($0) } ?? false
         let pageMatches: Bool = {
             guard let live else { return false }
             if !preview.text.isEmpty || !live.text.isEmpty {
@@ -1417,21 +1509,21 @@ public final class AppModel: ObservableObject {
             FileManager.default.isWritableFile(atPath: folder.path)
             || FileManager.default.isWritableFile(
                 atPath: folder.deletingLastPathComponent().path)
-        let minimized = (try? KindleLive.isWindowMinimized()) ?? true
         let input = CaptureReadinessInput(
             hasAccessibility: permissionAccessibility,
             hasScreenRecording: permissionScreen,
             isRunning: KindleLive.isRunning(),
             isReading: live?.isReading == true,
-            isMinimized: minimized,
-            isMainWindow: (try? KindleLive.isWindowMain()) ?? false,
+            isMinimized: live?.isMinimized ?? true,
+            isMainWindow: live?.isMainWindow ?? false,
             bookMatches: bookMatches,
             windowMatches: windowMatches,
             pageMatches: pageMatches,
             outputWritable: outputWritable,
             captureBusy: capturePhase == .running,
             pageCountKnown: live?.pageCount != nil)
-        manualReadiness = CaptureReadinessChecker.check(input)
+        let next = CaptureReadinessChecker.check(input)
+        if manualReadiness != next { manualReadiness = next }
     }
 
     public func fitKindleWindowToA4() {
@@ -1441,25 +1533,25 @@ public final class AppModel: ObservableObject {
         manualPreviewBusy = true
         manualPreviewError = nil
         manualFitMessage = nil
+        let areas = PageFrame.displayAreas()
         Task {
             let result = await Task.detached {
                 Result { () -> A4FitResult in
-                    let displays = PageFrame.displayBounds()
-                    guard let first = displays.first else {
+                    guard let first = areas.first else {
                         throw A4FitError.refused(
                             "no active display was found")
                     }
                     let initial = try Self.measureKindleForA4()
-                    let display =
-                        displays.first {
-                            $0.contains(
+                    let area =
+                        areas.first {
+                            $0.display.contains(
                                 CGPoint(
                                     x: initial.window.midX,
                                     y: initial.window.midY))
                         } ?? first
                     let service = A4FitService()
                     return try service.fit(
-                        display: display,
+                        area: area,
                         measure: { try Self.measureKindleForA4() },
                         apply: { try KindleLive.setWindowFrame($0) },
                         settle: {
@@ -1471,12 +1563,14 @@ public final class AppModel: ObservableObject {
             switch result {
             case .success(let fit):
                 self.manualFitMessage =
-                    "Fit \(fit.mode.rawValue): page "
-                    + "\(Int(fit.pageBox.width))×\(Int(fit.pageBox.height)) pt"
+                    "Fit \(fit.mode.rawValue): window "
+                    + "\(Int(fit.frame.width))×\(Int(fit.frame.height)) pt, "
+                    + "page \(Int(fit.pageBox.width))×"
+                    + "\(Int(fit.pageBox.height)) pt"
                     + (fit.mode == .scaledToDisplay
-                        ? " · width was reduced to fit the display" : "")
-                self.manualPreview = nil
-                self.manualCrop = nil
+                        ? " · the usable display area limited the page size"
+                        : "")
+                self.clearManualPreview()
                 self.refreshManualPreview()
             case .failure(let error):
                 self.manualPreviewError = "\(error)"
@@ -1495,9 +1589,9 @@ public final class AppModel: ObservableObject {
             startCapture(pages: pages)
             return
         }
-        // The Kindle flow is always a finite next-N range. A stale All Pages
-        // selection from the Books lane falls back to the default.
-        let pages = pages ?? 10
+        // A nil limit keeps its "all pages" meaning: the manual session is
+        // forward-only, so it captures from the previewed page to the end
+        // without the rewind the automatic Kindle path would perform.
         guard let preview = manualPreview,
             let crop = manualCrop,
             crop.isUsable
@@ -1533,15 +1627,20 @@ public final class AppModel: ObservableObject {
                 ?? "The Kindle window is not ready for capture."
             return
         }
-        let expected = CGRect(
-            x: preview.windowFrame.minX, y: preview.windowFrame.minY,
-            width: preview.windowFrame.width,
-            height: preview.windowFrame.height)
+        let expected = preview.windowFrame
+        let mark: PageMark
+        do {
+            mark = try preview.mark(for: crop)
+        } catch {
+            capturePhase = .failed
+            captureMessage = "\(error)"
+            return
+        }
         beginCapture(
             pages: pages,
             manual: ManualCaptureConfiguration(
                 crop: crop, expectedWindow: expected,
-                expectedMark: preview.mark(for: crop) ?? preview.mark,
+                expectedMark: mark,
                 expectedPageNumber: preview.pageNumber))
     }
 
@@ -1557,12 +1656,12 @@ public final class AppModel: ObservableObject {
             requestCaptureAccess(pages: pages)
             return
         }
-        // The probe and the crash recovery both open Kindle's settings panel;
-        // a capture must not start on top of either.
-        guard !popularHighlightsProbeRunning, !cleanRecoveryRunning else {
+        // Crash recovery opens Kindle's settings panel; a capture must not
+        // start on top of it.
+        guard !cleanRecoveryRunning else {
             capturePhase = .failed
             captureMessage =
-                "Tsundoku is reading Kindle's settings. Try again in a moment."
+                "Tsundoku is restoring Kindle's settings. Try again in a moment."
             return
         }
         let kind = captureKind
@@ -1572,6 +1671,11 @@ public final class AppModel: ObservableObject {
         let title = book?.title ?? livePage?.title ?? "Book"
         let folder = exportFolder.appendingPathComponent(
             "\(slug(title))-\(timestamp())")
+        if manual != nil {
+            // The capture owns the reviewed crop and mark now; the full
+            // window image is no longer needed.
+            clearManualPreview()
+        }
         capturePhase = .running
         captureProgress = 0
         capturePageLimit = pages
@@ -1630,30 +1734,15 @@ public final class AppModel: ObservableObject {
         -> A4Measurement
     {
         let live = try KindleLive.currentPage()
-        guard live.isReading, let frame = live.windowFrame else {
-            throw A4FitError.refused(
-                "Kindle is not showing a reading page")
+        do {
+            let geometry = try PageGeometry.measure(
+                live, allowTextBoundsFallback: true)
+            return A4Measurement(
+                window: geometry.window, pageBox: geometry.pageBox,
+                insets: geometry.calibration.insets)
+        } catch {
+            throw A4FitError.refused("\(error)")
         }
-        let window = CGRect(
-            x: frame.x, y: frame.y,
-            width: frame.width, height: frame.height)
-        let text = live.pageTextFrame.map {
-            CGRect(
-                x: $0.x, y: $0.y,
-                width: $0.width, height: $0.height)
-        }
-        let calibration = PageFrame.resolve(
-            window: window, text: live.text.count < 20 ? nil : text,
-            chrome: live.chromeInsets)
-        guard calibration.status != .refused else {
-            throw A4FitError.refused(
-                calibration.reason ?? "the page box was refused")
-        }
-        return A4Measurement(
-            window: window,
-            pageBox: PageFrame.pageRect(
-                window: window, insets: calibration.insets),
-            insets: calibration.insets)
     }
 
     private static func captureMessage(_ progress: CaptureProgress) -> String {

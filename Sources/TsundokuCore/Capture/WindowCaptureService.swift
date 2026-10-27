@@ -10,21 +10,13 @@ public struct CapturedWindow: Sendable {
     public let windowFrame: CGRect
     /// The captured content without the window frame or shadow.
     public let contentRect: CGRect
-    /// The screenshot's pixels per logical point, measured from the result.
-    public let pointPixelScale: CGFloat
-    public let isOnScreen: Bool
-    public let windowID: CGWindowID
 
     public init(
-        image: CGImage, windowFrame: CGRect, contentRect: CGRect,
-        pointPixelScale: CGFloat, isOnScreen: Bool, windowID: CGWindowID
+        image: CGImage, windowFrame: CGRect, contentRect: CGRect
     ) {
         self.image = image
         self.windowFrame = windowFrame
         self.contentRect = contentRect
-        self.pointPixelScale = pointPixelScale
-        self.isOnScreen = isOnScreen
-        self.windowID = windowID
     }
 }
 
@@ -61,17 +53,14 @@ public struct ShareableWindow: Sendable, Equatable {
     public let frame: CGRect
     public let title: String?
     public let layer: Int
-    public let isOnScreen: Bool
 
     public init(
-        windowID: CGWindowID, frame: CGRect, title: String?, layer: Int,
-        isOnScreen: Bool
+        windowID: CGWindowID, frame: CGRect, title: String?, layer: Int
     ) {
         self.windowID = windowID
         self.frame = frame
         self.title = title
         self.layer = layer
-        self.isOnScreen = isOnScreen
     }
 }
 
@@ -156,10 +145,7 @@ public struct WindowCaptureService: WindowCapturing, Sendable {
                         CapturedWindow(
                             image: image,
                             windowFrame: window.frame,
-                            contentRect: contentRect,
-                            pointPixelScale: actualScale,
-                            isOnScreen: window.isOnScreen,
-                            windowID: window.windowID)))
+                            contentRect: contentRect)))
             } catch {
                 box.set(.failure(error))
             }
@@ -197,10 +183,7 @@ public struct WindowCaptureService: WindowCapturing, Sendable {
         guard !candidates.isEmpty else { throw WindowCaptureError.noWindow }
         if let expectedFrame {
             let matches = candidates.filter {
-                abs($0.frame.minX - expectedFrame.minX) <= 4
-                    && abs($0.frame.minY - expectedFrame.minY) <= 4
-                    && abs($0.frame.width - expectedFrame.width) <= 4
-                    && abs($0.frame.height - expectedFrame.height) <= 4
+                PageFrame.sameRect($0.frame, expectedFrame, tolerance: 4)
             }
             if matches.count == 1 { return matches[0] }
             if matches.isEmpty { throw WindowCaptureError.noWindow }
@@ -222,8 +205,7 @@ public struct WindowCaptureService: WindowCapturing, Sendable {
     private static func summary(_ window: SCWindow) -> ShareableWindow {
         ShareableWindow(
             windowID: window.windowID, frame: window.frame,
-            title: window.title, layer: window.windowLayer,
-            isOnScreen: window.isOnScreen)
+            title: window.title, layer: window.windowLayer)
     }
 }
 

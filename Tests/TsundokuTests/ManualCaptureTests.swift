@@ -30,7 +30,8 @@ private func livePage(
     frame: CGRect = CGRect(x: 100, y: 50, width: 400, height: 600),
     textRect: CGRect = CGRect(x: 152, y: 104, width: 296, height: 492),
     page: Int? = 4, pages: Int? = 20, bookID: String? = "B000000001",
-    endOfBook: Bool = false, state: String = "readingChromeHidden"
+    endOfBook: Bool = false, state: String = "readingChromeHidden",
+    chrome: CaptureInsets? = nil
 ) -> LivePage {
     LivePage(
         state: state, text: text, title: title,
@@ -42,7 +43,7 @@ private func livePage(
             x: textRect.minX, y: textRect.minY,
             width: textRect.width, height: textRect.height),
         endOfBook: endOfBook, pageNumber: page, pageCount: pages,
-        bookID: bookID)
+        bookID: bookID, chromeInsets: chrome)
 }
 
 private final class FakeWindowCapture: WindowCapturing, @unchecked Sendable {
@@ -67,11 +68,11 @@ struct ManualCaptureGeometryTests {
     func selectsMainWindow() throws {
         let helper = ShareableWindow(
             windowID: 1, frame: CGRect(x: 0, y: 0, width: 1920, height: 30),
-            title: nil, layer: 0, isOnScreen: false)
+            title: nil, layer: 0)
         let main = ShareableWindow(
             windowID: 2,
             frame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            title: "Kindle", layer: 0, isOnScreen: true)
+            title: "Kindle", layer: 0)
         let chosen = try WindowCaptureService.selectWindow(
             [helper, main], expectedFrame: nil)
         #expect(chosen.windowID == 2)
@@ -82,11 +83,11 @@ struct ManualCaptureGeometryTests {
         let main = ShareableWindow(
             windowID: 2,
             frame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            title: "Kindle", layer: 0, isOnScreen: true)
+            title: "Kindle", layer: 0)
         let other = ShareableWindow(
             windowID: 3,
             frame: CGRect(x: 800, y: 50, width: 400, height: 600),
-            title: "Kindle", layer: 0, isOnScreen: true)
+            title: "Kindle", layer: 0)
         let chosen = try WindowCaptureService.selectWindow(
             [main, other],
             expectedFrame: CGRect(x: 800, y: 50, width: 400, height: 600))
@@ -98,7 +99,7 @@ struct ManualCaptureGeometryTests {
         let main = ShareableWindow(
             windowID: 2,
             frame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            title: "Kindle", layer: 0, isOnScreen: true)
+            title: "Kindle", layer: 0)
         #expect(throws: WindowCaptureError.self) {
             try WindowCaptureService.selectWindow(
                 [main],
@@ -112,11 +113,11 @@ struct ManualCaptureGeometryTests {
         let one = ShareableWindow(
             windowID: 2,
             frame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            title: "Kindle", layer: 0, isOnScreen: true)
+            title: "Kindle", layer: 0)
         let two = ShareableWindow(
             windowID: 3,
             frame: CGRect(x: 800, y: 50, width: 400, height: 600),
-            title: "Kindle", layer: 0, isOnScreen: true)
+            title: "Kindle", layer: 0)
         #expect(throws: WindowCaptureError.self) {
             try WindowCaptureService.selectWindow(
                 [one, two], expectedFrame: nil)
@@ -164,12 +165,82 @@ struct ManualCaptureGeometryTests {
                 imageSize: CGSize(width: 400, height: 600))
         }
     }
+
+    @Test("a chrome/text conflict suggests the text bounds, not refusal")
+    func chromeConflictFallsBack() throws {
+        let live = livePage(
+            text: String(repeating: "A", count: 40),
+            chrome: CaptureInsets(top: 0, bottom: 0, left: 70, right: 0))
+        #expect(throws: PageGeometryError.self) {
+            try PageGeometry.measure(live)
+        }
+        let geometry = try PageGeometry.measure(
+            live, allowTextBoundsFallback: true)
+        #expect(geometry.calibration.status == .derived)
+        #expect(geometry.pageBoxNote != nil)
+        #expect(
+            PageFrame.sameRect(
+                geometry.pageBox,
+                CGRect(x: 152, y: 104, width: 296, height: 492),
+                tolerance: 1))
+    }
+}
+
+private final class FitBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: A4Measurement
+    private var frames: [CGRect] = []
+    private let insets: CaptureInsets
+
+    init(_ value: A4Measurement, insets: CaptureInsets) {
+        self.value = value
+        self.insets = insets
+    }
+
+    func measurement() -> A4Measurement {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func apply(_ frame: CGRect) -> CGRect {
+        lock.lock()
+        defer { lock.unlock() }
+        frames.append(frame)
+        value = A4Measurement(
+            window: frame,
+            pageBox: CGRect(
+                x: frame.minX + insets.left, y: frame.minY + insets.top,
+                width: frame.width - insets.left - insets.right,
+                height: frame.height - insets.top - insets.bottom),
+            insets: insets)
+        return frame
+    }
+
+    var applied: [CGRect] {
+        lock.lock()
+        defer { lock.unlock() }
+        return frames
+    }
 }
 
 @Suite("A4 fit planning")
 struct A4FitTests {
     private let insets = CaptureInsets(
         top: 54, bottom: 54, left: 52, right: 52)
+
+    private func area(
+        _ display: CGRect, usable: CGRect? = nil
+    ) -> PageFrame.DisplayArea {
+        PageFrame.DisplayArea(
+            display: display,
+            usable: usable
+                ?? CGRect(
+                    x: display.minX, y: display.minY + 25,
+                    width: display.width, height: display.height - 25))
+    }
+
+    private let display = CGRect(x: 0, y: 0, width: 1920, height: 1080)
 
     @Test("a display with room keeps the width and produces A4")
     func widthFit() {
@@ -178,48 +249,88 @@ struct A4FitTests {
             pageBox: CGRect(x: 152, y: 154, width: 296, height: 492),
             insets: insets)
         let result = A4FitPlanner.plan(
-            measurement: measurement,
-            display: CGRect(x: 0, y: 0, width: 1920, height: 1080))
+            measurement: measurement, area: area(display))
         #expect(result.mode == .widthFit)
         #expect(abs(result.pageRatio - CaptureCrop.a4Ratio) < 0.002)
         #expect(abs(result.pageBox.width - measurement.pageBox.width) < 1)
     }
 
-    @Test("a height-limited display reduces the width and says so")
-    func scaledToDisplay() {
+    @Test("a low window moves up before the page is reduced")
+    func movesUpBeforeScaling() {
         let measurement = A4Measurement(
             window: CGRect(x: 100, y: 600, width: 500, height: 700),
             pageBox: CGRect(x: 152, y: 654, width: 296, height: 450),
             insets: insets)
+        let usable = CGRect(x: 0, y: 25, width: 1920, height: 1055)
         let result = A4FitPlanner.plan(
             measurement: measurement,
-            display: CGRect(x: 0, y: 0, width: 1920, height: 1080))
+            area: area(display, usable: usable))
+        #expect(result.mode == .widthFit)
+        #expect(abs(result.pageBox.width - 296) < 1)
+        #expect(result.frame.minY < measurement.window.minY)
+        #expect(result.frame.maxY <= usable.maxY)
+    }
+
+    @Test("a fit that only moves the window is still applied")
+    func appliesMoveOnlyFit() throws {
+        let height = 296 / A4FitPlanner.ratio + insets.top + insets.bottom
+        let initial = A4Measurement(
+            window: CGRect(x: 100, y: 600, width: 400, height: height),
+            pageBox: CGRect(
+                x: 152, y: 654, width: 296,
+                height: height - insets.top - insets.bottom),
+            insets: insets)
+        let box = FitBox(initial, insets: insets)
+        let usable = CGRect(x: 0, y: 25, width: 1920, height: 1055)
+        let result = try A4FitService().fit(
+            area: area(display, usable: usable),
+            measure: { box.measurement() },
+            apply: { box.apply($0) }, settle: {})
+        #expect(box.applied.count == 1)
+        #expect(result.mode == .widthFit)
+        #expect(
+            PageFrame.sameRect(
+                box.applied.first ?? .zero, result.frame, tolerance: 1))
+        #expect(result.frame.minY < initial.window.minY)
+    }
+
+    @Test("a short usable area reduces the width and says so")
+    func scaledToDisplay() {
+        let measurement = A4Measurement(
+            window: CGRect(x: 100, y: 100, width: 500, height: 700),
+            pageBox: CGRect(x: 152, y: 154, width: 296, height: 450),
+            insets: insets)
+        let short = CGRect(x: 0, y: 0, width: 1920, height: 400)
+        let usable = CGRect(x: 0, y: 25, width: 1920, height: 375)
+        let result = A4FitPlanner.plan(
+            measurement: measurement,
+            area: area(short, usable: usable))
         #expect(result.mode == .scaledToDisplay)
         #expect(abs(result.pageRatio - CaptureCrop.a4Ratio) < 0.002)
         #expect(result.frame.width < measurement.window.width)
+        #expect(result.frame.maxY <= usable.maxY)
     }
 
     @Test("a full-screen window is refused")
     func refusesFullScreen() {
-        let display = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let measurement = A4Measurement(
             window: display,
             pageBox: CGRect(x: 52, y: 54, width: 1816, height: 972),
             insets: insets)
         let result = A4FitPlanner.plan(
-            measurement: measurement, display: display)
+            measurement: measurement, area: area(display))
         #expect(result.mode == .refused)
     }
 
-    @Test("a display with no room refuses instead of leaving a non-A4 box")
+    @Test("a display too small for the minimum page refuses")
     func refuses() {
         let measurement = A4Measurement(
-            window: CGRect(x: 100, y: 900, width: 500, height: 700),
-            pageBox: CGRect(x: 152, y: 954, width: 296, height: 450),
+            window: CGRect(x: 100, y: 100, width: 200, height: 200),
+            pageBox: CGRect(x: 152, y: 154, width: 96, height: 92),
             insets: insets)
         let result = A4FitPlanner.plan(
             measurement: measurement,
-            display: CGRect(x: 0, y: 0, width: 1920, height: 1080))
+            area: area(CGRect(x: 0, y: 0, width: 300, height: 300)))
         #expect(result.mode == .refused)
     }
 }
@@ -230,8 +341,7 @@ struct PagePreviewTests {
         CapturedWindow(
             image: try manualImage(width: 400, height: 600),
             windowFrame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600),
-            pointPixelScale: 1, isOnScreen: true, windowID: 7)
+            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600))
     }
 
     @Test("the preview uses the measured page box without turning a page")
@@ -248,7 +358,7 @@ struct PagePreviewTests {
         #expect(preview.pageBox.height == 492)
         #expect(preview.crop.rect.minX == 52)
         #expect(preview.crop.rect.minY == 54)
-        #expect(preview.mark(for: preview.crop) == preview.mark)
+        #expect(try preview.mark(for: preview.crop).text == preview.text)
     }
 
     @Test("a page change during capture is refused")
@@ -262,6 +372,46 @@ struct PagePreviewTests {
         #expect(throws: PagePreviewError.self) {
             try service.preview()
         }
+    }
+
+    @Test("the follower refreshes on content, page, or resize, not a move")
+    func followerDetectsStalePreview() throws {
+        let captured = try capturedWindow()
+        let fake = FakeWindowCapture(captured: captured)
+        let read = LiveRead()
+        let preview = try PagePreviewService(
+            capture: fake, read: { read.next() }).preview()
+        #expect(!PagePreviewFollower.needsRefresh(
+            preview: preview, live: livePage()))
+        #expect(PagePreviewFollower.needsRefresh(
+            preview: preview, live: livePage(text: "Next page.")))
+        #expect(PagePreviewFollower.needsRefresh(
+            preview: preview, live: livePage(page: 5)))
+        #expect(PagePreviewFollower.needsRefresh(
+            preview: preview, live: livePage(bookID: "B000000002")))
+        #expect(!PagePreviewFollower.needsRefresh(
+            preview: preview,
+            live: livePage(
+                frame: CGRect(x: 500, y: 50, width: 400, height: 600))))
+        #expect(PagePreviewFollower.needsRefresh(
+            preview: preview,
+            live: livePage(
+                frame: CGRect(x: 100, y: 50, width: 500, height: 600))))
+        #expect(PagePreviewFollower.needsImageProbe(
+            live: livePage(text: "", page: nil, pages: nil)))
+        #expect(!PagePreviewFollower.needsImageProbe(live: livePage()))
+    }
+
+    @Test("a preview refreshes when Kindle reveals its page number late")
+    func latePageNumberRefreshes() throws {
+        let captured = try capturedWindow()
+        let fake = FakeWindowCapture(captured: captured)
+        let read = LiveRead()
+        read.page = livePage(text: "", page: nil, pages: nil)
+        let preview = try PagePreviewService(
+            capture: fake, read: { read.next() }).preview()
+        #expect(PagePreviewFollower.needsRefresh(
+            preview: preview, live: livePage(page: 5)))
     }
 }
 
@@ -359,8 +509,7 @@ struct ManualKindleSessionTests {
         let window = CapturedWindow(
             image: image,
             windowFrame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600),
-            pointPixelScale: 1, isOnScreen: true, windowID: 9)
+            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600))
         let pages = Pages([livePage(text: "First page.")])
         let clock = Clock()
         let subject = session(
@@ -379,8 +528,7 @@ struct ManualKindleSessionTests {
         let window = CapturedWindow(
             image: image,
             windowFrame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600),
-            pointPixelScale: 1, isOnScreen: true, windowID: 9)
+            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600))
         let pages = Pages([livePage(text: "", endOfBook: false)])
         let clock = Clock()
         let subject = session(
@@ -397,8 +545,7 @@ struct ManualKindleSessionTests {
         let window = CapturedWindow(
             image: image,
             windowFrame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600),
-            pointPixelScale: 1, isOnScreen: true, windowID: 9)
+            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600))
         let pages = Pages([
             livePage(text: "First page.", page: 4),
             livePage(
@@ -426,8 +573,7 @@ struct ManualKindleSessionTests {
         let window = CapturedWindow(
             image: image,
             windowFrame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600),
-            pointPixelScale: 1, isOnScreen: true, windowID: 9)
+            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600))
         let pages = Pages([livePage()])
         let clock = Clock()
         let subject = session(
@@ -442,8 +588,7 @@ struct ManualKindleSessionTests {
         let window = CapturedWindow(
             image: image,
             windowFrame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600),
-            pointPixelScale: 1, isOnScreen: true, windowID: 9)
+            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600))
         let pages = Pages([
             livePage(text: "First page.", page: 4),
             livePage(text: "Second page.", page: 5),
@@ -472,8 +617,7 @@ struct ManualKindleSessionTests {
         let window = CapturedWindow(
             image: image,
             windowFrame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600),
-            pointPixelScale: 1, isOnScreen: true, windowID: 9)
+            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600))
         let pages = Pages([
             livePage(text: "Last page.", page: 4),
             livePage(
@@ -499,8 +643,7 @@ struct ManualKindleSessionTests {
         let window = CapturedWindow(
             image: image,
             windowFrame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600),
-            pointPixelScale: 1, isOnScreen: true, windowID: 9)
+            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600))
         let pages = Pages([livePage()])
         let clock = Clock()
         let subject = ManualKindleCaptureSession(
@@ -526,8 +669,7 @@ struct ManualKindleSessionTests {
         let window = CapturedWindow(
             image: image,
             windowFrame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600),
-            pointPixelScale: 1, isOnScreen: true, windowID: 9)
+            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600))
         let pages = Pages([livePage()])
         let clock = Clock()
         let subject = session(
@@ -564,8 +706,7 @@ struct QuickPageCaptureTests {
         let window = CapturedWindow(
             image: image,
             windowFrame: CGRect(x: 100, y: 50, width: 400, height: 600),
-            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600),
-            pointPixelScale: 1, isOnScreen: true, windowID: 9)
+            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600))
         let fake = FakeWindowCapture(captured: window)
         let read = LiveRead()
         let preview = PagePreviewService(

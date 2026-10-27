@@ -18,6 +18,8 @@ public struct LivePage: Sendable, Equatable {
     /// what keeps a conversation filed under the right book.
     public let bookID: String?
     public let chromeInsets: CaptureInsets?
+    public let isMinimized: Bool?
+    public let isMainWindow: Bool?
     public let observedAt: Date
 
     public var isReading: Bool { state == "readingChromeHidden" }
@@ -34,6 +36,8 @@ public struct LivePage: Sendable, Equatable {
         pageCount: Int?,
         bookID: String? = nil,
         chromeInsets: CaptureInsets? = nil,
+        isMinimized: Bool? = nil,
+        isMainWindow: Bool? = nil,
         observedAt: Date = Date()
     ) {
         self.state = state
@@ -47,7 +51,79 @@ public struct LivePage: Sendable, Equatable {
         self.pageCount = pageCount
         self.bookID = bookID
         self.chromeInsets = chromeInsets
+        self.isMinimized = isMinimized
+        self.isMainWindow = isMainWindow
         self.observedAt = observedAt
+    }
+}
+
+public extension ObservedIdentity {
+    /// Build the identity from one live page. The book id is exact evidence;
+    /// a title is weaker; an empty page is unknown.
+    init(page: LivePage) {
+        let title = page.title.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        if let bookID = page.bookID, !bookID.isEmpty {
+            self.init(title: title, confidence: .exact(bookID))
+        } else {
+            self.init(
+                title: title,
+                confidence: title.isEmpty ? .unknown : .titleOnly(title))
+        }
+    }
+}
+
+public extension ObservedIdentity {
+    /// Whether this identity still describes the live page. An exact book id
+    /// is authoritative when Kindle exposes it; otherwise both titles must
+    /// agree when both are available.
+    func matches(_ page: LivePage) -> Bool {
+        if case .exact(let expected) = confidence,
+            let observed = page.bookID, !observed.isEmpty
+        {
+            return expected == observed
+        }
+        guard !title.isEmpty, !page.title.isEmpty else { return true }
+        return title.compare(
+            page.title,
+            options: [.caseInsensitive, .diacriticInsensitive]
+        ) == .orderedSame
+    }
+}
+
+public extension LivePage {
+    /// Kindle fills page numbers late. A nil→value transition is not a page
+    /// change; two known values must agree.
+    static func sameWhenKnown<T: Equatable>(_ left: T?, _ right: T?) -> Bool {
+        left == nil || right == nil || left == right
+    }
+
+    /// The content contract shared by preview and manual capture. It compares
+    /// the fields that prove the text and image belong to the same page.
+    func sameContent(as other: LivePage) -> Bool {
+        isReading && other.isReading
+            && text == other.text
+            && windowFrame == other.windowFrame
+            && sameBook(as: other)
+            && endOfBook == other.endOfBook
+            && Self.sameWhenKnown(pageNumber, other.pageNumber)
+            && Self.sameWhenKnown(pageCount, other.pageCount)
+    }
+
+    /// A book id is exact evidence; when either side lacks one, the titles
+    /// are the only evidence available. Two unidentified pages remain
+    /// compatible, as they were before this check.
+    func sameBook(as other: LivePage) -> Bool {
+        if let mine = bookID, !mine.isEmpty,
+            let theirs = other.bookID, !theirs.isEmpty
+        {
+            return mine.caseInsensitiveCompare(theirs) == .orderedSame
+        }
+        guard !title.isEmpty, !other.title.isEmpty else { return true }
+        return title.compare(
+            other.title,
+            options: [.caseInsensitive, .diacriticInsensitive]
+        ) == .orderedSame
     }
 }
 
@@ -296,6 +372,9 @@ public enum KindleLive {
                 bookIDBefore == bookIDAfter ? bookIDAfter : nil
             let frame = try? recorder.source.frame(window)
             let number = pageNumber(tree)
+            let minimized = try? boolAttribute(
+                window, kAXMinimizedAttribute)
+            let isMain = try? boolAttribute(window, kAXMainAttribute)
             var chrome: CaptureInsets?
             if let frame {
                 let windowRect = CGRect(
@@ -320,7 +399,9 @@ public enum KindleLive {
                 pageNumber: number?.current,
                 pageCount: number?.total,
                 bookID: bookID,
-                chromeInsets: chrome)
+                chromeInsets: chrome,
+                isMinimized: minimized,
+                isMainWindow: isMain)
         } catch let error as KindleLiveError {
             throw error
         } catch {

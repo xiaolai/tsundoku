@@ -65,9 +65,11 @@ public struct CaptureJobEngine: Sendable {
 
         // A whole-book capture starts at the book's first page, never at
         // whatever page happened to be open. A reader that cannot return
-        // reports it and the capture says so in its manifest.
+        // reports it and the capture says so in its manifest. A manual
+        // Kindle session is forward-only: "all pages" means every page from
+        // the previewed page to the end, so there is nothing to rewind.
         var rewind: RewindReport?
-        if pageLimit == nil {
+        if pageLimit == nil, !session.isManualCapture {
             do {
                 rewind = try session.rewindToStart()
             } catch {
@@ -177,7 +179,11 @@ public struct CaptureJobEngine: Sendable {
             : 1
         var restored: RestoreReport?
         let pageClock = PageClock()
-        var totalPages = pageLimit ?? snapshot.location?.pageCount
+        var totalPages =
+            pageLimit
+            ?? Self.remainingPages(
+                pageCount: snapshot.pageCount,
+                pageNumber: snapshot.pageNumber)
 
         do {
             var index = 0
@@ -214,7 +220,17 @@ public struct CaptureJobEngine: Sendable {
                 ]
                 try store.writeManifest(running)
                 index += 1
-                if totalPages == nil { totalPages = current.pageCount }
+                if totalPages == nil,
+                    let remaining = Self.remainingPages(
+                        pageCount: current.pageCount,
+                        pageNumber: current.pageNumber)
+                {
+                    // The run already captured `index - 1` frames before this
+                    // page number became known.
+                    totalPages =
+                        current.pageNumber == nil
+                        ? remaining : index - 1 + remaining
+                }
                 let elapsed = pageClock.elapsed()
                 let average = elapsed / Double(index)
                 let remaining = totalPages.map {
@@ -683,6 +699,17 @@ public struct CaptureJobEngine: Sendable {
         left.compare(
             right, options: [.caseInsensitive, .diacriticInsensitive]
         ) == .orderedSame
+    }
+
+    /// The pages left from the current one, for a run without a page limit.
+    /// The engine counts captured frames, so a run that starts mid-book has
+    /// fewer pages to report than the book's total.
+    private static func remainingPages(
+        pageCount: Int?, pageNumber: Int?
+    ) -> Int? {
+        guard let count = pageCount else { return nil }
+        guard let number = pageNumber else { return count }
+        return max(1, count - number + 1)
     }
 
     private static func confidence(_ value: IdentityConfidence) -> String {

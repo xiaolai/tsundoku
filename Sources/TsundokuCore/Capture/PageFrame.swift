@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import KindleAX
@@ -194,6 +195,39 @@ public enum PageFrame {
         }
     }
 
+    public struct DisplayArea: Sendable, Equatable {
+        /// The full display, used for full-screen detection.
+        public let display: CGRect
+        /// The screen's visible frame in the same top-left space as AX
+        /// windows: menu bar and Dock excluded.
+        public let usable: CGRect
+
+        public init(display: CGRect, usable: CGRect) {
+            self.display = display
+            self.usable = usable
+        }
+    }
+
+    /// Active displays with their usable areas, converted from AppKit's
+    /// bottom-left screens to the top-left global space AX reports.
+    @MainActor
+    public static func displayAreas() -> [DisplayArea] {
+        let screens = NSScreen.screens
+        guard let primaryTop = screens.first?.frame.maxY else { return [] }
+        return screens.map { screen in
+            let full = CGRect(
+                x: screen.frame.minX,
+                y: primaryTop - screen.frame.maxY,
+                width: screen.frame.width,
+                height: screen.frame.height)
+            let visible = screen.visibleFrame
+            let usable = CGRect(
+                x: visible.minX, y: primaryTop - visible.maxY,
+                width: visible.width, height: visible.height)
+            return DisplayArea(display: full, usable: usable)
+        }
+    }
+
     /// Bounds in the top-left-origin global space AX reports frames in.
     public static func displayBounds() -> [CGRect] {
         var count: UInt32 = 0
@@ -267,7 +301,7 @@ public enum PageFrame {
             window: window, text: text, chrome: chrome, constants: constants)
     }
 
-    private static func rect(_ frame: AXNode.Frame?) -> CGRect? {
+    public static func rect(_ frame: AXNode.Frame?) -> CGRect? {
         guard let frame, frame.width > 0, frame.height > 0,
             frame.x.isFinite, frame.y.isFinite,
             frame.width.isFinite, frame.height.isFinite
@@ -276,12 +310,21 @@ public enum PageFrame {
             x: frame.x, y: frame.y, width: frame.width, height: frame.height)
     }
 
-    private static func sameRect(
-        _ one: CGRect, _ other: CGRect, tolerance: Double
+    public static func sameRect(
+        _ one: CGRect, _ other: CGRect,
+        tolerance: Double = windowDriftTolerance
     ) -> Bool {
         abs(one.minX - other.minX) <= tolerance
             && abs(one.minY - other.minY) <= tolerance
             && abs(one.width - other.width) <= tolerance
+            && abs(one.height - other.height) <= tolerance
+    }
+
+    public static func sameSize(
+        _ one: CGSize, _ other: CGSize,
+        tolerance: Double = windowDriftTolerance
+    ) -> Bool {
+        abs(one.width - other.width) <= tolerance
             && abs(one.height - other.height) <= tolerance
     }
 

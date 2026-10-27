@@ -357,21 +357,22 @@ struct TsundokuCoreTests {
         #expect(!prompt.contains("<conversation>"))
     }
 
-    @Test("only the last three exchanges are carried and answers are bounded")
-    func conversationIsBounded() throws {
+    @Test("the whole conversation is carried without cutting answers")
+    func conversationIsComplete() throws {
         let history = (1...5).map {
             AIExchange(question: "Q\($0)", answer: "A\($0)")
         }
         let block = try #require(AIComposer.conversationBlock(history))
-        #expect(block.contains("Q5"))
-        #expect(block.contains("Q3"))
-        #expect(!block.contains("Q2"))
+        for index in 1...5 {
+            #expect(block.contains("Q\(index)"))
+            #expect(block.contains("A\(index)"))
+        }
+        let answer = String(repeating: "a", count: 2_000)
         let long = try #require(
             AIComposer.conversationBlock([
-                AIExchange(
-                    question: "Q", answer: String(repeating: "a", count: 2_000))
+                AIExchange(question: "Q", answer: answer)
             ]))
-        #expect(long.count < 1_200)
+        #expect(long.contains(answer))
     }
 
     @Test("a turn's exchange names the page it came from")

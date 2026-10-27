@@ -229,7 +229,8 @@ public enum AIService {
             configuration: HTTPProvider.Configuration(
                 endpoint: url, model: model,
                 apiKey: httpKey(profileID: profile.id),
-                auth: profile.auth, tokenField: profile.tokenField))
+                auth: profile.auth, tokenField: profile.tokenField,
+                answerTokens: max(1, settings.answerTokens)))
     }
 
     // MARK: - CLIs
@@ -303,7 +304,7 @@ public enum AIService {
         // sayso creates and checks the app's own home before it probes the
         // sign-in (v0.5.1); a missing binary and a missing home are its
         // `.notInstalled` and `.notSignedIn`, not the app's to pre-detect.
-        try CodexCLIProvider(
+        CodexCLIProvider(
             configuration: CodexCLIProvider.Configuration(
                 codexHome: codexHome(),
                 workingDirectory: providerWorkingDirectory(),

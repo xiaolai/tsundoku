@@ -121,6 +121,23 @@ private final class FakeSession: ReaderCaptureSession {
     }
 }
 
+private final class ProgressRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [CaptureProgress] = []
+
+    func record(_ progress: CaptureProgress) {
+        lock.lock()
+        values.append(progress)
+        lock.unlock()
+    }
+
+    var all: [CaptureProgress] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+}
+
 private func temporaryArchive() throws -> (Archive, URL) {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("tsundoku-capture-\(UUID().uuidString)")
@@ -237,6 +254,26 @@ struct CaptureContractTests {
         #expect(session.advanceCalls == 0)
         #expect(try manifest(at: result)["termination"] as? String
             == "pageLimit")
+    }
+
+    @Test("manual all-pages starts at the prepared page and never rewinds")
+    func manualAllPages() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = try testSnapshot(page: 5)
+        let session = FakeSession(
+            identity: page.identity, snapshots: [page],
+            transitions: [.endOfBook(record(terminal: true))])
+        session.isManualCapture = true
+        let recorder = ProgressRecorder()
+        let result = try run(
+            session, archive: archive, directory: directory,
+            progress: { recorder.record($0) })
+        #expect(result.pages == 1)
+        #expect(session.rewindCalls == 0)
+        #expect(recorder.all.first?.totalPages == 6)
+        #expect(try manifest(at: result)["termination"] as? String
+            == "endOfBook")
     }
 
     @Test("a wrong selected book is refused before pages are written")

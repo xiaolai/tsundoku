@@ -8,12 +8,10 @@ public struct QuickPageCapture: Sendable {
     public let pageNumber: Int?
     public let pageCount: Int?
     public let identity: ObservedIdentity
-    public let capturedAt: Date
 
     public init(
         image: CGImage, text: String, textSource: ReaderTextSource,
-        pageNumber: Int?, pageCount: Int?, identity: ObservedIdentity,
-        capturedAt: Date
+        pageNumber: Int?, pageCount: Int?, identity: ObservedIdentity
     ) {
         self.image = image
         self.text = text
@@ -21,7 +19,6 @@ public struct QuickPageCapture: Sendable {
         self.pageNumber = pageNumber
         self.pageCount = pageCount
         self.identity = identity
-        self.capturedAt = capturedAt
     }
 }
 
@@ -36,13 +33,7 @@ public struct QuickPageCaptureService: Sendable {
 
     public func capture() throws -> QuickPageCapture {
         let snapshot = try preview.preview()
-        let crop = snapshot.crop
-        let pixelRect = try CropTransform.pixelRect(
-            crop: crop, windowFrame: snapshot.windowFrame,
-            contentRect: snapshot.contentRect,
-            imageSize: snapshot.pixelSize)
-        let image = try CropTransform.croppedImage(
-            snapshot.image, crop: pixelRect)
+        let image = try snapshot.croppedImage(for: snapshot.crop)
         var text = snapshot.text
         var source: ReaderTextSource =
             text.isEmpty ? .none : .accessibility
@@ -56,6 +47,6 @@ public struct QuickPageCaptureService: Sendable {
         return QuickPageCapture(
             image: image, text: text, textSource: source,
             pageNumber: snapshot.pageNumber, pageCount: snapshot.pageCount,
-            identity: snapshot.identity, capturedAt: snapshot.capturedAt)
+            identity: snapshot.identity)
     }
 }

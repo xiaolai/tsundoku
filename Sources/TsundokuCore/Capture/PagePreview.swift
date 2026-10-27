@@ -7,37 +7,32 @@ public struct PagePreview: Sendable {
     public let contentRect: CGRect
     public let pageBox: CGRect
     public let crop: CaptureCrop
-    public let mark: PageMark
     public let identity: ObservedIdentity
     public let text: String
-    public let textFrame: CGRect?
     public let pageNumber: Int?
     public let pageCount: Int?
-    public let location: PageLocation?
-    public let isOnScreen: Bool
-    public let capturedAt: Date
+    public let pageBoxNote: String?
+    /// The live read taken after the screenshot. Readiness can reuse it
+    /// instead of walking Kindle's AX tree a second time.
+    public let live: LivePage
 
     public init(
         image: CGImage, windowFrame: CGRect, contentRect: CGRect,
-        pageBox: CGRect, crop: CaptureCrop, mark: PageMark,
-        identity: ObservedIdentity, text: String, textFrame: CGRect?,
-        pageNumber: Int?, pageCount: Int?, location: PageLocation?,
-        isOnScreen: Bool, capturedAt: Date
+        pageBox: CGRect, crop: CaptureCrop,
+        identity: ObservedIdentity, text: String, pageNumber: Int?,
+        pageCount: Int?, live: LivePage, pageBoxNote: String? = nil
     ) {
         self.image = image
         self.windowFrame = windowFrame
         self.contentRect = contentRect
         self.pageBox = pageBox
         self.crop = crop
-        self.mark = mark
         self.identity = identity
         self.text = text
-        self.textFrame = textFrame
         self.pageNumber = pageNumber
         self.pageCount = pageCount
-        self.location = location
-        self.isOnScreen = isOnScreen
-        self.capturedAt = capturedAt
+        self.pageBoxNote = pageBoxNote
+        self.live = live
     }
 
     public var pageRatio: CGFloat {
@@ -48,17 +43,59 @@ public struct PagePreview: Sendable {
         CGSize(width: image.width, height: image.height)
     }
 
+    /// The cropped image for an approved crop. Preview, quick capture and the
+    /// mark all share this one transform.
+    public func croppedImage(for crop: CaptureCrop) throws -> CGImage {
+        let pixels = try CropTransform.pixelRect(
+            crop: crop, windowFrame: windowFrame,
+            contentRect: contentRect, imageSize: pixelSize)
+        return try CropTransform.croppedImage(image, crop: pixels)
+    }
+
     /// The mark for an approved crop, which can differ from the measured page
-    /// box when the reader uses a free or A4-locked crop.
-    public func mark(for crop: CaptureCrop) -> PageMark? {
-        guard
-            let pixels = try? CropTransform.pixelRect(
-                crop: crop, windowFrame: windowFrame,
-                contentRect: contentRect, imageSize: pixelSize),
-            let cropped = try? CropTransform.croppedImage(image, crop: pixels)
-        else { return nil }
+    /// box when the reader uses a free or A4-locked crop. It is computed on
+    /// demand because the preview itself does not need the bitmap.
+    public func mark(for crop: CaptureCrop) throws -> PageMark {
+        let cropped = try croppedImage(for: crop)
         return PageMark(
             imageHash: ImageFingerprint.detailHash(cropped), text: text)
+    }
+}
+
+/// Decides when the open preview is stale. It deliberately ignores a window
+/// that only moved: the crop is window-local, so the captured page is still
+/// valid. A resize, a different book, or different page content needs a new
+/// capture.
+public enum PagePreviewFollower {
+    public static func needsRefresh(
+        preview: PagePreview, live: LivePage
+    ) -> Bool {
+        guard live.isReading, let window = PageFrame.rect(live.windowFrame)
+        else { return false }
+        if !PageFrame.sameSize(
+            window.size, preview.windowFrame.size, tolerance: 4)
+        {
+            return true
+        }
+        if preview.text != live.text { return true }
+        // A baseline captured before Kindle exposed a page number would
+        // otherwise accept every later number through sameWhenKnown.
+        if preview.pageNumber == nil, live.pageNumber != nil { return true }
+        if preview.pageCount == nil, live.pageCount != nil { return true }
+        if !LivePage.sameWhenKnown(preview.pageNumber, live.pageNumber) {
+            return true
+        }
+        if !LivePage.sameWhenKnown(preview.pageCount, live.pageCount) {
+            return true
+        }
+        return !preview.identity.matches(live)
+    }
+
+    /// Image-only pages have no AX text or page number to compare. The
+    /// caller should capture at a slower cadence as a visual probe.
+    public static func needsImageProbe(live: LivePage) -> Bool {
+        live.isReading && live.pageNumber == nil
+            && live.text.count < PageGeometry.minimumTextCharacters
     }
 }
 
@@ -89,53 +126,40 @@ public enum PagePreviewError: Error, CustomStringConvertible, Sendable {
 /// changes any reader setting.
 public struct PagePreviewService: Sendable {
     public typealias Read = @Sendable () throws -> LivePage
-    public typealias Capture = @Sendable (CGRect, @escaping @Sendable () -> Bool)
-        throws -> CapturedWindow
-    public typealias Now = @Sendable () -> Date
 
     private let captureService: any WindowCapturing
     private let read: Read
-    private let now: Now
+    private let allowTextBoundsFallback: Bool
 
     public init(
         capture: any WindowCapturing = WindowCaptureService(),
         read: @escaping Read = { try KindleLive.currentPage() },
-        now: @escaping Now = Date.init
+        allowTextBoundsFallback: Bool = false
     ) {
         self.captureService = capture
         self.read = read
-        self.now = now
+        self.allowTextBoundsFallback = allowTextBoundsFallback
     }
 
     public func preview() throws -> PagePreview {
         let before = try read()
-        guard before.isReading else {
-            throw PagePreviewError.notReading(before.state)
+        let geometry: LivePageGeometry
+        do {
+            geometry = try PageGeometry.measure(
+                before,
+                allowTextBoundsFallback: allowTextBoundsFallback)
+        } catch let error as PageGeometryError {
+            switch error {
+            case .notReading(let state):
+                throw PagePreviewError.notReading(state)
+            case .noWindow:
+                throw PagePreviewError.noWindow
+            case .tooSmall, .refused:
+                throw PagePreviewError.geometryUnavailable("\(error)")
+            }
         }
-        guard let frame = before.windowFrame else {
-            throw PagePreviewError.noWindow
-        }
-        let window = CGRect(
-            x: frame.x, y: frame.y, width: frame.width, height: frame.height)
-        let textFrame = before.pageTextFrame.map {
-            CGRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height)
-        }
-        let calibration = PageFrame.resolve(
-            window: window,
-            // An image-only page exposes a text frame that covers the image;
-            // treating it as text headroom rejects the page box.
-            text: before.text.count < 20 ? nil : textFrame,
-            chrome: before.chromeInsets)
-        guard calibration.status != .refused else {
-            throw PagePreviewError.geometryUnavailable(
-                calibration.reason ?? "the page box was refused")
-        }
-        let pageBox = PageFrame.pageRect(
-            window: window, insets: calibration.insets)
-        guard pageBox.width > 100, pageBox.height > 100 else {
-            throw PagePreviewError.geometryUnavailable(
-                "the measured page box is too small")
-        }
+        let window = geometry.window
+        let pageBox = geometry.pageBox
         let captured: CapturedWindow
         do {
             captured = try captureService.capture(
@@ -144,22 +168,11 @@ public struct PagePreviewService: Sendable {
             throw PagePreviewError.capture("\(error)")
         }
         let after = try read()
-        guard after.isReading, after.windowFrame == before.windowFrame,
-            after.text == before.text,
-            after.bookID == before.bookID,
-            after.endOfBook == before.endOfBook,
-            after.pageNumber == before.pageNumber
-                || after.pageNumber == nil || before.pageNumber == nil,
-            after.pageCount == before.pageCount
-                || after.pageCount == nil || before.pageCount == nil
-        else {
+        guard after.sameContent(as: before) else {
             throw PagePreviewError.pageChanged
         }
-        guard
-            abs(captured.windowFrame.minX - window.minX) <= 4,
-            abs(captured.windowFrame.minY - window.minY) <= 4,
-            abs(captured.windowFrame.width - window.width) <= 4,
-            abs(captured.windowFrame.height - window.height) <= 4
+        guard PageFrame.sameRect(
+            captured.windowFrame, window, tolerance: 4)
         else {
             throw PagePreviewError.pageChanged
         }
@@ -167,9 +180,8 @@ public struct PagePreviewService: Sendable {
             rect: pageBox.offsetBy(
                 dx: -captured.windowFrame.minX,
                 dy: -captured.windowFrame.minY))
-        let pixelRect: CGRect
         do {
-            pixelRect = try CropTransform.pixelRect(
+            _ = try CropTransform.pixelRect(
                 crop: crop, windowFrame: captured.windowFrame,
                 contentRect: captured.contentRect,
                 imageSize: CGSize(
@@ -178,40 +190,18 @@ public struct PagePreviewService: Sendable {
         } catch {
             throw PagePreviewError.geometryUnavailable("\(error)")
         }
-        guard let cropped = try? CropTransform.croppedImage(
-            captured.image, crop: pixelRect)
-        else {
-            throw PagePreviewError.geometryUnavailable(
-                "the page box is outside the captured window")
-        }
-        let title = before.title.trimmingCharacters(
-            in: .whitespacesAndNewlines)
-        let identity: ObservedIdentity
-        if let bookID = before.bookID, !bookID.isEmpty {
-            identity = ObservedIdentity(
-                title: title, confidence: .exact(bookID))
-        } else {
-            identity = ObservedIdentity(
-                title: title,
-                confidence: title.isEmpty ? .unknown : .titleOnly(title))
-        }
+        let identity = ObservedIdentity(page: before)
         return PagePreview(
             image: captured.image,
             windowFrame: captured.windowFrame,
             contentRect: captured.contentRect,
             pageBox: pageBox,
             crop: crop,
-            mark: PageMark(
-                imageHash: ImageFingerprint.detailHash(cropped),
-                text: before.text),
             identity: identity,
             text: before.text,
-            textFrame: textFrame,
             pageNumber: before.pageNumber,
             pageCount: before.pageCount,
-            location: PageLocation(
-                pageNumber: before.pageNumber, pageCount: before.pageCount),
-            isOnScreen: captured.isOnScreen,
-            capturedAt: now())
+            live: after,
+            pageBoxNote: geometry.pageBoxNote)
     }
 }

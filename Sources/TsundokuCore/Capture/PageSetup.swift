@@ -7,12 +7,15 @@ public enum CapturePageSize: String, Sendable, Codable, CaseIterable {
     case asDisplayed
     case a4
 
-    /// A4 in points. The PDF page at 1× is the pixel count divided by the
-    /// display scale, so this is also the crop size in points.
+    /// A4 in points, the one source for both the output page and the ratio.
+    public static let a4Size = CGSize(width: 595.28, height: 841.89)
+
+    /// The PDF page at 1× is the pixel count divided by the display scale, so
+    /// this is also the crop size in points.
     public var points: CGSize? {
         switch self {
         case .asDisplayed: nil
-        case .a4: CGSize(width: 595.28, height: 841.89)
+        case .a4: Self.a4Size
         }
     }
 
@@ -295,17 +298,24 @@ public enum PageSetupGeometry {
             ?? displays.first { $0.intersects(current) }
             ?? displays.first
         guard let display else { return nil }
-        let usableHeight = display.height - menuBarHeight
-        guard size.width <= display.width, size.height <= usableHeight
+        let usable = CGRect(
+            x: display.minX, y: display.minY + menuBarHeight,
+            width: display.width, height: display.height - menuBarHeight)
+        guard size.width <= usable.width, size.height <= usable.height
         else { return nil }
-        var origin = current.origin
-        origin.x = min(
-            max(origin.x, display.minX),
-            display.maxX - size.width)
-        origin.y = min(
-            max(origin.y, display.minY + menuBarHeight),
-            display.maxY - size.height)
-        return CGRect(origin: origin, size: size)
+        return CGRect(
+            origin: clampedOrigin(current.origin, size: size, in: usable),
+            size: size)
+    }
+
+    /// The nearest origin that keeps `size` inside `area`. Both the A4 fit
+    /// and the older page-size path use this one clamp.
+    public static func clampedOrigin(
+        _ origin: CGPoint, size: CGSize, in area: CGRect
+    ) -> CGPoint {
+        CGPoint(
+            x: min(max(origin.x, area.minX), area.maxX - size.width),
+            y: min(max(origin.y, area.minY), area.maxY - size.height))
     }
 }
 

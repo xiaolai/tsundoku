@@ -404,34 +404,33 @@ public final class AIPanelModel: ObservableObject {
         guard let request = submittedRequest else {
             return "Nothing has been sent."
         }
-        let count = sentCharacters(for: request).formatted()
         let what: String
         switch request.scope {
         case .selection:
-            what = "Only the selection, its surrounding page (up to "
-                + "\(count) characters together),"
+            what = "The selection, its surrounding page, and the earlier "
+                + "conversation are sent."
         case .currentPage:
-            what = "Only this page"
+            what = "Only this page and the earlier conversation are sent; "
+                + "the rest of the book stays on this Mac."
         case .currentChapter:
-            what = "Only this chapter (up to \(count) characters)"
+            what = "Only this chapter and the earlier conversation are sent; "
+                + "the rest of the book stays on this Mac."
         case .wholeBook:
-            what = "Only up to \(count) characters of this book"
+            what = "The whole book and the earlier conversation are sent."
         }
         return what
-            + " and up to three earlier exchanges are sent; the rest of the "
-            + "book stays on this Mac."
     }
 
     /// Characters the prompt actually sends: the selection when present,
-    /// otherwise the passage, capped by the scope's budget.
+    /// otherwise the passage. The full passage goes out; there is no
+    /// character cap.
     private func sentCharacters(for request: AIRequest) -> Int {
-        let limit = AIComposer.limit(for: request.scope)
         let selection = request.selection?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if selection.isEmpty { return min(request.pageText.count, limit) }
+        if selection.isEmpty { return request.pageText.count }
         // A selection send carries the selection as the passage and the page
         // around it as appendix; both leave the Mac.
-        return min(selection.count, limit) + min(request.pageText.count, limit)
+        return selection.count + request.pageText.count
     }
 
     public func openSavedNotes() { app?.openSavedNotesWindow?() }
@@ -1447,7 +1446,7 @@ public final class AIPanelModel: ObservableObject {
             language: settings.language, selection: selectedPassage,
             pageNumber: context.pageNumber, pageCount: context.pageCount,
             chapter: context.chapter,
-            history: turns.suffix(3).map(\.exchange), scope: scope)
+            history: turns.map(\.exchange), scope: scope)
         answerTask?.cancel()
         answerGeneration += 1
         let generation = answerGeneration
@@ -1458,18 +1457,6 @@ public final class AIPanelModel: ObservableObject {
         provider = settings.provider.displayName
         submittedRequest = request
         submittedOnDevice = settings.provider == .appleOnDevice
-        let selected = request.selection?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let sourceLength =
-            selected.isEmpty ? request.pageText.count : selected.count
-        let limit = AIComposer.limit(for: scope)
-        if sourceLength > limit {
-            let note =
-                "The passage is longer than \(limit.formatted()) "
-                + "characters; the answer covers its first part only."
-            sendNote = [sendNote, note].compactMap { $0 }
-                .joined(separator: " ")
-        }
         let prompt = AIComposer.prompt(for: request, settings: settings)
         TsundokuDiagnostics.shared.event(
             "ai_request_started",
@@ -2001,7 +1988,10 @@ public struct AIPanelView: View {
         .frame(
             maxWidth: .infinity, maxHeight: .infinity,
             alignment: .topLeading)
-        .sheet(isPresented: $model.showQuickCapture) {
+        .sheet(
+            isPresented: $model.showQuickCapture,
+            onDismiss: { model.quickCapture = nil }
+        ) {
             if let capture = model.quickCapture {
                 QuickPageCaptureView(capture: capture)
             }

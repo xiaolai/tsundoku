@@ -166,10 +166,9 @@ public struct AITurn: Identifiable, Equatable, Sendable {
         let sourceText = selection.isEmpty ? context.excerpt : selection
         return AIExchange(
             question: promptLabel, answer: answer,
-            topic: topic.isEmpty ? nil : String(topic.prefix(200)),
+            topic: topic.isEmpty ? nil : topic,
             action: action.displayName,
-            excerpt: sourceText.isEmpty
-                ? nil : String(sourceText.prefix(300)))
+            excerpt: sourceText.isEmpty ? nil : sourceText)
     }
 }
 
@@ -184,29 +183,6 @@ public struct AIAnswer: Sendable {
 }
 
 public enum AIComposer {
-    /// The passage is bounded so one source cannot crowd out the
-    /// instructions. A page and a selection share the small budget; a chapter
-    /// and a book are allowed as much as their context window can take.
-    public static func limit(for scope: CompanionScope) -> Int {
-        switch scope {
-        case .currentPage, .selection: 8_000
-        case .currentChapter: 32_000
-        case .wholeBook: 120_000
-        }
-    }
-
-    /// The page budget, kept for callers that only know the page.
-    public static let passageLimit = limit(for: .currentPage)
-
-    /// The prompt is English and its wording reaches a model, so its numbers
-    /// must not change with the user's locale. A comma-grouped figure is also
-    /// what the regression tests assert.
-    public static func formattedCharacters(_ value: Int) -> String {
-        // en_US, not en_US_POSIX: POSIX has no grouping separator, so it
-        // would print "32000" while the wording promises a grouped figure.
-        value.formatted(.number.locale(Locale(identifier: "en_US")))
-    }
-
     public static func prompt(
         for request: AIRequest, settings: AISettings
     ) -> String {
@@ -216,14 +192,7 @@ public enum AIComposer {
         // A selection is what the reader is asking about; the page is
         // background. Without one, the page is the passage, as before.
         let sourceText = usesSelection ? selection : request.pageText
-        let limit = Self.limit(for: request.scope)
-        let passage = sanitized(String(sourceText.prefix(limit)))
-        let truncationNote =
-            sourceText.count > limit
-            ? "\n\nThe passage is truncated after "
-                + "\(formattedCharacters(limit)) characters; the answer "
-                + "covers only this excerpt. Say so in the answer."
-            : ""
+        let passage = sanitized(sourceText)
         let book = sanitized(
             request.bookTitle.isEmpty ? "the current book" : request.bookTitle)
         let language = sanitized(
@@ -252,6 +221,8 @@ public enum AIComposer {
         let readerNote =
             typedQuestion.isEmpty
             ? "" : "\n\nThe reader's request: \(typedQuestion)"
+        let conversation =
+            conversationBlock(request.history).map { "\n\n\($0)" } ?? ""
         let chapterNote: String
         switch request.scope {
         case .currentChapter:
@@ -284,9 +255,8 @@ public enum AIComposer {
         // reach four branches and miss the fifth.
         let metadata =
             "\(selectionNote)\(readerNote)\(chapterNote)\(pageNote)"
-            + truncationNote
         let askMetadata =
-            "\(selectionNote)\(chapterNote)\(pageNote)" + truncationNote
+            "\(selectionNote)\(chapterNote)\(pageNote)"
         let passageBlock = """
             <passage>
             \(passage)
@@ -298,7 +268,7 @@ public enum AIComposer {
             usesSelection
             ? "\n\nThe page around the selection is context, not the "
                 + "passage.\n<page>\n"
-                + sanitized(String(request.pageText.prefix(limit)))
+                + sanitized(request.pageText)
                 + "\n</page>"
             : ""
         let instruction: String
@@ -310,19 +280,11 @@ public enum AIComposer {
                 words.
                 """
         case .translate:
-            instruction = truncationNote.isEmpty
-                ? """
-                    Translate \(target) from \(book) into \(language). \
-                    Preserve meaning, tone and paragraph breaks. Output only \
-                    the translation.
-                    """
-                : """
-                    Translate the excerpt of \(target) from \(book) into \
-                    \(language). Preserve meaning, tone and paragraph \
-                    breaks. Begin with one line saying the passage was \
-                    truncated, then output only the translation of the \
-                    excerpt.
-                    """
+            instruction = """
+                Translate \(target) from \(book) into \(language). \
+                Preserve meaning, tone and paragraph breaks. Output only \
+                the translation.
+                """
         case .summarize:
             instruction = """
                 Summarize \(target) from \(book) in \(language), in five \
@@ -333,8 +295,6 @@ public enum AIComposer {
                 typedQuestion.isEmpty
                 ? "What is the main idea of this passage?"
                 : typedQuestion
-            let conversation =
-                conversationBlock(request.history).map { "\n\n\($0)" } ?? ""
             return """
                 Answer the reader's question from \(book), using \(target) \
                 as the passage. The surrounding page, when present, and the \
@@ -360,16 +320,16 @@ public enum AIComposer {
                 """
         }
         return """
-            \(instruction) \(guardLine)\(metadata)
+            \(instruction) \(guardLine)\(metadata)\(conversation)
 
             \(passageBlock)\(pageAppendix)
             """
     }
 
-    /// The last few exchanges, bounded so a long conversation cannot crowd
-    /// out the passage. Nil for a first ask, so its prompt is unchanged.
-    /// Book data is data: a passage containing a boundary tag must not be
-    /// able to close the element the composer opened.
+    /// The earlier exchanges, uncut, so a follow-up sees the same
+    /// conversation the reader sees. Nil for a first ask, so its prompt is
+    /// unchanged. Book data is data: a passage containing a boundary tag must
+    /// not be able to close the element the composer opened.
     static func sanitized(_ text: String) -> String {
         let tags = [
             "passage", "page", "question", "conversation", "turn",
@@ -392,19 +352,18 @@ public enum AIComposer {
     }
 
     static func conversationBlock(_ history: [AIExchange]) -> String? {
-        let recent = history.suffix(3)
-        guard !recent.isEmpty else { return nil }
-        let turns = recent.map { exchange in
-            let question = sanitized(String(exchange.question.prefix(300)))
-            let answer = sanitized(String(exchange.answer.prefix(800)))
+        guard !history.isEmpty else { return nil }
+        let turns = history.map { exchange in
+            let question = sanitized(exchange.question)
+            let answer = sanitized(exchange.answer)
             let source = exchange.topic.map {
-                "\n<source>\(sanitized(String($0.prefix(200))))</source>"
+                "\n<source>\(sanitized($0))</source>"
             } ?? ""
             let action = exchange.action.map {
-                "\n<action>\(sanitized(String($0.prefix(40))))</action>"
+                "\n<action>\(sanitized($0))</action>"
             } ?? ""
             let excerpt = exchange.excerpt.map {
-                "\n<excerpt>\(sanitized(String($0.prefix(300))))</excerpt>"
+                "\n<excerpt>\(sanitized($0))</excerpt>"
             } ?? ""
             return """
                 <turn>\(source)\(action)\(excerpt)

@@ -168,6 +168,29 @@ public struct SettingsView: View {
                     )
                     .disabled(providerState.testing)
 
+                    if model.settings.provider == .http {
+                        DisclosureGroup("Advanced") {
+                            TextField(
+                                "Max answer tokens",
+                                value: $model.settings.answerTokens,
+                                format: .number
+                            )
+                            .disabled(providerState.testing)
+                            .help(
+                                "Upper bound for the answer. The full "
+                                    + "passage and conversation are sent; "
+                                    + "this bounds only what comes back. A "
+                                    + "reasoning model spends part of it "
+                                    + "before writing, and the service may "
+                                    + "enforce a lower limit.")
+                            Text(
+                                "The passage and conversation have no "
+                                    + "app-side character cap.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     if model.settings.provider == .codexCLI,
                         !providerState.signInStatus.isEmpty
                     {

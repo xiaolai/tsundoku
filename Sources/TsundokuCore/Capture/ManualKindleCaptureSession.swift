@@ -39,10 +39,7 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
     private var opening: PageLocation?
     private var openingBookID: String?
     private var lastPage: LivePage?
-    private var lastMark: PageMark?
-    private var records: [TurnRecord] = []
     private var warnings: [String] = []
-    private var storedRestore: RestoreReport?
 
     public init(
         crop: CaptureCrop,
@@ -87,17 +84,8 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
         }
         if let bookID = live.bookID, !bookID.isEmpty {
             openingBookID = bookID
-            identity = ObservedIdentity(
-                title: live.title.trimmingCharacters(
-                    in: .whitespacesAndNewlines),
-                confidence: .exact(bookID))
-        } else {
-            let title = live.title.trimmingCharacters(
-                in: .whitespacesAndNewlines)
-            identity = ObservedIdentity(
-                title: title,
-                confidence: title.isEmpty ? .unknown : .titleOnly(title))
         }
+        identity = ObservedIdentity(page: live)
     }
 
     public func snapshot() throws -> PageSnapshot {
@@ -120,8 +108,7 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
         let window = CGRect(
             x: frame.x, y: frame.y, width: frame.width, height: frame.height)
         if let expectedSize {
-            guard abs(window.width - expectedSize.width) <= 4,
-                abs(window.height - expectedSize.height) <= 4
+            guard PageFrame.sameSize(window.size, expectedSize, tolerance: 4)
             else {
                 throw ReaderCaptureError.captureFailed(
                     .kindle,
@@ -144,25 +131,12 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
             cancellation.isSet
         })
         let afterCapture = try read()
-        guard afterCapture.isReading,
-            afterCapture.text == live.text,
-            afterCapture.windowFrame == live.windowFrame,
-            afterCapture.bookID == live.bookID,
-            afterCapture.endOfBook == live.endOfBook,
-            afterCapture.pageNumber == live.pageNumber
-                || afterCapture.pageNumber == nil || live.pageNumber == nil,
-            afterCapture.pageCount == live.pageCount
-                || afterCapture.pageCount == nil || live.pageCount == nil
-        else {
+        guard afterCapture.sameContent(as: live) else {
             throw ReaderCaptureError.captureFailed(
                 .kindle,
                 reason: "the page changed while its screenshot was taken")
         }
-        guard
-            abs(captured.windowFrame.minX - window.minX) <= 4,
-            abs(captured.windowFrame.minY - window.minY) <= 4,
-            abs(captured.windowFrame.width - window.width) <= 4,
-            abs(captured.windowFrame.height - window.height) <= 4
+        guard PageFrame.sameRect(captured.windowFrame, window, tolerance: 4)
         else {
             throw ReaderCaptureError.captureFailed(
                 .kindle,
@@ -214,20 +188,10 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
                         + "current page before capturing")
             }
         }
-        let title = live.title.trimmingCharacters(
-            in: .whitespacesAndNewlines)
-        if let bookID = live.bookID, !bookID.isEmpty {
-            identity = ObservedIdentity(
-                title: title, confidence: .exact(bookID))
-        } else {
-            identity = ObservedIdentity(
-                title: title,
-                confidence: title.isEmpty ? .unknown : .titleOnly(title))
-        }
+        identity = ObservedIdentity(page: live)
         opening = opening ?? PageLocation(
             pageNumber: live.pageNumber, pageCount: live.pageCount)
         lastPage = live
-        lastMark = mark
         return PageSnapshot(
             identity: identity, image: image, text: textUse.text,
             textSource: textUse.source, pageNumber: live.pageNumber,
@@ -249,22 +213,30 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
         try prepare()
         try turnForward()
         let deadline = now().addingTimeInterval(3.0)
+        var nextImageProbe = now()
         while now() < deadline {
             sleep(0.15)
             try checkCancelled()
             guard let live = try? read() else { continue }
             try checkWindowSize(live)
             if live.endOfBook {
-                let record = TurnRecord(
-                    attempted: true, posted: true, observed: true,
-                    terminal: true, unresolved: false)
-                records.append(record)
-                return .endOfBook(record)
+                return .endOfBook(
+                    TurnRecord(
+                        attempted: true, posted: true, observed: true,
+                        terminal: true, unresolved: false))
             }
             guard live.isReading else { continue }
             let pageNumberChanged =
                 live.pageNumber != nil && lastPage?.pageNumber != nil
                 && live.pageNumber != lastPage?.pageNumber
+            let textChanged = live.text != lastPage?.text
+            // Text and page number usually settle before the image. Only
+            // probe the image when AX reports nothing, or periodically for
+            // an image-only page.
+            if !textChanged, !pageNumberChanged, now() < nextImageProbe {
+                continue
+            }
+            nextImageProbe = now().addingTimeInterval(0.5)
             guard let candidate = try? makeSnapshot(includeText: false)
             else { continue }
             guard candidate.mark.imageHash != mark.imageHash
@@ -280,22 +252,21 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
             guard let settled = try? makeSnapshot(includeText: true),
                 settled.mark.imageHash == confirmed.mark.imageHash
             else { continue }
-            let record = TurnRecord(
-                attempted: true, posted: true, observed: true,
-                terminal: false, unresolved: false)
-            records.append(record)
-            return .turned(settled, record)
+            return .turned(
+                settled,
+                TurnRecord(
+                    attempted: true, posted: true, observed: true,
+                    terminal: false, unresolved: false))
         }
-        let record = TurnRecord(
-            attempted: true, posted: true, observed: false,
-            terminal: false, unresolved: true)
-        records.append(record)
-        return .noTurn(record, reason: "the page did not change")
+        return .noTurn(
+            TurnRecord(
+                attempted: true, posted: true, observed: false,
+                terminal: false, unresolved: true),
+            reason: "the page did not change")
     }
 
     public func restore() -> RestoreReport {
-        if let storedRestore { return storedRestore }
-        let report = RestoreReport(
+        RestoreReport(
             opening: opening,
             final: lastPage.map {
                 PageLocation(
@@ -304,8 +275,6 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
             attempted: 0, posted: 0, observed: 0, terminal: 0,
             unresolved: 0, exact: false,
             reason: "manual capture does not restore the reader")
-        storedRestore = report
-        return report
     }
 
     public func rewindToStart() throws -> RewindReport {
@@ -323,8 +292,9 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
 
     private func checkWindowSize(_ live: LivePage) throws {
         guard let expectedSize, let frame = live.windowFrame else { return }
-        guard abs(frame.width - expectedSize.width) <= 4,
-            abs(frame.height - expectedSize.height) <= 4
+        guard PageFrame.sameSize(
+            CGSize(width: frame.width, height: frame.height),
+            expectedSize, tolerance: 4)
         else {
             throw ReaderCaptureError.captureFailed(
                 .kindle,

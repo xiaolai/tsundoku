@@ -375,6 +375,10 @@ public struct AISettings: Codable, Sendable, Equatable {
     public var httpProfileID: String
     public var language: String
     public var sessionLogging: Bool
+    /// The largest answer an HTTP model may return. The default is the
+    /// common 64K output ceiling; a service with a different maximum can be
+    /// tuned in Advanced. The app never imposes a short budget of its own.
+    public var answerTokens: Int
     /// Turn Kindle's Popular Highlights display off for a capture and restore
     /// the setting afterwards. Default on.
     public var cleanPageDuringCapture: Bool
@@ -404,6 +408,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         httpProfileID: String = "custom",
         language: String = "Simplified Chinese",
         sessionLogging: Bool = false,
+        answerTokens: Int = 65_536,
         cleanPageDuringCapture: Bool = true,
         capturePageSize: CapturePageSize = .asDisplayed,
         captureReader: CaptureReader = .automatic,
@@ -423,6 +428,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.httpProfileID = AIService.normalizedProfileID(httpProfileID)
         self.language = language
         self.sessionLogging = sessionLogging
+        self.answerTokens = max(1, answerTokens)
         self.cleanPageDuringCapture = cleanPageDuringCapture
         self.capturePageSize = capturePageSize
         self.captureReader = captureReader
@@ -437,7 +443,7 @@ public struct AISettings: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case provider, model, endpoint, language, sessionLogging
-        case httpProfileID
+        case httpProfileID, answerTokens
         case cleanPageDuringCapture
         case capturePageSize, captureReader, captureFontSize, booksFontSteps
         case captureCropTop, booksCropBottom, kindleCropBottom
@@ -472,6 +478,11 @@ public struct AISettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(
                 Bool.self, forKey: .sessionLogging)
             ?? defaults.sessionLogging
+        answerTokens = max(
+            1,
+            try container.decodeIfPresent(
+                Int.self, forKey: .answerTokens)
+                ?? defaults.answerTokens)
         cleanPageDuringCapture =
             try container.decodeIfPresent(
                 Bool.self, forKey: .cleanPageDuringCapture)

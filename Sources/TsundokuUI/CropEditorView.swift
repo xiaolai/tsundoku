@@ -211,13 +211,7 @@ struct CropEditorView: View {
     }
 
     private func makeOutputImage() -> CGImage? {
-        guard
-            let pixels = try? CropTransform.pixelRect(
-                crop: crop, windowFrame: preview.windowFrame,
-                contentRect: preview.contentRect,
-                imageSize: preview.pixelSize)
-        else { return nil }
-        return try? CropTransform.croppedImage(preview.image, crop: pixels)
+        try? preview.croppedImage(for: crop)
     }
 
     private func fittedScale(in size: CGSize) -> CGFloat {

@@ -303,35 +303,55 @@ struct ReadingScopeTextTests {
         #expect(bookText.contains("EPUB second chapter."))
     }
 
-    @Test("scope budgets grow from page to chapter to book")
-    func budgets() {
-        #expect(
-            AIComposer.limit(for: .currentPage)
-                < AIComposer.limit(for: .currentChapter))
-        #expect(
-            AIComposer.limit(for: .currentChapter)
-                < AIComposer.limit(for: .wholeBook))
-        let limit = AIComposer.limit(for: .currentChapter)
-        #expect(AIComposer.formattedCharacters(limit) == "32,000")
+    @Test("the whole scope text is sent without a character cap")
+    func fullPassage() {
+        let body = String(repeating: "x", count: 130_000)
+        let prompt = AIComposer.prompt(
+            for: AIRequest(
+                action: .summarize, pageText: "BEGIN" + body + "END",
+                bookTitle: "A Book", scope: .wholeBook),
+            settings: .defaults)
+        #expect(prompt.contains("BEGIN"))
+        #expect(prompt.contains(body))
+        #expect(prompt.contains("END"))
+        #expect(!prompt.contains("truncated after"))
+    }
 
-        func prompt(count: Int) -> String {
-            AIComposer.prompt(
-                for: AIRequest(
-                    action: .summarize,
-                    pageText: "BEGIN" + String(repeating: "x", count: count)
-                        + "END",
-                    bookTitle: "A Book", scope: .currentChapter),
-                settings: .defaults)
+    @Test("the whole earlier conversation is sent, not the last three turns")
+    func fullHistory() {
+        let history = (1...5).map { index in
+            AIExchange(
+                question: "question \(index): " + String(repeating: "q", count: 500),
+                answer: "answer \(index): " + String(repeating: "a", count: 1_500))
         }
-        #expect(!prompt(count: limit - 9).contains("truncated after"))
-        #expect(!prompt(count: limit - 8).contains("truncated after"))
-        let over = prompt(count: limit - 7)
-        #expect(over.contains("truncated after 32,000 characters"))
-        #expect(over.contains("BEGIN"))
-        #expect(over.contains(String(repeating: "x", count: limit - 7)))
-        #expect(!over.contains(String(repeating: "x", count: limit - 4)))
-        // The suffix lies beyond the prefix and must not be sent.
-        #expect(!over.contains("END"))
+        for action in AIAction.allCases {
+            let prompt = AIComposer.prompt(
+                for: AIRequest(
+                    action: action, pageText: "page",
+                    bookTitle: "A Book", question: "what next?",
+                    history: history),
+                settings: .defaults)
+            for exchange in history {
+                #expect(prompt.contains(exchange.question))
+                #expect(prompt.contains(exchange.answer))
+            }
+            #expect(!prompt.contains("up to three"))
+        }
+    }
+}
+
+@Suite("AI settings budgets")
+struct AISettingsBudgetTests {
+    @Test("the answer budget has a high default and cannot be zero")
+    func answerBudget() throws {
+        #expect(AISettings.defaults.answerTokens == 65_536)
+        #expect(AISettings(answerTokens: 0).answerTokens == 1)
+        let old = try JSONDecoder().decode(
+            AISettings.self, from: Data("{}".utf8))
+        #expect(old.answerTokens == 65_536)
+        let zero = try JSONDecoder().decode(
+            AISettings.self, from: Data(#"{"answerTokens":0}"#.utf8))
+        #expect(zero.answerTokens == 1)
     }
 }
 
@@ -351,21 +371,6 @@ struct IdentityHeaderTests {
             key: "B0REALTITL", title: "A Real Book", book: nil,
             rank: .archiveMatch, provenance: "test")
         #expect(identity.headerTitle == "A Real Book")
-    }
-}
-
-@Suite("Prompt truncation disclosure")
-struct PromptTruncationTests {
-    @Test("a long translation says the passage is partial")
-    func translation() {
-        let request = AIRequest(
-            action: .translate,
-            pageText: String(repeating: "word ", count: 2_000),
-            bookTitle: "A Book")
-        let prompt = AIComposer.prompt(for: request, settings: .defaults)
-        #expect(prompt.contains("truncated after 8,000 characters"))
-        #expect(prompt.contains("Say so in the answer"))
-        #expect(prompt.contains("Begin with one line saying the passage"))
     }
 }
 
