@@ -78,9 +78,14 @@ struct CompanionPageTurnTests {
 
     /// Bounded so a persistence regression fails the test instead of
     /// defeating the suite's cooperative time limit.
+    /// Waits until the write and the conversation refresh it triggers have
+    /// settled. The panel refuses a send while it re-reads a transcript, so
+    /// a test that sends again must wait for that window to close.
     private func awaitPersistence(_ panel: AIPanelModel) async {
-        let deadline = ContinuousClock.now + .seconds(2)
-        while panel.persisting, ContinuousClock.now < deadline {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while (panel.persisting || !panel.canRun),
+            ContinuousClock.now < deadline
+        {
             do {
                 try await Task.sleep(for: .milliseconds(10))
             } catch {
