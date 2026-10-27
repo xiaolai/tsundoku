@@ -15,6 +15,12 @@ public final class AIPanelModel: ObservableObject {
         case failed
     }
 
+    public enum CompactionState: Equatable {
+        case idle
+        case running
+        case failed(String)
+    }
+
     @Published public var pageText = ""
     @Published public var bookTitle = ""
     /// What the next message is sent with. A page turn refreshes the page and
@@ -28,9 +34,28 @@ public final class AIPanelModel: ObservableObject {
     /// Every conversation filed under the current book, newest first.
     @Published public var conversations: [ConversationSummary] = []
     @Published public var conversationID: Int64?
+    /// The latest summary for the current conversation. The transcript still
+    /// contains every original turn.
+    @Published public private(set) var compaction: ConversationCompaction?
+    @Published public private(set) var compactionState: CompactionState = .idle
+    @Published public var compactionError: String?
+    @Published public private(set) var compactionRefreshing = false
+    @Published public private(set) var compactionRefreshFailed = false
+    @Published public private(set) var compactionRemoving = false
+    @Published public private(set) var transcriptRefreshing = false
+    @Published public private(set) var deletionImpact: ConversationDeletionImpact?
+    private var pendingDeletionID: Int64?
+    private var pendingDeletionUpdatedAt: Date?
+    private var pendingDeletionCompactionRevision: Int64?
+    private var pendingDeletionCardNoteIDs: Set<Int64>?
+    private var pendingDeletionBookKey: String?
+    private var pendingDeletionBookSource: BookSource?
     /// True while the book's earlier turns are being read; sending waits, so a
     /// message cannot start a second conversation beside the stored one.
     @Published public private(set) var historyLoading = false
+    /// A failed history read keeps sending disabled until a reload succeeds:
+    /// an empty transcript is not the same fact as a book with no chats.
+    @Published public private(set) var historyLoadFailed = false
     /// True while an answer is being written to the archive. Sending waits:
     /// a second send before the first write finishes would not yet know the
     /// conversation ID and would start a duplicate thread.
@@ -163,6 +188,28 @@ public final class AIPanelModel: ObservableObject {
         AIRequest, AISettings
     ) async throws -> AIAnswer
 
+    /// A provider call for a prompt the caller composed (compaction). It uses
+    /// the same transport and answer budget as an ordinary request.
+    public typealias PromptProvider = @Sendable (
+        String, AISettings
+    ) async throws -> AIAnswer
+
+    private struct PendingSave {
+        let turn: AITurn
+        let conversationAtSend: Int64?
+        let generationAtSend: Int
+        let key: String
+        let title: String
+        let source: BookSource?
+    }
+
+    private struct PendingPromotion {
+        let turns: [AITurn]
+        let key: String
+        let title: String
+        let source: BookSource?
+    }
+
     /// The local-index lookup, injectable so a test can supply an EPUB match
     /// without a Books library or a real capture on disk.
     public typealias ContextResolver = @Sendable (
@@ -173,6 +220,21 @@ public final class AIPanelModel: ObservableObject {
     private let readerContext: any ReaderContext
     private let contextResolver: ContextResolver
     private let answerProvider: AnswerProvider
+    private let promptProvider: PromptProvider
+    private var compactionGeneration = 0
+    private var compactionRemovalGeneration = 0
+    private var transcriptRefreshGeneration = 0
+    private var transcriptMutationGeneration = 0
+    private var needsTranscriptRefresh = false
+    private var manualCompactionToken = 0
+    private var compactionTask: Task<Void, Never>?
+    private var pendingSave: PendingSave?
+    private var pendingPromotion: PendingPromotion?
+    private var failedConversationID: Int64?
+    #if DEBUG
+    /// A test seam for the retry path. It is never set in a release build.
+    var failNextPersistenceForTesting = false
+    #endif
     private var pageTask: Task<Void, Never>?
     /// The local-context lookup started by the current page load. Callers can
     /// await the work itself instead of polling for its side effects.
@@ -220,6 +282,8 @@ public final class AIPanelModel: ObservableObject {
     private var localResultGeneration = 0
     private var cardTask: Task<Void, Never>?
     private var cardObservation: AnyCancellable?
+    private var deletionObservation: AnyCancellable?
+    private var conversationChangeObservation: AnyCancellable?
     /// The last selection read through the reader (Kindle's Copy action),
     /// kept so a page refresh that reports no selection cannot erase it.
     private var acquiredSelection: String?
@@ -246,17 +310,42 @@ public final class AIPanelModel: ObservableObject {
         },
         answerProvider: @escaping AnswerProvider = { request, settings in
             try await AIService.answer(for: request, settings: settings)
-        }
+        },
+        promptProvider: PromptProvider? = nil
     ) {
         self.app = app
         self.readerContext = context
         self.contextResolver = contextResolver
         self.answerProvider = answerProvider
+        self.promptProvider = promptProvider ?? { prompt, settings in
+            try await AIService.answer(to: prompt, settings: settings)
+        }
         // Removing a card in the library changes shared state, not this
         // model's own properties; forward that change so the per-turn
         // "In Cards" buttons re-render.
         cardObservation = app?.$cardTurnIDs.sink { [weak self] _ in
             Task { @MainActor in self?.objectWillChange.send() }
+        }
+        deletionObservation = app?.$deletedConversationIDs.sink {
+            [weak self] deleted in
+            Task { @MainActor in
+                guard let self, let id = self.conversationID,
+                    deleted.contains(id)
+                else { return }
+                self.resetKeepingUnsavedWrites()
+                self.sendNote =
+                    "This chat was deleted in the library; a new chat is "
+                    + "ready."
+            }
+        }
+        conversationChangeObservation = app?.$conversationChangeRevision.sink {
+            [weak self] _ in
+            Task { @MainActor in
+                guard let self, let id = self.conversationID,
+                    self.app?.changedConversationIDs.contains(id) == true
+                else { return }
+                self.refreshCompactionFromArchive()
+            }
         }
     }
 
@@ -326,7 +415,12 @@ public final class AIPanelModel: ObservableObject {
     /// Actions are allowed only on a page that finished loading. A reload
     /// clears the text first, so a stale page can never be sent.
     public var canRun: Bool {
-        !pageText.isEmpty && !historyLoading && !persisting
+        !pageText.isEmpty && !historyLoading && !historyLoadFailed
+            && !persisting
+            && pendingSave == nil && pendingPromotion == nil
+            && compactionState != .running
+            && !compactionRefreshing && !compactionRefreshFailed
+            && !compactionRemoving && !transcriptRefreshing
             && (phase == .idle || phase == .ready)
     }
 
@@ -337,6 +431,50 @@ public final class AIPanelModel: ObservableObject {
     public var canSend: Bool {
         canRun
             && !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Compaction needs a persisted conversation; a session-only chat has no
+    /// row to attach a summary to yet.
+    public var canCompact: Bool {
+        conversationID != nil && turns.count > ConversationCompactor.keepRecentTurns
+            && turns.allSatisfy { $0.persistedID != nil }
+            && !historyLoading && !historyLoadFailed && !persisting
+            && !compactionRefreshing && !compactionRefreshFailed
+            && !compactionRemoving && !transcriptRefreshing && phase != .loadingAnswer
+            && compactionState != .running
+    }
+
+    public var canRetrySave: Bool {
+        pendingSave != nil || pendingPromotion != nil
+    }
+
+    public var compactionCoveredTurnCount: Int {
+        guard let compaction else { return 0 }
+        return turns.filter {
+            $0.persistedID.map { $0 <= compaction.throughTurnID } ?? false
+        }.count
+    }
+
+    public var canOpenChats: Bool {
+        identity?.book != nil
+            || app?.books.contains(where: {
+                guard let bookKey else { return false }
+                return ConversationFiling.canonical($0.asin)
+                    == ConversationFiling.canonical(bookKey)
+            }) == true
+    }
+
+    /// A visible size warning when automatic compaction is off. It is a
+    /// character estimate, not a token count.
+    public var contextWarning: String? {
+        guard let app, !app.settings.autoCompact else { return nil }
+        let estimate = estimatedContextCharacters()
+        guard estimate > app.settings.compactThresholdCharacters else {
+            return nil
+        }
+        return "This request is about \(estimate.formatted()) characters. "
+            + "Compact older turns to keep the conversation within the "
+            + "provider's context."
     }
 
     /// What the info menu says about identity and coverage.
@@ -526,8 +664,10 @@ public final class AIPanelModel: ObservableObject {
                         // The key already moved to the new book; its old
                         // turns must not survive to be sent by a retry.
                         self.turns = []
+                        self.transcriptMutationGeneration += 1
                         self.conversationID = nil
                         self.conversations = []
+                        self.resetCompaction()
                     }
                     if historyWasLoading, self.bookKey == previousKey {
                         self.loadConversationHistory()
@@ -539,8 +679,10 @@ public final class AIPanelModel: ObservableObject {
                     // The old book's turns must not be sent, or shown, while
                     // the new book's history loads.
                     self.turns = []
+                    self.transcriptMutationGeneration += 1
                     self.conversationID = nil
                     self.conversations = []
+                    self.resetCompaction()
                     self.loadConversationHistory()
                 } else if historyWasLoading {
                     // The reload invalidated the in-flight history load; the
@@ -716,24 +858,30 @@ public final class AIPanelModel: ObservableObject {
         let source = identity.book?.source
         let generation = conversationGeneration
         let task = Task { [weak self] in
-            let migrated = await Task.detached { () -> Bool in
+            let migrated = await Task.detached {
+                () -> (moved: Bool, error: String?) in
                 var moved = false
+                var firstError: String?
                 for old in candidates {
-                    guard
-                        (try? archive.latestConversation(bookKey: old)) ?? nil
-                            != nil
-                    else { continue }
                     do {
+                        guard try archive.latestConversation(bookKey: old)
+                            != nil
+                        else { continue }
                         try archive.migrateConversations(
                             from: old, to: key, title: title, source: source)
                         moved = true
                     } catch {
-                        continue
+                        firstError = firstError ?? "\(error)"
                     }
                 }
-                return moved
+                return (moved, firstError)
             }.value
-            guard let self, migrated, self.bookKey == key,
+            guard let self else { return }
+            if let error = migrated.error {
+                self.saveError =
+                    "Could not file this book's earlier chats: \(error)"
+            }
+            guard migrated.moved, self.bookKey == key,
                 generation == self.conversationGeneration,
                 !self.persisting
             else { return }
@@ -784,14 +932,18 @@ public final class AIPanelModel: ObservableObject {
             } catch {
                 saveError =
                     "Could not file this book's earlier chats: \(error)"
+                identity = previous
+                return
             }
             app?.refreshAICards()
             bookKey = key
             bookTitle = improved.title
             context.bookTitle = improved.title
             turns = []
+            transcriptMutationGeneration += 1
             conversationID = nil
             conversations = []
+            resetCompaction()
             loadConversationHistory()
             TsundokuDiagnostics.shared.event(
                 "book_identity_migrated",
@@ -818,11 +970,23 @@ public final class AIPanelModel: ObservableObject {
     /// Files turns that were answered while the page had no key. They stay in
     /// memory; the next page load reads the same turns back from the archive.
     private func persistTurns(
-        _ pending: [AITurn], key: String, archive: Archive?
+        _ pending: [AITurn], key: String, archive: Archive?,
+        title explicitTitle: String? = nil,
+        source explicitSource: BookSource? = nil
     ) {
-        guard let archive else { return }
-        let title = context.bookTitle
-        let source = context.bookSource
+        guard let archive else {
+            // The turns exist only in this panel; keep them retryable.
+            pendingPromotion = PendingPromotion(
+                turns: pending, key: key,
+                title: explicitTitle ?? context.bookTitle,
+                source: explicitSource ?? context.bookSource)
+            saveError =
+                "Could not file this book's earlier chats: the archive is "
+                + "not open. Retry Save once it is."
+            return
+        }
+        let title = explicitTitle ?? context.bookTitle
+        let source = explicitSource ?? context.bookSource
         let generation = conversationGeneration
         let turns = pending.map {
             NewConversationTurn(
@@ -834,21 +998,18 @@ public final class AIPanelModel: ObservableObject {
         let task = Task { [weak self] in
             await previous?.value
             let stored = await Task.detached {
-                () -> (Conversation, [ConversationTurn])? in
+                () -> (Conversation, [Int64])? in
                 // The conversation and every turn are one transaction; a
-                // failure leaves no partially saved thread behind.
-                guard
-                    let conversation = try? archive.createConversation(
-                        bookKey: key, bookTitle: title, bookSource: source,
-                        turns: turns),
-                    let saved = try? archive.conversationTurns(
-                        conversationID: conversation.id)
-                else { return nil }
-                return (conversation, saved)
+                // failure leaves no partially saved thread behind. The
+                // inserted IDs come back from that transaction.
+                try? archive.createConversationWithTurnIDs(
+                    bookKey: key, bookTitle: title, bookSource: source,
+                    turns: turns)
             }.value
             guard let self else { return }
             self.endPersistence()
             if let stored {
+                self.pendingPromotion = nil
                 if self.bookKey == key,
                     generation == self.conversationGeneration
                 {
@@ -860,12 +1021,22 @@ public final class AIPanelModel: ObservableObject {
                     if let position = self.turns.firstIndex(where: {
                         $0.id == pendingTurn.id
                     }) {
-                        self.turns[position].persistedID = stored.1[index].id
+                        self.turns[position].persistedID = stored.1[index]
                     }
                 }
+                self.saveError = nil
+                self.transcriptMutationGeneration += 1
+                if self.needsTranscriptRefresh {
+                    self.needsTranscriptRefresh = false
+                    self.refreshCompactionFromArchive()
+                }
+                self.app?.refreshConversationCounts()
+                self.app?.markConversationChanged(stored.0.id)
             } else {
+                self.pendingPromotion = PendingPromotion(
+                    turns: pending, key: key, title: title, source: source)
                 self.saveError =
-                    "Could not file this book's earlier chats."
+                    "Could not file this book's earlier chats. Retry Save."
             }
         }
         persistenceChain = task
@@ -1150,8 +1321,10 @@ public final class AIPanelModel: ObservableObject {
             answerGeneration += 1
             if phase == .loadingAnswer { phase = .idle }
             turns = []
+            transcriptMutationGeneration += 1
             conversationID = nil
             conversations = []
+            resetCompaction()
             loadConversationHistory()
         }
         resolveLocalContext(page: page)
@@ -1370,9 +1543,55 @@ public final class AIPanelModel: ObservableObject {
                     + "the book as PDF in Exports, then retry; the page was "
                     + "sent instead."
             }
+            let settings = self.app?.settings ?? .defaults
+            let projectionAtCompose = self.promptProjection()
+            let conversationAtCompose = self.conversationGeneration
+            let transcriptAtCompose = self.transcriptMutationGeneration
+            let preview = self.makeRequest(
+                action: requested, question: text, scope: effectiveScope,
+                passage: passage, projection: projectionAtCompose)
+            let previewCharacters = AIComposer.prompt(
+                for: preview, settings: settings).count
+            var compactedForSend = false
+            var attemptedAutoCompaction = false
+            if settings.autoCompact,
+                previewCharacters > settings.compactThresholdCharacters,
+                self.canCompact
+            {
+                attemptedAutoCompaction = true
+                switch await self.compactNow() {
+                case .failed:
+                    self.sendNote =
+                        "Automatic compaction failed; the message was not "
+                        + "sent. Retry Compact or send again."
+                    return
+                case .compacted:
+                    compactedForSend = true
+                case .unnecessary:
+                    break
+                }
+            }
+            guard !Task.isCancelled, generation == self.sendGeneration else {
+                return
+            }
+            let finalProjection: ConversationProjection? =
+                compactedForSend ? nil
+                : (attemptedAutoCompaction ? self.promptProjection()
+                    : projectionAtCompose)
+            guard self.conversationGeneration == conversationAtCompose,
+                self.transcriptMutationGeneration == transcriptAtCompose,
+                !self.compactionRefreshing, !self.compactionRemoving,
+                !self.transcriptRefreshing
+            else {
+                self.sendNote =
+                    "The conversation changed while the message was being "
+                    + "prepared; send again."
+                return
+            }
             self.startRequest(
                 action: requested, question: text,
-                scope: effectiveScope, passage: passage)
+                scope: effectiveScope, passage: passage,
+                projection: finalProjection)
         }
         sendPreparationTask = task
     }
@@ -1425,11 +1644,327 @@ public final class AIPanelModel: ObservableObject {
         return .refreshed(read.pageNumber)
     }
 
+    private enum CompactionOutcome {
+        case compacted
+        case unnecessary
+        case failed
+    }
+
+    private func makeRequest(
+        action: AIAction, question text: String, scope: CompanionScope,
+        passage: ScopePassage?, projection: ConversationProjection? = nil
+    ) -> AIRequest {
+        let settings = app?.settings ?? .defaults
+        let selectedPassage: String? =
+            scope == .selection ? context.selection : nil
+        let projection = projection ?? promptProjection()
+        return AIRequest(
+            action: action,
+            pageText: passage?.text ?? pageText,
+            bookTitle: bookTitle, question: text,
+            language: settings.language, selection: selectedPassage,
+            pageNumber: context.pageNumber, pageCount: context.pageCount,
+            chapter: context.chapter,
+            history: projection.history,
+            conversationSummary: projection.summary,
+            scope: scope)
+    }
+
+    private func promptProjection() -> ConversationProjection {
+        guard let compaction else {
+            return .full(turns.map(\.exchange))
+        }
+        let history = turns.filter { turn in
+            guard let id = turn.persistedID else { return true }
+            return id > compaction.throughTurnID
+        }.map(\.exchange)
+        return ConversationProjection(
+            summary: compaction.summary, history: history,
+            throughTurnID: compaction.throughTurnID)
+    }
+
+    private func estimatedContextCharacters() -> Int {
+        let selection = context.selection?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var total = pageText.count + selection.count + bookTitle.count
+        if let compaction {
+            total += compaction.summary.count
+        }
+        let projectedTurns: [AITurn] =
+            compaction.map { value in
+                turns.filter { turn in
+                    guard let id = turn.persistedID else { return true }
+                    return id > value.throughTurnID
+                }
+            } ?? turns
+        for turn in projectedTurns {
+            total += turn.question.count + turn.answer.count
+            total += turn.context.excerpt.count
+        }
+        return total
+    }
+
+    /// Runs a compaction and publishes only a successfully stored result.
+    /// Cancellation and provider failure leave the previous summary intact.
+    private func compactNow() async -> CompactionOutcome {
+        guard let archive = app?.archive, let conversationID
+        else { return .failed }
+        guard compactionState != .running else { return .failed }
+        compactionGeneration += 1
+        let generation = compactionGeneration
+        let settings = app?.settings ?? .defaults
+        let promptProvider = promptProvider
+        let compactor = ConversationCompactor(
+            archive: archive,
+            provider: { prompt in
+                try await promptProvider(prompt, settings)
+            },
+            providerName: AIService.providerName(for: settings),
+            model: settings.model.trimmingCharacters(
+                in: .whitespacesAndNewlines).isEmpty
+                ? nil : settings.model,
+            language: settings.language)
+        compactionState = .running
+        compactionError = nil
+        do {
+            let result = try await compactor.compact(
+                conversationID: conversationID)
+            // The write committed; library views must refresh even if this
+            // panel was cancelled or switched in the meantime.
+            app?.markConversationChanged(conversationID)
+            guard generation == compactionGeneration,
+                !Task.isCancelled
+            else {
+                // A cancellation that landed while the provider was
+                // finishing must not leave a summary the reader stopped.
+                // Remove only the new row; the previous summary stays.
+                do {
+                    try archive.removeCompaction(
+                        id: result.id, conversationID: conversationID)
+                    app?.markConversationChanged(conversationID)
+                } catch {
+                    let message =
+                        "The compaction completed after cancellation and "
+                        + "could not be rolled back: \(error)"
+                    if generation == compactionGeneration,
+                        self.conversationID == conversationID
+                    {
+                        compactionState = .failed(message)
+                        compactionError = message
+                    } else {
+                        // The panel now shows another chat, or a newer
+                        // compaction owns its state; a banner reports this
+                        // without overwriting that chat's panel.
+                        app?.post(message, seconds: 10)
+                    }
+                }
+                return .failed
+            }
+            compaction = result
+            compactionState = .idle
+            return .compacted
+        } catch {
+            guard generation == compactionGeneration else { return .failed }
+            if AIProviderFailure.isCancelled(error) {
+                compactionState = .idle
+                return .failed
+            }
+            if let compactionFailure = error as? ConversationCompactionError {
+                switch compactionFailure {
+                case .noNewTurns, .notEnoughTurns:
+                    compactionState = .idle
+                    return .unnecessary
+                case .emptySummary:
+                    break
+                }
+            }
+            let message: String
+            if error is ConversationCompactionError {
+                message = "\(error)"
+            } else {
+                message = AIProviderFailure.message(
+                    for: error, provider: settings.provider)
+            }
+            compactionState = .failed(message)
+            compactionError = message
+            return .failed
+        }
+    }
+
+    /// Manual Compact. A conversation with three or fewer turns has nothing
+    /// to summarize; the UI disables the action in that case.
+    public func compactConversation() {
+        guard canCompact else { return }
+        manualCompactionToken += 1
+        let token = manualCompactionToken
+        compactionTask?.cancel()
+        compactionTask = Task { [weak self] in
+            guard let self else { return }
+            switch await self.compactNow() {
+            case .unnecessary:
+                self.sendNote =
+                    "There are no newer turns to summarize; the latest "
+                    + "summary already covers them."
+            case .compacted:
+                self.sendNote = "Older turns were summarized for the model."
+            case .failed:
+                break
+            }
+            if token == self.manualCompactionToken {
+                self.compactionTask = nil
+            }
+        }
+    }
+
+    public func removeCompaction() {
+        guard let archive = app?.archive, let conversationID,
+            let expectedCompactionID = compaction?.id
+        else { return }
+        compactionGeneration += 1
+        compactionRemovalGeneration += 1
+        let removalGeneration = compactionRemovalGeneration
+        compactionTask?.cancel()
+        compactionTask = nil
+        let generation = compactionGeneration
+        compactionState = .idle
+        compactionError = nil
+        compactionRemoving = true
+        let app = app
+        Task { [weak self] in
+            do {
+                try await Task.detached {
+                    try archive.clearCompaction(
+                        conversationID: conversationID,
+                        expectedCompactionID: expectedCompactionID)
+                }.value
+                app?.markConversationChanged(conversationID)
+                guard let self else { return }
+                if removalGeneration == self.compactionRemovalGeneration {
+                    self.compactionRemoving = false
+                }
+                guard generation == self.compactionGeneration else {
+                    return
+                }
+                self.compaction = nil
+                self.consumeNeedsTranscriptRefresh()
+            } catch {
+                guard let self else { return }
+                if removalGeneration == self.compactionRemovalGeneration {
+                    self.compactionRemoving = false
+                }
+                guard generation == self.compactionGeneration else {
+                    return
+                }
+                let message = "Could not remove the summary: \(error)"
+                self.compactionError = message
+                self.compactionState = .failed(message)
+            }
+        }
+    }
+
+    public func openChats() {
+        guard let book = identity?.book
+            ?? app?.books.first(where: {
+                guard let bookKey else { return false }
+                return ConversationFiling.canonical($0.asin)
+                    == ConversationFiling.canonical(bookKey)
+            })
+        else {
+            sendNote = "Open an imported book before managing its chats."
+            return
+        }
+        app?.openChats(for: book)
+    }
+
+    public func reviewCurrentChatDeletion() {
+        guard let archive = app?.archive, let conversationID else {
+            return
+        }
+        pendingDeletionID = conversationID
+        Task { [weak self] in
+            do {
+                let reviewed = try await Task.detached {
+                    try archive.deletionReview(ids: [conversationID])
+                }.value
+                guard let self, self.pendingDeletionID == conversationID
+                else { return }
+                self.pendingDeletionUpdatedAt =
+                    reviewed.updatedAt[conversationID]
+                self.pendingDeletionCompactionRevision =
+                    reviewed.revisions[conversationID] ?? 0
+                self.pendingDeletionCardNoteIDs = reviewed.cardNoteIDs
+                self.pendingDeletionBookKey = self.bookKey
+                self.pendingDeletionBookSource = self.context.bookSource
+                self.deletionImpact = reviewed.impact
+            } catch {
+                self?.sendNote = "Could not inspect this chat: \(error)"
+            }
+        }
+    }
+
+    public func dismissChatDeletion() {
+        pendingDeletionID = nil
+        pendingDeletionUpdatedAt = nil
+        pendingDeletionCompactionRevision = nil
+        pendingDeletionCardNoteIDs = nil
+        pendingDeletionBookKey = nil
+        pendingDeletionBookSource = nil
+        deletionImpact = nil
+    }
+
+    public func deleteCurrentChat() {
+        guard let archive = app?.archive,
+            let id = pendingDeletionID ?? conversationID,
+            let updatedAt = pendingDeletionUpdatedAt,
+            let revision = pendingDeletionCompactionRevision
+        else { return }
+        let expectedBookKey = pendingDeletionBookKey
+        let expectedBookSource = pendingDeletionBookSource
+        let expectedCardNoteIDs = pendingDeletionCardNoteIDs
+        pendingDeletionID = nil
+        pendingDeletionUpdatedAt = nil
+        pendingDeletionCompactionRevision = nil
+        pendingDeletionCardNoteIDs = nil
+        pendingDeletionBookKey = nil
+        pendingDeletionBookSource = nil
+        deletionImpact = nil
+        Task { [weak self] in
+            do {
+                _ = try await Task.detached {
+                    try archive.deleteConversations(
+                        ids: [id], expectedUpdatedAt: [id: updatedAt],
+                        expectedCompactionRevisions: [id: revision],
+                        expectedBookKeys: expectedBookKey.map { [$0] },
+                        expectedBookSource: expectedBookSource,
+                        expectedCardNoteIDs: expectedCardNoteIDs)
+                }.value
+                guard let self else { return }
+                self.app?.markConversationsDeleted([id])
+                self.app?.refreshConversationCounts()
+                if self.conversationID == id {
+                    self.resetKeepingUnsavedWrites()
+                    self.sendNote =
+                        "The chat was deleted. Saved notes remain; its cards "
+                        + "were removed from Cards."
+                }
+            } catch {
+                self?.sendNote = "Could not delete this chat: \(error)"
+            }
+        }
+    }
+
     private func startRequest(
         action: AIAction, question text: String, scope: CompanionScope,
-        passage: ScopePassage?
+        passage: ScopePassage?, projection: ConversationProjection? = nil
     ) {
-        guard canRun else { return }
+        guard canRun else {
+            if !Task.isCancelled {
+                sendNote =
+                    "The conversation changed while the message was being "
+                    + "prepared; send again."
+            }
+            return
+        }
         if action == .ask, text.isEmpty { return }
         let settings = app?.settings ?? .defaults
         if scope == .selection, !selectionAvailable {
@@ -1439,14 +1974,9 @@ public final class AIPanelModel: ObservableObject {
         }
         let selectedPassage: String? =
             scope == .selection ? context.selection : nil
-        let request = AIRequest(
-            action: action,
-            pageText: passage?.text ?? pageText,
-            bookTitle: bookTitle, question: text,
-            language: settings.language, selection: selectedPassage,
-            pageNumber: context.pageNumber, pageCount: context.pageCount,
-            chapter: context.chapter,
-            history: turns.map(\.exchange), scope: scope)
+        let request = makeRequest(
+            action: action, question: text, scope: scope, passage: passage,
+            projection: projection)
         answerTask?.cancel()
         answerGeneration += 1
         let generation = answerGeneration
@@ -1491,6 +2021,7 @@ public final class AIPanelModel: ObservableObject {
                     answer: result.text, provider: result.provider,
                     prompt: prompt, context: turnContext)
                 self.turns.append(turn)
+                self.transcriptMutationGeneration += 1
                 if self.question.trimmingCharacters(in: .whitespacesAndNewlines)
                     == turn.question
                 {
@@ -1568,6 +2099,20 @@ public final class AIPanelModel: ObservableObject {
         acquiredSelectionKey = nil
         pageGeneration += 1
         selectionGeneration += 1
+        compactionGeneration += 1
+        compactionRemovalGeneration += 1
+        manualCompactionToken += 1
+        compactionTask?.cancel()
+        compactionTask = nil
+        compactionRefreshing = false
+        compactionRemoving = false
+        compactionRefreshFailed = false
+        // A refresh this invalidation discarded must be replaced, or the
+        // next send could read a summary or transcript older than the
+        // archive.
+        needsTranscriptRefresh = true
+        consumeNeedsTranscriptRefresh()
+        if case .running = compactionState { compactionState = .idle }
         phase = .idle
         error = nil
         saveError = nil
@@ -1605,9 +2150,23 @@ public final class AIPanelModel: ObservableObject {
         sendNote = nil
         conversationGeneration += 1
         turns = []
+        transcriptMutationGeneration += 1
         conversationID = nil
         savedTurnID = nil
         historyLoading = false
+        historyLoadFailed = false
+        failedConversationID = nil
+        transcriptRefreshGeneration += 1
+        transcriptRefreshing = false
+        resetCompaction()
+        resetPendingSave()
+        pendingDeletionID = nil
+        pendingDeletionUpdatedAt = nil
+        pendingDeletionCompactionRevision = nil
+        pendingDeletionCardNoteIDs = nil
+        pendingDeletionBookKey = nil
+        pendingDeletionBookSource = nil
+        deletionImpact = nil
         error = nil
         saveError = nil
         failureKind = nil
@@ -1619,13 +2178,43 @@ public final class AIPanelModel: ObservableObject {
     }
 
     /// Switches to an earlier conversation of the same book.
-    public func openConversation(_ id: Int64) {
+    public func openConversation(
+        _ id: Int64, expectedBookKey: String? = nil,
+        expectedBookSource: BookSource? = nil, force: Bool = false
+    ) {
+        if let expectedBookKey, let bookKey,
+            ConversationFiling.canonical(expectedBookKey)
+                != ConversationFiling.canonical(bookKey)
+        {
+            sendNote =
+                "This chat belongs to another book. Open that book in the "
+                + "reader, then continue."
+            return
+        }
         guard let archive = app?.archive else { return }
         // Re-selecting the conversation already on screen is a no-op. Doing
         // this after cancellation would stop its in-flight answer and leave
         // the phase reading as loading forever.
-        if id == conversationID, !turns.isEmpty { return }
+        if !force, id == conversationID, !turns.isEmpty { return }
+        // A session-only transcript exists nowhere else. Loading a stored
+        // chat over it would destroy the only copy; New Chat is the
+        // explicit discard action. A write already in flight keeps its own
+        // copy, so it does not block the switch.
+        if !persisting, pendingSave == nil, pendingPromotion == nil,
+            turns.contains(where: { $0.persistedID == nil })
+        {
+            sendNote =
+                "This page's answers are not saved yet. Start a new chat to "
+                + "discard them, or open the chat once the page's book is "
+                + "identified."
+            return
+        }
         cancelAnswerWork()
+        resetCompaction()
+        dismissChatDeletion()
+        transcriptRefreshGeneration += 1
+        transcriptRefreshing = false
+        failedConversationID = nil
         sendNote = nil
         conversationGeneration += 1
         selectionGeneration += 1
@@ -1633,26 +2222,77 @@ public final class AIPanelModel: ObservableObject {
         phase = .loadingPage
         Task { [weak self] in
             do {
+                // Identity and transcript come from one read transaction; a
+                // concurrent re-filing cannot validate the old book and then
+                // load turns for another.
                 let loaded = try await Task.detached {
-                    (
-                        try archive.conversationTurns(conversationID: id),
-                        try archive.cardTurnIDs(conversationID: id)
-                    )
+                    try archive.conversationExportSnapshot(
+                        conversationID: id)
                 }.value
                 guard
                     let self, !Task.isCancelled,
                     generation == self.conversationGeneration
                 else { return }
+                guard let loaded else {
+                    self.historyLoading = false
+                    self.sendNote = "This chat no longer exists."
+                    self.phase = .ready
+                    // The switch reset the summary before validation; the
+                    // chat still on screen must read its boundary again.
+                    self.refreshCompactionFromArchive()
+                    return
+                }
+                if let expectedBookKey {
+                    let conversation = loaded.conversation
+                    let book = self.app?.books.first {
+                        ConversationFiling.canonical($0.asin)
+                            == ConversationFiling.canonical(expectedBookKey)
+                            && (expectedBookSource == nil
+                                || $0.source == expectedBookSource)
+                    }
+                    let matches = book.map {
+                        ConversationFiling.isFiled(conversation, under: $0)
+                    } ?? (ConversationFiling.canonical(
+                        conversation.bookKey)
+                        == ConversationFiling.canonical(expectedBookKey))
+                    // A stored source that disagrees with the route is
+                    // stronger evidence than a matching identifier: two
+                    // readers can share one.
+                    let sourceMatches =
+                        expectedBookSource == nil
+                        || conversation.bookSource == nil
+                        || conversation.bookSource == expectedBookSource
+                    guard matches, sourceMatches else {
+                        self.historyLoading = false
+                        self.sendNote =
+                            "This chat belongs to another book. Open that "
+                            + "book in the reader, then continue."
+                        self.phase = .ready
+                        self.refreshCompactionFromArchive()
+                        return
+                    }
+                }
                 self.apply(
-                    stored: loaded.0, cardIDs: loaded.1,
-                    conversationID: id)
+                    stored: loaded.snapshot.turns,
+                    cardIDs: loaded.snapshot.cardIDs,
+                    conversationID: id,
+                    compaction: loaded.snapshot.compaction)
+                // A compaction notification may have arrived while this
+                // snapshot was in flight, when the old selection was still
+                // current. Re-read the boundary for the chat now on screen.
+                self.refreshCompactionFromArchive()
             } catch {
                 guard let self, !Task.isCancelled,
                     generation == self.conversationGeneration
                 else { return }
                 self.historyLoading = false
+                self.historyLoadFailed = true
+                self.failedConversationID = id
                 self.error = "Could not read this conversation: \(error)"
                 self.phase = .ready
+                // Restore the boundary and transcript of the chat that is
+                // still on screen; the switch cleared them before the read.
+                self.refreshCompactionFromArchive()
             }
         }
     }
@@ -1776,52 +2416,274 @@ public final class AIPanelModel: ObservableObject {
 
     // MARK: - Conversation history
 
+    private func resetCompaction() {
+        compactionGeneration += 1
+        compactionRemovalGeneration += 1
+        manualCompactionToken += 1
+        compactionTask?.cancel()
+        compactionTask = nil
+        compaction = nil
+        compactionState = .idle
+        compactionError = nil
+        compactionRefreshing = false
+        compactionRefreshFailed = false
+        compactionRemoving = false
+    }
+
+    /// A library window can append turns, compact, or remove a summary while
+    /// this panel is open. Re-read the transcript and boundary together; the
+    /// live page stays where it is.
+    private func refreshCompactionFromArchive() {
+        guard let archive = app?.archive, let id = conversationID else {
+            return
+        }
+        if transcriptRefreshing {
+            needsTranscriptRefresh = true
+            return
+        }
+        if persisting || pendingSave != nil || pendingPromotion != nil
+            || turns.contains(where: { $0.persistedID == nil })
+        {
+            // Never replace an unsaved answer with an older snapshot. The
+            // save path retries this refresh once persistence settles.
+            needsTranscriptRefresh = true
+            return
+        }
+        compactionGeneration += 1
+        compactionTask?.cancel()
+        compactionTask = nil
+        compactionState = .idle
+        compactionError = nil
+        compactionRefreshing = true
+        compactionRefreshFailed = false
+        let compactionGeneration = compactionGeneration
+        transcriptRefreshGeneration += 1
+        let transcriptGeneration = transcriptRefreshGeneration
+        let mutation = transcriptMutationGeneration
+        Task { [weak self] in
+            do {
+                let snapshot = try await Task.detached {
+                    try archive.conversationSnapshot(conversationID: id)
+                }.value
+                guard let self,
+                    transcriptGeneration == self.transcriptRefreshGeneration,
+                    compactionGeneration == self.compactionGeneration,
+                    mutation == self.transcriptMutationGeneration,
+                    self.conversationID == id
+                else {
+                    if let self,
+                        transcriptGeneration == self.transcriptRefreshGeneration,
+                        compactionGeneration == self.compactionGeneration
+                    {
+                        self.needsTranscriptRefresh = true
+                        self.compactionRefreshing = false
+                        self.consumeNeedsTranscriptRefresh()
+                    }
+                    return
+                }
+                self.turns = snapshot.turns.map(Self.turn(from:))
+                self.transcriptMutationGeneration += 1
+                self.cardedTurnIDs = snapshot.cardIDs
+                self.compaction = snapshot.compaction
+                self.compactionRefreshing = false
+                self.compactionRefreshFailed = false
+                self.compactionError = nil
+                self.needsTranscriptRefresh = false
+            } catch {
+                guard let self,
+                    transcriptGeneration == self.transcriptRefreshGeneration,
+                    compactionGeneration == self.compactionGeneration
+                else { return }
+                self.compactionRefreshing = false
+                self.compactionRefreshFailed = true
+                self.compactionError =
+                    "Could not refresh the conversation summary: \(error)"
+            }
+        }
+    }
+
+    public func retryCompactionRefresh() {
+        refreshCompactionFromArchive()
+    }
+
+    /// A refresh that lost to a mutation leaves `needsTranscriptRefresh`
+    /// set. When that mutation was itself a settled save, no later
+    /// completion would consume the flag; read again now, so a stale
+    /// transcript or summary cannot reach the next request.
+    private func consumeNeedsTranscriptRefresh() {
+        guard needsTranscriptRefresh, !transcriptRefreshing,
+            !compactionRefreshing, !compactionRemoving,
+            !persisting, pendingSave == nil, pendingPromotion == nil,
+            !turns.contains(where: { $0.persistedID == nil }),
+            conversationID != nil
+        else { return }
+        needsTranscriptRefresh = false
+        refreshCompactionFromArchive()
+    }
+
+    /// Retry a failed history read without reloading the page or sending.
+    public func retryHistory() {
+        guard historyLoadFailed else { return }
+        if let id = failedConversationID {
+            openConversation(id, force: true)
+        } else {
+            loadConversationHistory()
+        }
+    }
+
+    private func resetPendingSave() {
+        pendingSave = nil
+        pendingPromotion = nil
+    }
+
+    /// Starts a fresh chat without discarding an answer that never reached
+    /// the archive. A delete is not the explicit discard action New Chat is;
+    /// the pending write is retargeted at a new conversation, so Retry Save
+    /// stores it instead of appending to a deleted row.
+    @discardableResult
+    private func resetKeepingUnsavedWrites() -> Bool {
+        let unsaved = pendingSave
+        let unsavedPromotion = pendingPromotion
+        newChat()
+        if let unsaved {
+            pendingSave = PendingSave(
+                turn: unsaved.turn, conversationAtSend: nil,
+                generationAtSend: conversationGeneration,
+                key: unsaved.key, title: unsaved.title,
+                source: unsaved.source)
+        }
+        if let unsavedPromotion {
+            pendingPromotion = unsavedPromotion
+        }
+        guard pendingSave != nil || pendingPromotion != nil else {
+            return false
+        }
+        saveError =
+            "This chat was deleted. The unsaved answer is kept; Retry Save "
+            + "stores it in a new chat."
+        return true
+    }
+
+    /// A save can finish after the reader switched away and back, so the
+    /// in-memory turn list may no longer contain the answer that is now in
+    /// the archive. Refresh only that transcript, without changing the page.
+    private func refreshTranscript(conversationID: Int64) {
+        guard let archive = app?.archive else { return }
+        if compactionRefreshing {
+            needsTranscriptRefresh = true
+            return
+        }
+        transcriptRefreshGeneration += 1
+        let generation = transcriptRefreshGeneration
+        let mutation = transcriptMutationGeneration
+        transcriptRefreshing = true
+        Task { [weak self] in
+            do {
+                let snapshot = try await Task.detached {
+                    try archive.conversationSnapshot(
+                        conversationID: conversationID)
+                }.value
+                guard let self, generation == self.transcriptRefreshGeneration,
+                    mutation == self.transcriptMutationGeneration,
+                    self.conversationID == conversationID
+                else {
+                    if let self,
+                        generation == self.transcriptRefreshGeneration
+                    {
+                        self.needsTranscriptRefresh = true
+                        self.transcriptRefreshing = false
+                        self.consumeNeedsTranscriptRefresh()
+                    }
+                    return
+                }
+                self.turns = snapshot.turns.map(Self.turn(from:))
+                self.transcriptMutationGeneration += 1
+                self.cardedTurnIDs = snapshot.cardIDs
+                // Compaction has its own refresh path. Do not let a
+                // transcript read taken before a newer summary overwrite it.
+                self.historyLoadFailed = false
+                self.transcriptRefreshing = false
+                if self.needsTranscriptRefresh {
+                    self.needsTranscriptRefresh = false
+                    self.refreshCompactionFromArchive()
+                }
+            } catch {
+                guard let self,
+                    generation == self.transcriptRefreshGeneration
+                else { return }
+                self.transcriptRefreshing = false
+                self.historyLoadFailed = true
+                // Retry must reopen the chat that failed, not whichever
+                // chat is newest for the book.
+                self.failedConversationID = conversationID
+                self.saveError =
+                    "Saved, but the transcript could not be refreshed."
+            }
+        }
+    }
+
     private func loadConversationHistory() {
         guard let archive = app?.archive, let key = bookKey else {
             turns = []
+            transcriptMutationGeneration += 1
             conversationID = nil
             conversations = []
+            resetCompaction()
             historyLoading = false
+            historyLoadFailed = false
             historyTask = nil
             return
         }
         conversationGeneration += 1
+        compactionGeneration += 1
+        compactionTask?.cancel()
+        compactionTask = nil
+        failedConversationID = nil
         let generation = conversationGeneration
         historyLoading = true
+        historyLoadFailed = false
         let task = Task { [weak self] in
+            let revisionAtStart = self?.app?.conversationChangeRevision
             do {
                 let loaded = try await Task.detached {
-                    let latest = try archive.latestConversation(bookKey: key)
-                    let summaries = try archive.conversations(bookKey: key)
-                    let stored = try latest.map {
-                        try archive.conversationTurns(conversationID: $0.id)
-                    } ?? []
-                    let cardIDs = try latest.map {
-                        try archive.cardTurnIDs(conversationID: $0.id)
-                    } ?? []
-                    return (latest, summaries, stored, cardIDs)
+                    try archive.conversationHistory(bookKey: key)
                 }.value
                 guard
                     let self, !Task.isCancelled,
                     generation == self.conversationGeneration,
                     self.bookKey == key
                 else { return }
-                self.conversationID = loaded.0?.id
-                self.turns = loaded.2.map(Self.turn(from:))
-                self.conversations = loaded.1
-                self.cardedTurnIDs = loaded.3
+                if let app = self.app,
+                    app.conversationChangeRevision != revisionAtStart
+                {
+                    // A chat was created or changed after this snapshot was
+                    // taken. Applying it would hide that chat; read again.
+                    self.loadConversationHistory()
+                    return
+                }
+                self.conversationID = loaded.latest?.id
+                self.turns = loaded.transcript.turns.map(Self.turn(from:))
+                self.transcriptMutationGeneration += 1
+                self.conversations = loaded.summaries
+                self.cardedTurnIDs = loaded.transcript.cardIDs
+                self.compaction = loaded.transcript.compaction
+                self.compactionState = .idle
+                self.compactionError = nil
                 self.historyLoading = false
+                self.historyLoadFailed = false
                 if self.phase == .loadingPage { self.phase = .idle }
+                self.refreshCompactionFromArchive()
                 TsundokuDiagnostics.shared.event(
                     "ai_conversation_loaded",
                     [
-                        "turns": loaded.2.count,
-                        "conversations": loaded.1.count,
+                        "turns": loaded.transcript.turns.count,
+                        "conversations": loaded.summaries.count,
                     ])
             } catch {
                 guard let self, generation == self.conversationGeneration
                 else { return }
                 self.historyLoading = false
+                self.historyLoadFailed = true
                 self.saveError = "Could not read this book's chats: \(error)"
             }
         }
@@ -1830,12 +2692,20 @@ public final class AIPanelModel: ObservableObject {
 
     private func apply(
         stored: [ConversationTurn], cardIDs: Set<Int64>,
-        conversationID: Int64
+        conversationID: Int64, compaction: ConversationCompaction?
     ) {
         self.conversationID = conversationID
         turns = stored.map(Self.turn(from:))
+        transcriptMutationGeneration += 1
         cardedTurnIDs = cardIDs
+        self.compaction = compaction
+        compactionState = .idle
+        compactionError = nil
         historyLoading = false
+        historyLoadFailed = false
+        failedConversationID = nil
+        transcriptRefreshGeneration += 1
+        transcriptRefreshing = false
         savedTurnID = nil
         error = nil
         saveError = nil
@@ -1854,17 +2724,73 @@ public final class AIPanelModel: ObservableObject {
 
     private func persist(
         _ turn: AITurn, conversationAtSend: Int64?,
-        generationAtSend: Int
+        generationAtSend: Int, key explicitKey: String? = nil,
+        title explicitTitle: String? = nil,
+        source explicitSource: BookSource? = nil
     ) {
-        guard let app, let archive = app.archive, let key = bookKey else {
+        guard let app else { return }
+        guard let key = explicitKey ?? bookKey else {
+            // No book to file under. Say so; a silent return would lose an
+            // answer that exists nowhere else.
+            saveError =
+                "This answer could not be saved: no book is identified "
+                + "for it."
             return
         }
-        let title = context.bookTitle
-        let source = context.bookSource
+        guard let archive = app.archive else {
+            // The answer exists only in this panel. Keep it retryable
+            // instead of dropping it because the archive is not open.
+            pendingSave = PendingSave(
+                turn: turn, conversationAtSend: conversationAtSend,
+                generationAtSend: generationAtSend, key: key,
+                title: explicitTitle ?? context.bookTitle,
+                source: explicitSource ?? context.bookSource)
+            saveError =
+                "This answer could not be saved: the archive is not open. "
+                + "Retry Save once it is."
+            return
+        }
+        let title = explicitTitle ?? context.bookTitle
+        let source = explicitSource ?? context.bookSource
+        #if DEBUG
+        let shouldFail = failNextPersistenceForTesting
+        failNextPersistenceForTesting = false
+        #else
+        let shouldFail = false
+        #endif
         beginPersistence()
         let previous = persistenceChain
         let task = Task { [weak self] in
             await previous?.value
+            // A failed session promotion owns this book's unfiled turns.
+            // Writing this answer separately would create a second chat;
+            // fold it into the promotion so one Retry Save produces one
+            // conversation.
+            if let self, let promotion = self.pendingPromotion,
+                promotion.key == key, self.conversationID == nil
+            {
+                self.endPersistence()
+                self.pendingPromotion = PendingPromotion(
+                    turns: promotion.turns + [turn], key: promotion.key,
+                    title: promotion.title, source: promotion.source)
+                self.saveError =
+                    "This book's earlier chats could not be filed. Retry "
+                    + "Save files them and this answer together."
+                return
+            }
+            #if DEBUG
+            if shouldFail {
+                guard let self else { return }
+                self.endPersistence()
+                self.pendingSave = PendingSave(
+                    turn: turn, conversationAtSend: conversationAtSend,
+                    generationAtSend: generationAtSend, key: key,
+                    title: title, source: source)
+                self.saveError =
+                    "This answer could not be saved: injected test failure."
+                return
+            }
+            #endif
             // A session promotion ahead of this write may have created and
             // recorded the book's conversation. Reuse that only while the
             // conversation has not changed since the answer was sent: a
@@ -1877,32 +2803,65 @@ public final class AIPanelModel: ObservableObject {
             do {
                 let result = try await Task.detached {
                     () -> (turnID: Int64, conversationID: Int64,
-                        summaries: [ConversationSummary]) in
+                        summaries: [ConversationSummary]?) in
+                    let turnID: Int64
                     let id: Int64
                     if let conversationAtSend {
                         id = conversationAtSend
+                        turnID = try archive.appendConversationTurn(
+                            conversationID: id, action: turn.action,
+                            question: turn.question, answer: turn.answer,
+                            provider: turn.provider, prompt: turn.prompt,
+                            context: turn.context).id
                     } else if let existingID {
                         id = existingID
+                        turnID = try archive.appendConversationTurn(
+                            conversationID: id, action: turn.action,
+                            question: turn.question, answer: turn.answer,
+                            provider: turn.provider, prompt: turn.prompt,
+                            context: turn.context).id
                     } else {
-                        id = try archive.createConversation(
+                        // A new thread and its first turn are one
+                        // transaction, so a failed insert cannot leave an
+                        // empty conversation behind. The inserted ID comes
+                        // back from the transaction; no post-commit read can
+                        // turn a successful write into a retry.
+                        let created = try archive.createConversationWithTurnIDs(
                             bookKey: key, bookTitle: title,
-                            bookSource: source
-                        ).id
+                            bookSource: source,
+                            turns: [
+                                NewConversationTurn(
+                                    action: turn.action,
+                                    question: turn.question,
+                                    answer: turn.answer,
+                                    provider: turn.provider,
+                                    prompt: turn.prompt,
+                                    context: turn.context)
+                            ])
+                        id = created.0.id
+                        guard let inserted = created.1.last else {
+                            throw Archive.ConversationArchiveError
+                                .missingConversation(created.0.id)
+                        }
+                        turnID = inserted
                     }
-                    let stored = try archive.appendConversationTurn(
-                        conversationID: id, action: turn.action,
-                        question: turn.question, answer: turn.answer,
-                        provider: turn.provider, prompt: turn.prompt,
-                        context: turn.context)
-                    let summaries = try archive.conversations(bookKey: key)
-                    return (stored.id, id, summaries)
+                    // A summary refresh is not part of the write. If it
+                    // fails, the turn is already durable and must not be
+                    // retried as if the append failed.
+                    let summaries = try? archive.conversations(
+                        bookKey: key)
+                    return (turnID, id, summaries)
                 }.value
                 guard let self else { return }
                 self.endPersistence()
+                let turnStillLoaded = self.turns.contains {
+                    $0.id == turn.id
+                }
                 if let index = self.turns.firstIndex(where: {
                     $0.id == turn.id
                 }) {
                     self.turns[index].persistedID = result.turnID
+                    self.transcriptMutationGeneration += 1
                 }
                 if conversationAtSend == nil,
                     generationAtSend == self.conversationGeneration,
@@ -1910,18 +2869,110 @@ public final class AIPanelModel: ObservableObject {
                 {
                     self.conversationID = result.conversationID
                 }
+                if !turnStillLoaded,
+                    self.conversationID == result.conversationID
+                {
+                    self.refreshTranscript(
+                        conversationID: result.conversationID)
+                }
                 if self.bookKey == key {
-                    self.conversations = result.summaries
+                    if let summaries = result.summaries {
+                        self.conversations = summaries
+                        self.saveError = nil
+                    } else {
+                        self.saveError =
+                            "Saved, but the chat list could not be refreshed."
+                    }
+                }
+                if self.pendingSave?.turn.id == turn.id {
+                    self.pendingSave = nil
+                }
+                if self.needsTranscriptRefresh {
+                    self.needsTranscriptRefresh = false
+                    self.refreshCompactionFromArchive()
                 }
                 app.refreshConversationCounts()
+                app.markConversationChanged(result.conversationID)
             } catch {
                 guard let self else { return }
                 self.endPersistence()
-                self.saveError =
+                // A delete that landed while this write was in flight
+                // removes the target; retrying into it would fail forever.
+                let target = conversationAtSend
+                    ?? (self.conversationGeneration == generationAtSend
+                        ? self.conversationID : nil)
+                // Only a successful lookup that returns nil proves deletion
+                // a failed query is not evidence, and must not silently
+                // retarget the answer.
+                var lookupFailure: String?
+                var targetGone = false
+                if let target {
+                    do {
+                        targetGone = try archive.conversation(id: target) == nil
+                    } catch {
+                        lookupFailure = "\(error)"
+                    }
+                }
+                let message =
                     "This answer could not be saved: \(error)"
+                    + (targetGone
+                        ? " The chat was deleted; Retry Save stores it in a "
+                            + "new chat."
+                        : "")
+                    + (lookupFailure.map {
+                        " The chat could not be checked: \($0)"
+                    } ?? "")
+                if targetGone, target == self.conversationID {
+                    // Treat a chat that vanished mid-write exactly like a
+                    // deletion notification: keep the answer, retargeted,
+                    // and drop the dead conversation.
+                    self.pendingSave = PendingSave(
+                        turn: turn, conversationAtSend: nil,
+                        generationAtSend: self.conversationGeneration,
+                        key: key, title: title, source: source)
+                    self.resetKeepingUnsavedWrites()
+                    self.saveError = message
+                    return
+                }
+                self.pendingSave = PendingSave(
+                    turn: turn,
+                    conversationAtSend: targetGone
+                        ? nil : conversationAtSend,
+                    generationAtSend: targetGone
+                        ? self.conversationGeneration : generationAtSend,
+                    key: key, title: title, source: source)
+                self.saveError = message
             }
         }
         persistenceChain = task
+    }
+
+    /// Retry the exact turn and conversation that failed. New Chat is the
+    /// explicit discard action; switching pages or chats does not lose the
+    /// only copy of an unsaved answer.
+    public func retrySave() {
+        guard app?.archive != nil else {
+            if pendingSave != nil || pendingPromotion != nil {
+                saveError =
+                    "The archive is not open; the unsaved answer is kept."
+            }
+            return
+        }
+        if let pending = pendingSave {
+            pendingSave = nil
+            saveError = nil
+            persist(
+                pending.turn, conversationAtSend: pending.conversationAtSend,
+                generationAtSend: pending.generationAtSend, key: pending.key,
+                title: pending.title, source: pending.source)
+            return
+        }
+        guard let promotion = pendingPromotion else { return }
+        pendingPromotion = nil
+        saveError = nil
+        persistTurns(
+            promotion.turns, key: promotion.key, archive: app?.archive,
+            title: promotion.title, source: promotion.source)
     }
 
     /// A Books page has no ASIN in the Accessibility tree. The title
@@ -1949,6 +3000,8 @@ public final class AIPanelModel: ObservableObject {
 public struct AIPanelView: View {
     @ObservedObject var model: AIPanelModel
     @State private var composerHeight: CGFloat = 80
+    @State private var showCompactionSummary = false
+    @State private var confirmRemoveCompaction = false
     private let compact: Bool
     private let onActivate: () -> Void
     private let onClose: (() -> Void)?
@@ -1995,6 +3048,37 @@ public struct AIPanelView: View {
             if let capture = model.quickCapture {
                 QuickPageCaptureView(capture: capture)
             }
+        }
+        .alert(
+            "Remove Summary?", isPresented: $confirmRemoveCompaction
+        ) {
+            Button("Remove Summary", role: .destructive) {
+                model.removeCompaction()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "The next message will send the full transcript; nothing is "
+                    + "deleted.")
+        }
+        .confirmationDialog(
+            "Delete This Chat?",
+            isPresented: Binding(
+                get: { model.deletionImpact != nil },
+                set: { if !$0 { model.dismissChatDeletion() } }),
+            presenting: model.deletionImpact
+        ) { _ in
+            Button("Delete Chat", role: .destructive) {
+                model.deleteCurrentChat()
+            }
+            Button("Cancel", role: .cancel) {
+                model.dismissChatDeletion()
+            }
+        } message: { impact in
+            Text(
+                "\(impact.turns) turns and \(impact.compactions) summaries "
+                    + "will be deleted. \(impact.notes) saved notes are kept; "
+                    + "\(impact.cards) cards will leave Cards.")
         }
     }
 
@@ -2066,6 +3150,16 @@ public struct AIPanelView: View {
         Menu {
             Button("New Chat") { model.newChat() }
                 .disabled(model.turns.isEmpty && model.conversationID == nil)
+            Button("Compact Conversation…") {
+                model.compactConversation()
+            }
+            .disabled(!model.canCompact)
+            Button("Manage Chats…") { model.openChats() }
+                .disabled(!model.canOpenChats)
+            Button("Delete This Chat…") {
+                model.reviewCurrentChatDeletion()
+            }
+            .disabled(model.conversationID == nil)
             if model.conversations.isEmpty {
                 Divider()
                 Text("No earlier chats about this book")
@@ -2076,7 +3170,7 @@ public struct AIPanelView: View {
                         model.openConversation(summary.id)
                     } label: {
                         Text(
-                            "\(summary.firstQuestion) · "
+                            "\(summary.displayTitle) · "
                                 + summary.conversation.updatedAt.formatted(
                                     date: .abbreviated, time: .shortened))
                     }
@@ -2101,6 +3195,9 @@ public struct AIPanelView: View {
                     if model.turns.isEmpty {
                         emptyState
                     } else {
+                        if model.compaction != nil {
+                            compactionDivider
+                        }
                         ForEach(model.turns) { turn in
                             turnView(turn)
                         }
@@ -2182,6 +3279,59 @@ public struct AIPanelView: View {
                 model.retry()
             }
             .controlSize(compact ? .small : .regular)
+        }
+    }
+
+    @ViewBuilder private var compactionDivider: some View {
+        if let compaction = model.compaction {
+            VStack(alignment: .leading, spacing: 7) {
+                Label(
+                    "Earlier messages summarized for the model",
+                    systemImage: "text.append")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(
+                    "\(model.compactionCoveredTurnCount) earlier "
+                        + (model.compactionCoveredTurnCount == 1
+                            ? "turn is" : "turns are")
+                        + " summarized. Every original message remains "
+                        + "below and is still saved.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(
+                    "Summary written "
+                        + compaction.createdAt.formatted(
+                            date: .abbreviated, time: .shortened)
+                        + " by \(compaction.provider).")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                DisclosureGroup(
+                    "View Summary", isExpanded: $showCompactionSummary
+                ) {
+                    Text(compaction.summary)
+                        .font(.caption)
+                        .textSelection(.enabled)
+                        .frame(maxHeight: 220, alignment: .topLeading)
+                }
+                HStack(spacing: 8) {
+                    Button("Recompact") { model.compactConversation() }
+                        .controlSize(.small)
+                        .disabled(!model.canCompact)
+                    Button("Remove Summary") {
+                        confirmRemoveCompaction = true
+                    }
+                    .controlSize(.small)
+                    .disabled(model.compactionState == .running)
+                    Spacer()
+                }
+            }
+            .padding(10)
+            .background(
+                Color.secondary.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(
+                "Earlier messages summarized for the model")
         }
     }
 
@@ -2524,11 +3674,85 @@ public struct AIPanelView: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let saveError = model.saveError {
+            if model.canRetrySave {
+                Text(
+                    model.saveError
+                        ?? "An answer is not saved yet; Retry Save.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Retry Save") { model.retrySave() }
+                    .controlSize(.small)
+            } else if let saveError = model.saveError {
                 Text(saveError)
                     .font(.caption2)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if model.historyLoadFailed {
+                Button("Retry Chat History") { model.retryHistory() }
+                    .controlSize(.small)
+            }
+            if model.transcriptRefreshing {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Refreshing the transcript…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if model.compactionRemoving {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Removing the conversation summary…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if model.compactionRefreshing {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Refreshing the conversation…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if model.compactionRefreshFailed {
+                Text(
+                    model.compactionError
+                        ?? "Could not refresh the conversation.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Retry Summary Refresh") {
+                    model.retryCompactionRefresh()
+                }
+                .controlSize(.small)
+            }
+            if case .running = model.compactionState {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Summarizing earlier turns…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if case .failed(let message) = model.compactionState {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let warning = model.contextWarning {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(warning)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Compact") { model.compactConversation() }
+                        .controlSize(.mini)
+                        .disabled(!model.canCompact)
+                }
             }
             if let captureError = model.quickCaptureError {
                 Text(captureError)

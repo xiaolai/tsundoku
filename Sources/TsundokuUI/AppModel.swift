@@ -112,6 +112,7 @@ public final class AppModel: ObservableObject {
     @Published public var annotations: [Annotation] = []
     @Published public var sessions: [ReadingSession] = []
     @Published public var captures: [CaptureRecord] = []
+    @Published public private(set) var abandonedCaptures: [AbandonedCapture] = []
     @Published public var counts: ArchiveCounts?
     @Published public var selectedBookID: String? {
         didSet {
@@ -141,6 +142,26 @@ public final class AppModel: ObservableObject {
     private var aiCardsGeneration = 0
     /// Turns stored per book key (an ASIN when the archive knows the book).
     @Published public var conversationCounts: [String: Int] = [:]
+    @Published public private(set) var conversationCountsBySource:
+        [String: [String: Int]] = [:]
+    @Published public private(set) var conversationStorage: ConversationStorage?
+    @Published public private(set) var retentionImpact: ConversationDeletionImpact?
+    @Published public private(set) var retentionBusy = false
+    private var retentionReviewIDs: Set<Int64> = []
+    private var retentionReviewCutoff: Date?
+    private var retentionReviewDays: Int?
+    private var retentionReviewUpdatedAt: [Int64: Date] = [:]
+    private var retentionReviewRevisions: [Int64: Int64] = [:]
+    private var retentionReviewCardNoteIDs: Set<Int64> = []
+    private var retentionPolicyRevision = 0
+    /// IDs removed by a Chats action, so an open companion can clear a thread
+    /// that no longer exists.
+    @Published public private(set) var deletedConversationIDs: Set<Int64> = []
+    /// Bumped when a library view changes a transcript's compaction. An open
+    /// companion refreshes its prompt projection instead of sending the old
+    /// summary or the full history after a Remove Summary.
+    @Published public private(set) var conversationChangeRevision = 0
+    @Published public private(set) var changedConversationIDs: Set<Int64> = []
     @Published public var showSavedAINotes = false
     @Published public var sourceHealth: [BookSource: String] = [:]
     @Published public var sourceLastImport: [BookSource: Date] = [:]
@@ -151,6 +172,14 @@ public final class AppModel: ObservableObject {
     public var openSavedNotesWindow: (() -> Void)?
     @Published public var settings = AISettings.load() {
         didSet {
+            if oldValue.chatRetentionDays != settings.chatRetentionDays {
+                // A confirmation belongs to the period the reader reviewed.
+                // Changing the policy, even away and back, requires a new
+                // review before launch cleanup can run.
+                retentionPolicyRevision += 1
+                settings.chatRetentionConfirmed = false
+                settings.chatRetentionConfirmedDays = 0
+            }
             settings.save()
             applyTracking()
         }
@@ -224,12 +253,15 @@ public final class AppModel: ObservableObject {
     private var aiNotesGeneration = 0
     private var conversationCountsGeneration = 0
     private var activityGeneration = 0
+    private var cleanupGeneration = 0
     private var permissionCancellables: Set<AnyCancellable> = []
     private var cleanRecoveryRunning = false
 
     /// Set by the app shell. The companion owns the reading panel, so the
     /// library window asks it to open rather than creating a second panel.
     public var openCompanion: (() -> Void)?
+    /// Opens the companion and continues a specific stored conversation.
+    public var openCompanionChat: ((PendingCompanionChat) -> Void)?
 
     /// Set by the app shell so the settings pane can edit the shell's
     /// companion settings without the shell constructing this model at login.
@@ -319,6 +351,7 @@ public final class AppModel: ObservableObject {
         }
         readerRecoveryDeferred = recoverReaderSettings && deferReaderRecovery
         if recoverReaderSettings && !deferReaderRecovery && !arguments.contains("--shell-only") { recoverSettingsIfNeeded() }
+        runChatRetentionIfEnabled()
     }
 
     /// A crash between turning Popular Highlights off and restoring it leaves
@@ -464,9 +497,16 @@ public final class AppModel: ObservableObject {
     public func conversationCount(for book: Book) -> Int {
         let keys = ConversationFiling.keys(
             for: book, captureFingerprints: [])
+        let source = book.source.rawValue
         return conversationCounts.reduce(0) { total, entry in
-            keys.contains(ConversationFiling.canonical(entry.key))
-                ? total + entry.value : total
+            guard keys.contains(ConversationFiling.canonical(entry.key))
+            else { return total }
+            if let bySource = conversationCountsBySource[entry.key] {
+                let matching = bySource[source] ?? 0
+                let unknown = bySource[""] ?? 0
+                return total + matching + unknown
+            }
+            return total + entry.value
         }
     }
 
@@ -477,16 +517,197 @@ public final class AppModel: ObservableObject {
         let generation = conversationCountsGeneration
         Task {
             do {
-                let counts = try await Task.detached {
-                    try archive.conversationCounts()
+                let loaded = try await Task.detached {
+                    () -> (
+                        [String: Int], [String: [String: Int]],
+                        ConversationStorage?, String?
+                    ) in
+                    do {
+                        return (
+                            try archive.conversationCounts(),
+                            try archive.conversationCountsBySource(),
+                            try archive.conversationStorage(), nil)
+                    } catch {
+                        return (
+                            try archive.conversationCounts(), [:], nil,
+                            "\(error)")
+                    }
                 }.value
                 guard generation == self.conversationCountsGeneration else {
                     return
                 }
-                conversationCounts = counts
+                conversationCounts = loaded.0
+                conversationCountsBySource = loaded.1
+                conversationStorage = loaded.2
+                if let error = loaded.3 {
+                    post(
+                        "Could not read chat storage: \(error)",
+                        seconds: 12)
+                }
             } catch {
                 post("Could not read chat history: \(error)", seconds: 12)
             }
+        }
+    }
+
+    private var chatRetentionCutoff: Date? {
+        guard settings.chatRetentionDays > 0 else { return nil }
+        return Calendar.current.date(
+            byAdding: .day, value: -settings.chatRetentionDays, to: Date())
+    }
+
+    /// Ask before the first destructive retention pass. The UI shows the
+    /// returned counts; nothing is deleted here.
+    public func reviewChatRetention() {
+        guard let archive, let cutoff = chatRetentionCutoff else {
+            retentionImpact = nil
+            return
+        }
+        let reviewedDays = settings.chatRetentionDays
+        let policyRevision = retentionPolicyRevision
+        retentionBusy = true
+        Task {
+            defer { retentionBusy = false }
+            do {
+                let reviewed = try await Task.detached {
+                    try archive.retentionReview(olderThan: cutoff)
+                }.value
+                guard self.settings.chatRetentionDays == reviewedDays,
+                    self.retentionPolicyRevision == policyRevision
+                else {
+                    self.retentionReviewIDs = []
+                    self.retentionReviewCutoff = nil
+                    self.retentionReviewDays = nil
+                    self.retentionReviewUpdatedAt = [:]
+                    self.retentionReviewRevisions = [:]
+                    self.retentionReviewCardNoteIDs = []
+                    self.retentionImpact = nil
+                    self.post(
+                        "The retention period changed while the review was "
+                            + "loading; review it again.", seconds: 8)
+                    return
+                }
+                retentionReviewIDs = reviewed.ids
+                retentionReviewCutoff = cutoff
+                retentionReviewDays = reviewedDays
+                retentionReviewUpdatedAt = reviewed.updatedAt
+                retentionReviewRevisions = reviewed.revisions
+                retentionReviewCardNoteIDs = reviewed.cardNoteIDs
+                retentionImpact = reviewed.impact
+            } catch {
+                post("Could not inspect old chats: \(error)", seconds: 12)
+            }
+        }
+    }
+
+    public func dismissRetentionImpact() {
+        retentionReviewIDs = []
+        retentionReviewCutoff = nil
+        retentionReviewDays = nil
+        retentionReviewUpdatedAt = [:]
+        retentionReviewRevisions = [:]
+        retentionReviewCardNoteIDs = []
+        retentionImpact = nil
+    }
+
+    /// Delete chats older than the configured window. This runs only after
+    /// the reader has confirmed retention, or when they confirm the review
+    /// alert. Every reviewed chat must still have its reviewed timestamp,
+    /// summary and cards; a chat that gained any of them after the review
+    /// survives, and the whole pass asks to be reviewed again.
+    public func performChatRetention() {
+        guard let archive else { return }
+        let ids = retentionReviewIDs
+        let cutoff = retentionReviewCutoff
+        let reviewedDays = retentionReviewDays
+        let expectedUpdatedAt = retentionReviewUpdatedAt
+        let expectedRevisions = retentionReviewRevisions
+        let expectedCardNoteIDs = retentionReviewCardNoteIDs
+        retentionReviewIDs = []
+        retentionReviewCutoff = nil
+        retentionReviewDays = nil
+        retentionReviewUpdatedAt = [:]
+        retentionReviewRevisions = [:]
+        retentionReviewCardNoteIDs = []
+        retentionImpact = nil
+        guard let reviewedDays,
+            reviewedDays == settings.chatRetentionDays
+        else {
+            post(
+                "The retention period changed; review the cleanup again.",
+                seconds: 8)
+            return
+        }
+        guard cutoff != nil, !ids.isEmpty else {
+            settings.chatRetentionConfirmed = true
+            settings.chatRetentionConfirmedDays = reviewedDays
+            return
+        }
+        let policyRevision = retentionPolicyRevision
+        retentionBusy = true
+        Task {
+            defer { retentionBusy = false }
+            do {
+                let result = try await Task.detached {
+                    let impact = try archive.deleteConversations(
+                        ids: ids, expectedUpdatedAt: expectedUpdatedAt,
+                        expectedCompactionRevisions: expectedRevisions,
+                        expectedCardNoteIDs: expectedCardNoteIDs,
+                        olderThan: cutoff)
+                    // The transaction verifies every reviewed row still
+                    // exists with its reviewed timestamp before deleting,
+                    // so a committed pass removed exactly those rows. No
+                    // post-commit read is needed to know what to notify.
+                    return (impact, Set(expectedUpdatedAt.keys))
+                }.value
+                let impact = result.0
+                if !result.1.isEmpty {
+                    markConversationsDeleted(result.1)
+                }
+                if policyRevision == self.retentionPolicyRevision {
+                    settings.chatRetentionConfirmed = true
+                    settings.chatRetentionConfirmedDays = reviewedDays
+                } else {
+                    post(
+                        "The retention period changed during cleanup; "
+                            + "review it again before launch cleanup.",
+                        seconds: 8)
+                }
+                refreshConversationCounts()
+                post(
+                    "Removed \(impact.conversations) old "
+                        + (impact.conversations == 1 ? "chat" : "chats")
+                        + "; \(impact.notes) saved notes were kept.",
+                    seconds: 8)
+            } catch {
+                post("Could not remove old chats: \(error)", seconds: 12)
+            }
+        }
+    }
+
+    /// At launch, retention runs only after the reader confirmed it once.
+    public func runChatRetentionIfEnabled() {
+        guard settings.chatRetentionDays > 0,
+            settings.chatRetentionConfirmed,
+            settings.chatRetentionConfirmedDays
+                == settings.chatRetentionDays
+        else { return }
+        guard let archive, let cutoff = chatRetentionCutoff else { return }
+        // Run synchronously on the main actor at launch: there is no window
+        // in which the reader can abandon the policy while a queued task
+        // still deletes under it.
+        do {
+            let ids = try archive.conversationIDs(olderThan: cutoff)
+            _ = try archive.deleteConversations(
+                ids: ids, olderThan: cutoff)
+            let surviving = try archive.existingConversationIDs(ids)
+            let deleted = ids.subtracting(surviving)
+            if !deleted.isEmpty {
+                markConversationsDeleted(deleted)
+                refreshConversationCounts()
+            }
+        } catch {
+            post("Could not remove old chats: \(error)", seconds: 12)
         }
     }
 
@@ -523,7 +744,43 @@ public final class AppModel: ObservableObject {
         public let turnID: Int64?
     }
 
+    public struct PendingCompanionChat: Sendable, Equatable {
+        public let bookID: String
+        /// The library source of the book the chat belongs to. Kindle and
+        /// Apple Books can share an identifier, so the ID alone cannot tell
+        /// which reader window should continue the chat.
+        public let bookSource: BookSource?
+        public let conversationID: Int64
+    }
+
     @Published public private(set) var pendingChat: PendingChat?
+
+    /// Continue an older chat from the library. The companion checks the
+    /// live book before loading it; an unfiled chat must be filed first.
+    public func continueChat(
+        book: Book, conversationID: Int64
+    ) {
+        let pending = PendingCompanionChat(
+            bookID: book.asin, bookSource: book.source,
+            conversationID: conversationID)
+        openCompanionChat?(pending)
+    }
+
+    public func markConversationsDeleted(_ ids: Set<Int64>) {
+        guard !ids.isEmpty else { return }
+        deletedConversationIDs.formUnion(ids)
+        // Cards are joined to turns; deleting the chat removes those cards
+        // without touching the saved-note rows.
+        refreshAICards()
+        refreshAINotes()
+    }
+
+    public func markConversationChanged(_ conversationID: Int64? = nil) {
+        if let conversationID {
+            changedConversationIDs.insert(conversationID)
+        }
+        conversationChangeRevision += 1
+    }
 
     public func openChats(
         for book: Book, conversationID: Int64? = nil, turnID: Int64? = nil
@@ -1669,8 +1926,7 @@ public final class AppModel: ObservableObject {
         captureRouteKind = nil
         captureRouteWithoutBook = false
         let title = book?.title ?? livePage?.title ?? "Book"
-        let folder = exportFolder.appendingPathComponent(
-            "\(slug(title))-\(timestamp())")
+        let folder = newCaptureFolder(for: title)
         if manual != nil {
             // The capture owns the reviewed crop and mark now; the full
             // window image is no longer needed.
@@ -1725,7 +1981,19 @@ public final class AppModel: ObservableObject {
                     self.reloadFromArchive()
                 case .failure(let error):
                     self.capturePhase = .failed
-                    self.captureMessage = "\(error)"
+                    self.captureDirectory = nil
+                    var message = "\(error)"
+                    do {
+                        if FileManager.default.fileExists(atPath: folder.path) {
+                            try FileManager.default.removeItem(at: folder)
+                        }
+                    } catch {
+                        message +=
+                            " · failed files could not be removed from "
+                            + "\(folder.path): \(error)"
+                    }
+                    self.captureMessage = message
+                    self.refreshAbandonedCaptures()
                 }
             })
     }
@@ -1775,6 +2043,82 @@ public final class AppModel: ObservableObject {
             capturePDF?.path, inFileViewerRootedAtPath: captureDirectory.path)
     }
 
+    public var abandonedCaptureBytes: Int64 {
+        abandonedCaptures.reduce(0) { $0 + $1.byteCount }
+    }
+
+    /// Find folders left by interrupted or failed captures. Published
+    /// captures are excluded by `CaptureCleanup`.
+    public func refreshAbandonedCaptures() {
+        guard capturePhase != .running else { return }
+        cleanupGeneration += 1
+        let generation = cleanupGeneration
+        let root = exportFolder
+        Task {
+            let found = await Task.detached {
+                CaptureCleanup.abandoned(in: root)
+            }.value
+            guard generation == self.cleanupGeneration else { return }
+            self.abandonedCaptures = found
+        }
+    }
+
+    public func deleteCapture(_ capture: CaptureRecord) {
+        guard capturePhase != .running, let archive else { return }
+        let directory = URL(fileURLWithPath: capture.directory)
+        guard directory.standardizedFileURL
+            != captureDirectory?.standardizedFileURL
+        else { return }
+        Task {
+            let result = await Task.detached {
+                Result {
+                    let manager = FileManager.default
+                    if manager.fileExists(atPath: directory.path) {
+                        try manager.removeItem(at: directory)
+                    }
+                    try archive.deleteCapture(id: capture.id)
+                }
+            }.value
+            switch result {
+            case .success:
+                ReadingContextResolver.invalidateCaptureIndex(
+                    directory: capture.directory)
+                self.reloadFromArchive()
+                self.refreshAbandonedCaptures()
+                self.post("Deleted capture “\(capture.title)”.")
+            case .failure(let error):
+                self.post("Could not delete the capture: \(error)", seconds: 12)
+            }
+        }
+    }
+
+    public func cleanUpAbandonedCaptures() {
+        guard capturePhase != .running else { return }
+        let candidates = abandonedCaptures
+        guard !candidates.isEmpty else { return }
+        Task {
+            let result = await Task.detached {
+                Result { try CaptureCleanup.remove(candidates) }
+            }.value
+            switch result {
+            case .success:
+                for capture in candidates {
+                    ReadingContextResolver.invalidateCaptureIndex(
+                        directory: capture.directory.path)
+                }
+                self.abandonedCaptures = []
+                self.post(
+                    "Removed \(candidates.count) failed capture"
+                        + (candidates.count == 1 ? " folder." : " folders."))
+            case .failure(let error):
+                self.post(
+                    "Could not remove all failed captures: \(error)",
+                    seconds: 12)
+                self.refreshAbandonedCaptures()
+            }
+        }
+    }
+
     public func chooseExportFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -1784,6 +2128,7 @@ public final class AppModel: ObservableObject {
         panel.directoryURL = exportFolder
         if panel.runModal() == .OK, let url = panel.url {
             exportFolder = url
+            refreshAbandonedCaptures()
         }
     }
 
@@ -1823,6 +2168,20 @@ public final class AppModel: ObservableObject {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         return formatter.string(from: Date())
+    }
+
+    /// Never reuse an existing folder: a leftover incomplete run must not
+    /// receive the next run's pages.
+    private func newCaptureFolder(for title: String) -> URL {
+        let base = "\(slug(title))-\(timestamp())"
+        var candidate = exportFolder.appendingPathComponent(base)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = exportFolder.appendingPathComponent(
+                "\(base)-\(suffix)")
+            suffix += 1
+        }
+        return candidate
     }
 }
 

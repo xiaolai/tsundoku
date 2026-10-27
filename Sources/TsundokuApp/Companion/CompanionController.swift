@@ -15,6 +15,9 @@ final class CompanionController {
     private var panelModel: AIPanelModel?
     private var panelIdentity: ReaderIdentity?
     private var reader: ReaderSnapshot?
+    private var pendingConversation:
+        (bookID: String, source: BookSource?, conversationID: Int64)?
+    private var conversationRouteGeneration = 0
     private let styleSampler = ReaderStyleSampler()
     private var styleTask: Task<Void, Never>?
     private var styleGeneration = 0
@@ -35,6 +38,9 @@ final class CompanionController {
     var onPresentationChange:
         ((CompanionOutput, ReaderSnapshot?) -> Void)?
     var onAppModelCreated: (() -> Void)?
+    /// A user-visible message for a route that could not open because no
+    /// reader is active.
+    var messageSink: ((String) -> Void)?
     var statusProvider: () -> [String: Any] = { [:] }
 
     init(
@@ -127,6 +133,69 @@ final class CompanionController {
         guard state.panelOpen else { return }
         preparePanelModelIfNeeded()
         apply(output, animated: !wasPanel)
+    }
+
+    /// Opens the companion and loads a stored conversation after the panel
+    /// has read its live page. The live book must match; a route for another
+    /// book never replaces the current transcript. Kindle and Apple Books can
+    /// share an identifier, so the source must match too.
+    func showConversation(
+        bookID: String, source: BookSource?, conversationID: Int64
+    ) {
+        showPanel()
+        guard output.presentation == .panel else {
+            pendingConversation = nil
+            messageSink?(
+                "Open the chat's book in Kindle or Apple Books, then "
+                    + "continue from Chats.")
+            return
+        }
+        pendingConversation = (bookID, source, conversationID)
+        conversationRouteGeneration += 1
+        openPendingConversation()
+    }
+
+    private func openPendingConversation() {
+        guard let pending = pendingConversation,
+            let model = panelModel
+        else { return }
+        let generation = conversationRouteGeneration
+        pendingConversation = nil
+        Task { [weak self] in
+            await model.awaitPageLoad()
+            guard let self, generation == self.conversationRouteGeneration
+            else { return }
+            guard let key = model.bookKey else {
+                model.sendNote =
+                    "This page could not be identified, so the saved chat "
+                    + "cannot be continued."
+                return
+            }
+            guard
+                ConversationFiling.canonical(key)
+                    == ConversationFiling.canonical(pending.bookID)
+            else {
+                model.sendNote =
+                    "Open the chat's book in the reader, then continue from "
+                    + "Chats."
+                return
+            }
+            if let source = pending.source,
+                let live = model.readerKind.map({
+                    $0 == .kindle ? BookSource.kindle : .appleBooks
+                }),
+                live != source
+            {
+                model.sendNote =
+                    "This chat belongs to the copy in "
+                    + (source == .kindle ? "Kindle" : "Apple Books")
+                    + ". Open that reader and continue from Chats."
+                return
+            }
+            model.openConversation(
+                pending.conversationID, expectedBookKey: pending.bookID,
+                expectedBookSource: pending.source)
+        }
     }
 
     func closePanel() {
@@ -384,6 +453,8 @@ final class CompanionController {
         panelModel?.cancel()
         panelModel = nil
         panelIdentity = nil
+        pendingConversation = nil
+        conversationRouteGeneration += 1
     }
 
     /// Sample the reader's type for the answer text. The sampler reuses a

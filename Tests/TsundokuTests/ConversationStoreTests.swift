@@ -176,6 +176,21 @@ struct ConversationStoreTests {
         #expect(placeholderKeys == ["B9"])
     }
 
+    @Test("a title key does not cross known book sources")
+    func titleKeyRespectsSource() {
+        let book = Book(
+            asin: "APPLE-1", title: "Same Title", author: "A",
+            bookType: 10, readState: 0, source: .appleBooks)
+        let keyed = Conversation(
+            id: 1, bookKey: "books:same title", bookTitle: "Same Title",
+            bookSource: .kindle, createdAt: Date(), updatedAt: Date())
+        let keys = ConversationFiling.keys(
+            for: book, captureFingerprints: [])
+        #expect(
+            !ConversationFiling.matches(
+                keyed, keys: keys, source: book.source))
+    }
+
     @Test("titles normalize for filing")
     func titleNormalization() {
         #expect(

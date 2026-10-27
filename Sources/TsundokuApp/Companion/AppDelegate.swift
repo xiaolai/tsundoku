@@ -284,6 +284,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             }
             self.companion.showPanel()
         }
+        model.openCompanionChat = { [weak self, weak model] pending in
+            guard let self, let model else { return }
+            if !self.permissions.accessibility {
+                self.openSettings(SettingsRoute(pane: .access, focus: .accessibility, intent: .companion))
+                return
+            }
+            guard self.companion.canShowPanel else {
+                model.post(
+                    "Open \(pending.bookID) in the reader first, then continue "
+                        + "the chat.")
+                return
+            }
+            self.companion.showConversation(
+                bookID: pending.bookID, source: pending.bookSource,
+                conversationID: pending.conversationID)
+        }
+        companion.messageSink = { [weak model] message in
+            model?.post(message)
+        }
         model.openSettingsWindow = { [weak self] route in self?.openSettings(route) }
         model.openLibraryWindow = { [weak self] in self?.openLibrary() }
         model.openSavedNotesWindow = { [weak self] in

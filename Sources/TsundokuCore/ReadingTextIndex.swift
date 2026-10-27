@@ -876,6 +876,12 @@ public extension ReadingContextResolver {
             ?? false
     }
 
+    /// A deleted capture must not keep answering chapter/book questions from
+    /// the in-memory index.
+    static func invalidateCaptureIndex(directory: String) {
+        CaptureIndexCache.shared.remove(directory: directory)
+    }
+
     static func scopeText(
         _ scope: CompanionScope, result: Result, pageNumber: Int?
     ) -> String? {
@@ -993,6 +999,13 @@ private final class BoundedIndexCache<Value>: @unchecked Sendable {
         order.append(key)
         return loaded
     }
+
+    func remove(_ key: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        values.removeValue(forKey: key)
+        order.removeAll { $0 == key }
+    }
 }
 
 private final class CaptureIndexCache: @unchecked Sendable {
@@ -1004,6 +1017,10 @@ private final class CaptureIndexCache: @unchecked Sendable {
             try? BookTextIndex.load(
                 directory: URL(fileURLWithPath: directory))
         }
+    }
+
+    func remove(directory: String) {
+        cache.remove(directory)
     }
 }
 

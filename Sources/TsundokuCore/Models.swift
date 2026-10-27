@@ -400,6 +400,20 @@ public struct AISettings: Codable, Sendable, Equatable {
     public var includeCoverPage: Bool
     /// Write `metadata.json`, `text.md` and the per-page text files. Default on.
     public var writeSidecars: Bool
+    /// Summarize older turns before a request when the composed prompt passes
+    /// `compactThresholdCharacters`; manual Compact is always available.
+    public var autoCompact: Bool
+    /// Approximate prompt characters that trigger automatic compaction. This is
+    /// a character estimate, not a model token count.
+    public var compactThresholdCharacters: Int
+    /// Delete conversations older than this many days. Zero means never.
+    public var chatRetentionDays: Int
+    /// The reader has reviewed retention once; launch maintenance only runs
+    /// after this is true.
+    public var chatRetentionConfirmed: Bool
+    /// The retention period that was reviewed. A later period change requires
+    /// a fresh review and blocks launch cleanup.
+    public var chatRetentionConfirmedDays: Int
 
     public init(
         provider: AIProviderKind = .claudeCLI,
@@ -418,7 +432,12 @@ public struct AISettings: Codable, Sendable, Equatable {
         booksCropBottom: Int = Int(PageFooter.booksPageNumberInset),
         kindleCropBottom: Int = 0,
         includeCoverPage: Bool = true,
-        writeSidecars: Bool = true
+        writeSidecars: Bool = true,
+        autoCompact: Bool = false,
+        compactThresholdCharacters: Int = 800_000,
+        chatRetentionDays: Int = 0,
+        chatRetentionConfirmed: Bool = false,
+        chatRetentionConfirmedDays: Int = 0
     ) {
         self.provider = provider
         self.model = model
@@ -439,6 +458,11 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.kindleCropBottom = kindleCropBottom
         self.includeCoverPage = includeCoverPage
         self.writeSidecars = writeSidecars
+        self.autoCompact = autoCompact
+        self.compactThresholdCharacters = max(1_000, compactThresholdCharacters)
+        self.chatRetentionDays = max(0, chatRetentionDays)
+        self.chatRetentionConfirmed = chatRetentionConfirmed
+        self.chatRetentionConfirmedDays = max(0, chatRetentionConfirmedDays)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -448,6 +472,9 @@ public struct AISettings: Codable, Sendable, Equatable {
         case capturePageSize, captureReader, captureFontSize, booksFontSteps
         case captureCropTop, booksCropBottom, kindleCropBottom
         case includeCoverPage, writeSidecars
+        case autoCompact, compactThresholdCharacters
+        case chatRetentionDays, chatRetentionConfirmed
+        case chatRetentionConfirmedDays
     }
 
     /// Decodes every missing field to its default, so a settings blob written
@@ -522,6 +549,29 @@ public struct AISettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(
                 Bool.self, forKey: .writeSidecars)
             ?? defaults.writeSidecars
+        autoCompact =
+            try container.decodeIfPresent(
+                Bool.self, forKey: .autoCompact)
+            ?? defaults.autoCompact
+        compactThresholdCharacters = max(
+            1_000,
+            try container.decodeIfPresent(
+                Int.self, forKey: .compactThresholdCharacters)
+                ?? defaults.compactThresholdCharacters)
+        chatRetentionDays = max(
+            0,
+            try container.decodeIfPresent(
+                Int.self, forKey: .chatRetentionDays)
+                ?? defaults.chatRetentionDays)
+        chatRetentionConfirmed =
+            try container.decodeIfPresent(
+                Bool.self, forKey: .chatRetentionConfirmed)
+            ?? defaults.chatRetentionConfirmed
+        chatRetentionConfirmedDays = max(
+            0,
+            try container.decodeIfPresent(
+                Int.self, forKey: .chatRetentionConfirmedDays)
+                ?? defaults.chatRetentionConfirmedDays)
     }
 
     /// The bundle options for a capture started from these settings.

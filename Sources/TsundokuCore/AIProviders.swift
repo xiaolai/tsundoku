@@ -33,9 +33,19 @@ public enum AIService {
     public static func answer(
         for request: AIRequest, settings: AISettings
     ) async throws -> AIAnswer {
+        try await answer(
+            to: AIComposer.prompt(for: request, settings: settings),
+            settings: settings)
+    }
+
+    /// A prompt already composed by the caller, used for conversation
+    /// compaction. It goes through the same provider and error mapping as an
+    /// answer; no transport is hand-written.
+    public static func answer(
+        to prompt: String, settings: AISettings
+    ) async throws -> AIAnswer {
         let provider = try provider(for: settings)
-        let text = try await provider.answer(
-            to: AIComposer.prompt(for: request, settings: settings))
+        let text = try await provider.answer(to: prompt)
         return AIAnswer(text: text, provider: providerName(for: settings))
     }
 

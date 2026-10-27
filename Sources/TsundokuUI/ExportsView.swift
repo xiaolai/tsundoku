@@ -4,8 +4,22 @@ import TsundokuCore
 
 public struct ExportsView: View {
     @ObservedObject var model: AppModel
-    @State private var confirmCapture = false
     @State private var showCropEditor = false
+    @State private var activeAlert: ExportsAlert?
+
+    private enum ExportsAlert: Identifiable {
+        case startCapture
+        case delete(CaptureRecord)
+        case cleanup(Int)
+
+        var id: String {
+            switch self {
+            case .startCapture: "start"
+            case .delete(let capture): "delete-\(capture.id)"
+            case .cleanup(let count): "cleanup-\(count)"
+            }
+        }
+    }
     private var pageLimit: Binding<PageLimit> {
         Binding(
             get: {
@@ -315,7 +329,7 @@ public struct ExportsView: View {
                         }
                     } else {
                         Button {
-                            confirmCapture = true
+                            activeAlert = .startCapture
                         } label: {
                             Label("Start Capture", systemImage: "play.fill")
                         }
@@ -396,8 +410,43 @@ public struct ExportsView: View {
                                 }
                                 .controlSize(.small)
                             }
+                            IconButton(
+                                "Delete", systemImage: "trash",
+                                tooltip: "Delete this capture and its files"
+                            ) {
+                                activeAlert = .delete(capture)
+                            }
+                            .controlSize(.small)
                         }
                     }
+                }
+                if !model.abandonedCaptures.isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(
+                                "\(model.abandonedCaptures.count) failed "
+                                    + "capture folder"
+                                    + (model.abandonedCaptures.count == 1
+                                        ? "" : "s"))
+                                .font(.callout)
+                            Text(
+                                ByteCountFormatter.string(
+                                    fromByteCount: model.abandonedCaptureBytes,
+                                    countStyle: .file)
+                                    + " · safe to remove")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Clean Up…") {
+                            activeAlert = .cleanup(
+                                model.abandonedCaptures.count)
+                        }
+                    }
+                } else if model.capturePhase != .running {
+                    Text("Failed attempts are removed automatically.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -405,6 +454,7 @@ public struct ExportsView: View {
         .scrollContentBackground(.hidden)
         .onAppear {
             model.refreshActivity()
+            model.refreshAbandonedCaptures()
             model.refreshOriginalAvailability()
             model.startManualPreviewFollow()
         }
@@ -452,26 +502,59 @@ public struct ExportsView: View {
                 .frame(minWidth: 360, minHeight: 180)
             }
         }
-        .alert(
-            "Capture Will Control the Reader", isPresented: $confirmCapture
-        ) {
-            Button("Start Capture") {
-                if model.captureTargetIsBooks {
-                    model.startCapture(pages: model.capturePageLimit)
-                } else {
-                    model.startManualCapture(pages: model.capturePageLimit)
-                }
+        .alert(item: $activeAlert) { alert in
+            switch alert {
+            case .startCapture:
+                return Alert(
+                    title: Text("Capture Will Control the Reader"),
+                    message: Text(
+                        "Tsundoku sends page-turn keys to the reader and "
+                            + "photographs the screen. Do not move the mouse, "
+                            + "type, switch apps, move the reader window, or "
+                            + "minimize it until it finishes. Input can turn "
+                            + "a page, change focus, or make the capture fail; "
+                            + "a minimized reader cannot receive page turns "
+                            + "reliably. Start only after the preview and crop "
+                            + "are approved."),
+                    primaryButton: .default(Text("Start Capture")) {
+                        activeAlert = nil
+                        if model.captureTargetIsBooks {
+                            model.startCapture(pages: model.capturePageLimit)
+                        } else {
+                            model.startManualCapture(
+                                pages: model.capturePageLimit)
+                        }
+                    },
+                    secondaryButton: .cancel())
+            case .delete(let capture):
+                return Alert(
+                    title: Text("Delete Capture?"),
+                    message: Text(
+                        "\(capture.title) · \(capture.pageCount) pages\n"
+                            + capture.directory),
+                    primaryButton: .destructive(
+                        Text("Delete Capture and Files")
+                    ) {
+                        activeAlert = nil
+                        model.deleteCapture(capture)
+                    },
+                    secondaryButton: .cancel())
+            case .cleanup(let count):
+                return Alert(
+                    title: Text("Clean Up Failed Captures?"),
+                    message: Text(
+                        "This removes \(count) folder"
+                            + (count == 1 ? "" : "s")
+                            + " whose capture never published a PDF. "
+                            + "Published captures are not touched."),
+                    primaryButton: .destructive(
+                        Text("Delete \(count) Failed Folders")
+                    ) {
+                        activeAlert = nil
+                        model.cleanUpAbandonedCaptures()
+                    },
+                    secondaryButton: .cancel())
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(
-                "Tsundoku sends page-turn keys to the reader and photographs "
-                    + "the screen. Do not move the mouse, type, switch apps, "
-                    + "move the reader window, or minimize it until it "
-                    + "finishes. Input can turn a page, change focus, or make "
-                    + "the capture fail; a minimized reader cannot receive "
-                    + "page turns reliably. Start only after the preview and "
-                    + "crop are approved.")
         }
     }
 

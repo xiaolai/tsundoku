@@ -248,6 +248,29 @@ public struct SettingsView: View {
                     }
                 }
 
+                Section("Conversation Context") {
+                    Toggle(
+                        "Compact automatically when context is large",
+                        isOn: $model.settings.autoCompact
+                    )
+                    TextField(
+                        "Compact at characters",
+                        value: $model.settings.compactThresholdCharacters,
+                        format: .number
+                    )
+                    .disabled(!model.settings.autoCompact)
+                    .help(
+                        "An approximate character count, not a model token "
+                            + "count. Manual Compact is always available.")
+                    Text(
+                        "Compaction summarizes older turns for the model. "
+                            + "Every original message stays in the transcript; "
+                            + "the current page, chapter or book is never "
+                            + "shortened.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
             }
             if pane == .data {
                 Section("Library Data") {
@@ -310,6 +333,49 @@ public struct SettingsView: View {
                     }
                 }
 
+                Section("Chat History") {
+                    if let storage = model.conversationStorage {
+                        LabeledContent("Stored") {
+                            Text(
+                                "\(storage.conversations) chats · "
+                                    + "\(storage.turns) turns · "
+                                    + "\(storage.compactions) summaries")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Picker(
+                        "Keep chats",
+                        selection: $model.settings.chatRetentionDays
+                    ) {
+                        Text("Forever").tag(0)
+                        Text("30 days").tag(30)
+                        Text("90 days").tag(90)
+                        Text("365 days").tag(365)
+                    }
+                    .help(
+                        "Old chats are removed only after you review the "
+                            + "first cleanup. Saved notes are kept.")
+                    .disabled(model.retentionBusy)
+                    if model.settings.chatRetentionDays > 0 {
+                        HStack(spacing: 8) {
+                            Button("Review Old Chats…") {
+                                model.reviewChatRetention()
+                            }
+                            .controlSize(.small)
+                            .disabled(model.retentionBusy)
+                            if model.retentionBusy {
+                                ProgressView().controlSize(.small)
+                            }
+                        }
+                    }
+                    Text(
+                        "Deleting a chat keeps its saved notes and removes "
+                            + "its cards. Compaction summaries are deleted "
+                            + "with the chat.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
             }
             if pane == .about {
                 Section("About") {
@@ -352,6 +418,26 @@ public struct SettingsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+        .alert(
+            "Remove Old Chats?",
+            isPresented: Binding(
+                get: { model.retentionImpact != nil },
+                set: { if !$0 { model.dismissRetentionImpact() } })
+        ) {
+            Button("Remove Old Chats", role: .destructive) {
+                model.performChatRetention()
+            }
+            Button("Cancel", role: .cancel) {
+                model.dismissRetentionImpact()
+            }
+        } message: {
+            if let impact = model.retentionImpact {
+                Text(
+                    "\(impact.conversations) chats and \(impact.turns) turns "
+                        + "will be deleted. \(impact.notes) saved notes are "
+                        + "kept; \(impact.cards) cards will leave Cards.")
+            }
+        }
         .task { if pane == .ai && model.settings.provider == .http { providerState.loadKeyIfNeeded(profileID: model.settings.httpProfileID) } }
     }
 

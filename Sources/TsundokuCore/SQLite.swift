@@ -9,6 +9,7 @@ public enum SQLValue: Sendable, Equatable {
     case integer(Int64)
     case real(Double)
     case text(String)
+    case blob(Data)
 }
 
 public struct Row: Sendable {
@@ -37,6 +38,11 @@ public struct Row: Sendable {
         case .integer(let value): return Double(value)
         default: return nil
         }
+    }
+
+    public func data(_ key: String) -> Data? {
+        guard case .blob(let value)? = values[key] else { return nil }
+        return value
     }
 }
 
@@ -119,9 +125,22 @@ final class SQLiteDatabase {
                         sqlite3_column_double(statement, index))
                 case SQLITE_TEXT:
                     if let text = sqlite3_column_text(statement, index) {
-                        values[name] = .text(String(cString: text))
+                        let count = Int(
+                            sqlite3_column_bytes(statement, index))
+                        values[name] = .text(
+                            String(
+                                decoding: Data(bytes: text, count: count),
+                                as: UTF8.self))
                     } else {
                         values[name] = .null
+                    }
+                case SQLITE_BLOB:
+                    if let bytes = sqlite3_column_blob(statement, index) {
+                        let count = Int(sqlite3_column_bytes(statement, index))
+                        values[name] = .blob(
+                            Data(bytes: bytes, count: count))
+                    } else {
+                        values[name] = .blob(Data())
                     }
                 default:
                     values[name] = .null
@@ -143,6 +162,21 @@ final class SQLiteDatabase {
         }
     }
 
+    /// A consistent read across several statements without taking the
+    /// writer's `BEGIN IMMEDIATE` lock. Another connection cannot commit a
+    /// change between the reads.
+    func readTransaction<T>(_ body: () throws -> T) throws -> T {
+        try execute("BEGIN DEFERRED")
+        do {
+            let value = try body()
+            try execute("COMMIT")
+            return value
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
     private func prepare(
         _ sql: String, _ bindings: [SQLValue]
     ) throws -> OpaquePointer {
@@ -156,16 +190,51 @@ final class SQLiteDatabase {
         }
         for (offset, value) in bindings.enumerated() {
             let index = Int32(offset + 1)
+            let bindResult: Int32
             switch value {
             case .null:
-                sqlite3_bind_null(statement, index)
+                bindResult = sqlite3_bind_null(statement, index)
             case .integer(let value):
-                sqlite3_bind_int64(statement, index, value)
+                bindResult = sqlite3_bind_int64(statement, index, value)
             case .real(let value):
-                sqlite3_bind_double(statement, index, value)
+                bindResult = sqlite3_bind_double(statement, index, value)
             case .text(let value):
-                sqlite3_bind_text(
-                    statement, index, value, -1, SQLITE_TRANSIENT)
+                let bytes = Array(value.utf8)
+                if bytes.isEmpty {
+                    bindResult = sqlite3_bind_text(
+                        statement, index, "", 0, SQLITE_TRANSIENT)
+                } else {
+                    var result: Int32 = SQLITE_ERROR
+                    bytes.withUnsafeBytes { raw in
+                        result = sqlite3_bind_text(
+                            statement, index,
+                            raw.baseAddress?.assumingMemoryBound(
+                                to: CChar.self),
+                            Int32(bytes.count), SQLITE_TRANSIENT)
+                    }
+                    bindResult = result
+                }
+            case .blob(let value):
+                if value.isEmpty {
+                    bindResult = sqlite3_bind_zeroblob(statement, index, 0)
+                } else {
+                    var result: Int32 = SQLITE_ERROR
+                    value.withUnsafeBytes { bytes in
+                        result = sqlite3_bind_blob(
+                            statement, index, bytes.baseAddress,
+                            Int32(bytes.count), SQLITE_TRANSIENT)
+                    }
+                    bindResult = result
+                }
+            }
+            guard bindResult == SQLITE_OK else {
+                let message =
+                    handle.map { String(cString: sqlite3_errmsg($0)) }
+                    ?? "unknown"
+                sqlite3_finalize(statement)
+                throw SQLiteError(
+                    code: bindResult, message: message,
+                    systemErrorCode: sqlite3_system_errno(handle))
             }
         }
         return statement
