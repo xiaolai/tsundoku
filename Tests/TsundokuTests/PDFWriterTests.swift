@@ -149,19 +149,49 @@ struct PDFWriterTests {
         #expect(document.page(at: 1)?.string?.contains("beta") == true)
     }
 
-    @Test("oversized text throws instead of silently clipping")
-    func oversizedTextThrows() throws {
+    @Test("many hard-wrapped lines still form a complete text layer")
+    func wrappedLinesFit() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = try makePNG(width: 240, height: 320, in: directory)
+        let output = directory.appendingPathComponent("book.pdf")
+        // A transcribed page of short lines used to overflow the frame at
+        // 6 pt and abort the whole book. They are one paragraph to a
+        // searchable layer.
+        let text = Array(repeating: "Table cell value", count: 300)
+            .joined(separator: "\n")
+        var warnings: [String] = []
+        let count = try PDFWriter.write(
+            pageURLs: [page], texts: [text],
+            metadata: PDFMetadata(title: "Table"),
+            warnings: { warnings.append($0) }, to: output)
+        #expect(count == 1)
+        #expect(warnings.isEmpty)
+        let document = try #require(PDFDocument(url: output))
+        #expect(document.pageCount == 1)
+        #expect(
+            document.page(at: 0)?.string?.contains("Table cell value")
+                == true)
+    }
+
+    @Test("text that cannot fit the layer keeps the page and warns")
+    func oversizedTextWarns() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let page = try makePNG(width: 120, height: 120, in: directory)
         let output = directory.appendingPathComponent("book.pdf")
-        let text = String(repeating: "A", count: 50_000)
-        #expect(throws: PDFWriterError.self) {
-            try PDFWriter.write(
-                pageURLs: [page], texts: [text],
-                metadata: PDFMetadata(title: "Too long"), to: output)
-        }
-        #expect(!FileManager.default.fileExists(atPath: output.path))
+        let text = String(repeating: "word ", count: 20_000)
+        var warnings: [String] = []
+        let count = try PDFWriter.write(
+            pageURLs: [page], texts: [text],
+            metadata: PDFMetadata(title: "Too long"),
+            warnings: { warnings.append($0) }, to: output)
+        // One dense page must not destroy the book: the page is written
+        // with the part that fits, and the incomplete layer is reported.
+        #expect(count == 1)
+        #expect(PDFWriter.pageCount(output) == 1)
+        #expect(warnings.count == 1)
+        #expect(warnings[0].contains("text layer"))
     }
 
     @Test("page points are pixels divided by display scale")

@@ -11,12 +11,14 @@ public struct ExportsView: View {
         case startCapture
         case delete(CaptureRecord)
         case cleanup(Int)
+        case resume(AbandonedCapture)
 
         var id: String {
             switch self {
             case .startCapture: "start"
             case .delete(let capture): "delete-\(capture.id)"
             case .cleanup(let count): "cleanup-\(count)"
+            case .resume(let capture): "resume-\(capture.id)"
             }
         }
     }
@@ -421,22 +423,43 @@ public struct ExportsView: View {
                     }
                 }
                 if !model.abandonedCaptures.isEmpty {
+                    ForEach(model.abandonedCaptures) { capture in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(capture.directory.lastPathComponent)
+                                    .font(.callout)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text(
+                                    "\(capture.pageCount) pages · "
+                                        + ByteCountFormatter.string(
+                                            fromByteCount: capture.byteCount,
+                                            countStyle: .file))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if capture.resumable {
+                                Button("Resume…") {
+                                    activeAlert = .resume(capture)
+                                }
+                                .controlSize(.small)
+                            }
+                        }
+                    }
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(
-                                "\(model.abandonedCaptures.count) failed "
-                                    + "capture folder"
-                                    + (model.abandonedCaptures.count == 1
-                                        ? "" : "s"))
-                                .font(.callout)
-                            Text(
-                                ByteCountFormatter.string(
+                        Text(
+                            "\(model.abandonedCaptures.count) failed "
+                                + "capture folder"
+                                + (model.abandonedCaptures.count == 1
+                                    ? "" : "s")
+                                + " · "
+                                + ByteCountFormatter.string(
                                     fromByteCount: model.abandonedCaptureBytes,
                                     countStyle: .file)
-                                    + " · safe to remove")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                                + " · safe to remove")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         Spacer()
                         Button("Clean Up…") {
                             activeAlert = .cleanup(
@@ -444,7 +467,9 @@ public struct ExportsView: View {
                         }
                     }
                 } else if model.capturePhase != .running {
-                    Text("Failed attempts are removed automatically.")
+                    Text(
+                        "A failed capture keeps the pages it already wrote, "
+                            + "so it can be resumed or removed here.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -481,7 +506,6 @@ public struct ExportsView: View {
                     crop: Binding(
                         get: { model.manualCrop ?? preview.crop },
                         set: { model.manualCrop = $0 }),
-                    lockA4: $model.manualCropLocksA4,
                     onRefresh: {
                         model.refreshManualPreview()
                     })
@@ -552,6 +576,20 @@ public struct ExportsView: View {
                     ) {
                         activeAlert = nil
                         model.cleanUpAbandonedCaptures()
+                    },
+                    secondaryButton: .cancel())
+            case .resume(let capture):
+                return Alert(
+                    title: Text("Resume This Capture?"),
+                    message: Text(
+                        "Turn Kindle to the last page this folder stored — "
+                            + "page \(capture.pageCount) of its own count. "
+                            + "The window size must be the same as when the "
+                            + "capture stopped. Tsundoku verifies that page "
+                            + "before it captures anything new."),
+                    primaryButton: .default(Text("Resume")) {
+                        activeAlert = nil
+                        model.resumeCapture(capture)
                     },
                     secondaryButton: .cancel())
             }

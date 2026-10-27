@@ -6,7 +6,6 @@ import TsundokuCore
 struct CropEditorView: View {
     let preview: PagePreview
     @Binding var crop: CaptureCrop
-    @Binding var lockA4: Bool
     let onRefresh: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -115,15 +114,17 @@ struct CropEditorView: View {
 
     private var controls: some View {
         HStack(spacing: 16) {
-            Toggle("Lock A4 ratio", isOn: $lockA4)
-                .onChange(of: lockA4) { _, locked in
-                    if locked { crop = crop.a4Locked(in: contentLocal) }
-                }
+            // The capture writes A4 pages, so the crop always keeps the
+            // A4 ratio; there is no free-form mode to switch to.
+            Label("A4 ratio 210:297", systemImage: "lock")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Button("Reset Crop") {
                 crop = CaptureCrop(
                     rect: preview.pageBox.offsetBy(
                         dx: -preview.windowFrame.minX,
                         dy: -preview.windowFrame.minY))
+                    .a4Locked(in: contentLocal)
             }
             .help("Restore the measured page box")
             numericField(
@@ -145,9 +146,7 @@ struct CropEditorView: View {
                 set: { value in
                     var rect = crop.rect
                     rect.size.width = max(40, value)
-                    if lockA4 {
-                        rect.size.height = rect.width / CaptureCrop.a4Ratio
-                    }
+                    rect.size.height = rect.width / CaptureCrop.a4Ratio
                     crop = CaptureCrop(rect: clamped(rect))
                 })
             numericField(
@@ -155,9 +154,7 @@ struct CropEditorView: View {
                 set: { value in
                     var rect = crop.rect
                     rect.size.height = max(40, value)
-                    if lockA4 {
-                        rect.size.width = rect.height * CaptureCrop.a4Ratio
-                    }
+                    rect.size.width = rect.height * CaptureCrop.a4Ratio
                     crop = CaptureCrop(rect: clamped(rect))
                 })
             if let output = outputThumbnail {
@@ -270,78 +267,57 @@ struct CropEditorView: View {
             .onEnded { _ in dragStart = nil }
     }
 
+    /// Only the width is dragged; the height follows from the A4 ratio, and
+    /// the anchor is the opposite corner.
     private func resize(
         start: CGRect, handle: DragHandle, dx: CGFloat, dy: CGFloat
     ) -> CGRect {
-        if lockA4 {
-            let width: CGFloat
-            switch handle {
-            case .topLeft, .bottomLeft:
-                width = start.width - dx
-            case .topRight, .bottomRight:
-                width = start.width + dx
-            case .move:
-                return start
-            }
-            let maxWidth = min(
-                contentLocal.width,
-                contentLocal.height * CaptureCrop.a4Ratio)
-            let clampedWidth = max(120, min(width, maxWidth))
-            let height = clampedWidth / CaptureCrop.a4Ratio
-            var rect: CGRect
-            switch handle {
-            case .topLeft:
-                rect = CGRect(
-                    x: start.maxX - clampedWidth,
-                    y: start.maxY - height,
-                    width: clampedWidth, height: height)
-            case .topRight:
-                rect = CGRect(
-                    x: start.minX, y: start.maxY - height,
-                    width: clampedWidth, height: height)
-            case .bottomLeft:
-                rect = CGRect(
-                    x: start.maxX - clampedWidth, y: start.minY,
-                    width: clampedWidth, height: height)
-            case .bottomRight:
-                rect = CGRect(
-                    x: start.minX, y: start.minY,
-                    width: clampedWidth, height: height)
-            case .move:
-                rect = start
-            }
-            return clamped(rect)
-        }
-        var minX = start.minX
-        var minY = start.minY
-        var maxX = start.maxX
-        var maxY = start.maxY
+        let width: CGFloat
         switch handle {
-        case .topLeft: minX += dx; minY += dy
-        case .topRight: maxX += dx; minY += dy
-        case .bottomLeft: minX += dx; maxY += dy
-        case .bottomRight: maxX += dx; maxY += dy
-        case .move: return start
+        case .topLeft, .bottomLeft:
+            width = start.width - dx
+        case .topRight, .bottomRight:
+            width = start.width + dx
+        case .move:
+            return start
         }
-        if maxX - minX < 40 { maxX = minX + 40 }
-        if maxY - minY < 40 { maxY = minY + 40 }
-        return clamped(
-            CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY))
+        let maxWidth = min(
+            contentLocal.width,
+            contentLocal.height * CaptureCrop.a4Ratio)
+        let clampedWidth = max(120, min(width, maxWidth))
+        let height = clampedWidth / CaptureCrop.a4Ratio
+        switch handle {
+        case .topLeft:
+            return clamped(CGRect(
+                x: start.maxX - clampedWidth, y: start.maxY - height,
+                width: clampedWidth, height: height))
+        case .topRight:
+            return clamped(CGRect(
+                x: start.minX, y: start.maxY - height,
+                width: clampedWidth, height: height))
+        case .bottomLeft:
+            return clamped(CGRect(
+                x: start.maxX - clampedWidth, y: start.minY,
+                width: clampedWidth, height: height))
+        case .bottomRight:
+            return clamped(CGRect(
+                x: start.minX, y: start.minY,
+                width: clampedWidth, height: height))
+        case .move:
+            return start
+        }
     }
 
     private func clamped(_ rect: CGRect) -> CGRect {
         var result = rect
         result.size.width = max(
             40, min(result.width, contentLocal.width))
-        result.size.height = max(
-            40, min(result.height, contentLocal.height))
-        if lockA4 {
-            let maxWidth = min(
-                contentLocal.width,
-                contentLocal.height * CaptureCrop.a4Ratio)
-            result.size.width = min(result.width, maxWidth)
-            result.size.height = result.width / CaptureCrop.a4Ratio
-        }
+        let maxWidth = min(
+            contentLocal.width,
+            contentLocal.height * CaptureCrop.a4Ratio)
+        result.size.width = min(
+            max(40, min(result.width, contentLocal.width)), maxWidth)
+        result.size.height = result.width / CaptureCrop.a4Ratio
         result.origin.x = min(
             max(contentLocal.minX, result.origin.x),
             contentLocal.maxX - result.width)

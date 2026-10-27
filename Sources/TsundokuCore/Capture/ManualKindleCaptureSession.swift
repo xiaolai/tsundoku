@@ -21,6 +21,7 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
         CGRect?, @escaping @Sendable () -> Bool
     ) throws -> CapturedWindow
     public typealias Turn = () throws -> Void
+    public typealias Escape = () throws -> Void
     public typealias Prepare = () throws -> Void
     public typealias Sleep = (TimeInterval) -> Void
     public typealias Now = () -> Date
@@ -28,10 +29,12 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
     private let crop: CaptureCrop
     private let expectedMark: PageMark?
     private let expectedPageNumber: Int?
+    private let isResume: Bool
     private let cancellation: any CancellationChecking
     private let read: Read
     private let capture: Capture
     private let turnForward: Turn
+    private let escape: Escape
     private let prepare: Prepare
     private let sleep: Sleep
     private let now: Now
@@ -47,12 +50,14 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
         expectedWindow: CGRect? = nil,
         expectedMark: PageMark? = nil,
         expectedPageNumber: Int? = nil,
+        isResume: Bool = false,
         read: @escaping Read = { try KindleLive.currentPage() },
         capture: @escaping Capture = { expected, cancelled in
             try WindowCaptureService().capture(
                 expectedFrame: expected, isCancelled: cancelled)
         },
         turnForward: @escaping Turn = { try KindleLive.turnForward() },
+        escape: @escaping Escape = { try KindleLive.escape() },
         prepare: @escaping Prepare = { try KindleLive.ensureMainWindow() },
         sleep: @escaping Sleep = { Thread.sleep(forTimeInterval: $0) },
         now: @escaping Now = Date.init
@@ -60,10 +65,12 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
         self.crop = crop
         self.expectedMark = expectedMark
         self.expectedPageNumber = expectedPageNumber
+        self.isResume = isResume
         self.cancellation = cancellation
         self.read = read
         self.capture = capture
         self.turnForward = turnForward
+        self.escape = escape
         self.prepare = prepare
         self.sleep = sleep
         self.now = now
@@ -184,8 +191,11 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
             if !imageMatches, !(textMatches && pageMatches) {
                 throw ReaderCaptureError.captureFailed(
                     .kindle,
-                    reason: "the page changed since the preview; review the "
-                        + "current page before capturing")
+                    reason: isResume
+                        ? "the reader is not showing the page this capture "
+                            + "stopped on; turn to it and resume again"
+                        : "the page changed since the preview; review the "
+                            + "current page before capturing")
             }
         }
         identity = ObservedIdentity(page: live)
@@ -212,10 +222,35 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
         try checkCancelled()
         try prepare()
         try turnForward()
-        let deadline = now().addingTimeInterval(3.0)
+        if let turned = try poll(after: mark, until: now().addingTimeInterval(3))
+        {
+            return turned
+        }
+        // A footnote link or a selection can hold keyboard focus and swallow
+        // the arrow. Escape changes no page, so clearing it cannot skip one;
+        // the page still has to change before the turn counts.
+        try? escape()
+        sleep(0.05)
+        try turnForward()
+        if let turned = try poll(after: mark, until: now().addingTimeInterval(1.5))
+        {
+            return turned
+        }
+        return .noTurn(
+            TurnRecord(
+                attempted: true, posted: true, observed: false,
+                terminal: false, unresolved: true),
+            reason: "the page did not change")
+    }
+
+    /// Polls for a settled page. Returns nil when the deadline passes without
+    /// one, leaving the retry decision to the caller.
+    private func poll(
+        after mark: PageMark, until deadline: Date
+    ) throws -> PageTransition? {
         var nextImageProbe = now()
         while now() < deadline {
-            sleep(0.15)
+            sleep(0.10)
             try checkCancelled()
             guard let live = try? read() else { continue }
             try checkWindowSize(live)
@@ -242,27 +277,21 @@ public final class ManualKindleCaptureSession: ReaderCaptureSession {
             guard candidate.mark.imageHash != mark.imageHash
                 || pageNumberChanged
             else { continue }
-            // One changed frame is a candidate, not a settled page. Require
-            // the same pixel hash after a short settle, then capture the page
-            // once with its text.
-            sleep(0.12)
-            guard let confirmed = try? makeSnapshot(includeText: false),
+            // One changed frame is a candidate, not a settled page. The
+            // confirmation reads the text in the same pass and must show the
+            // same pixels after a short settle; a third full capture bought
+            // nothing the confirmation had not already checked.
+            sleep(0.10)
+            guard let confirmed = try? makeSnapshot(includeText: true),
                 confirmed.mark.imageHash == candidate.mark.imageHash
             else { continue }
-            guard let settled = try? makeSnapshot(includeText: true),
-                settled.mark.imageHash == confirmed.mark.imageHash
-            else { continue }
             return .turned(
-                settled,
+                confirmed,
                 TurnRecord(
                     attempted: true, posted: true, observed: true,
                     terminal: false, unresolved: false))
         }
-        return .noTurn(
-            TurnRecord(
-                attempted: true, posted: true, observed: false,
-                terminal: false, unresolved: true),
-            reason: "the page did not change")
+        return nil
     }
 
     public func restore() -> RestoreReport {

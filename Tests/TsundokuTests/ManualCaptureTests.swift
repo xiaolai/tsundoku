@@ -487,7 +487,8 @@ struct ManualKindleSessionTests {
 
     private func session(
         pages: Pages, clock: Clock, image: CGImage,
-        captured: CapturedWindow, turns: @escaping @Sendable () -> Void = {}
+        captured: CapturedWindow, turns: @escaping @Sendable () -> Void = {},
+        escape: @escaping @Sendable () -> Void = {}
     ) -> ManualKindleCaptureSession {
         ManualKindleCaptureSession(
             crop: CaptureCrop(
@@ -498,6 +499,7 @@ struct ManualKindleSessionTests {
             read: { pages.next() },
             capture: { _, _ in captured },
             turnForward: turns,
+            escape: escape,
             prepare: {},
             sleep: { clock.seconds += $0 },
             now: { Date(timeIntervalSince1970: clock.seconds) })
@@ -661,6 +663,38 @@ struct ManualKindleSessionTests {
         #expect(throws: ReaderCaptureError.self) {
             try subject.snapshot()
         }
+    }
+
+    @Test("a link that swallows the first turn is cleared and retried")
+    func focusedLinkIsCleared() throws {
+        let image = try manualImage(width: 400, height: 600)
+        let window = CapturedWindow(
+            image: image,
+            windowFrame: CGRect(x: 100, y: 50, width: 400, height: 600),
+            contentRect: CGRect(x: 100, y: 50, width: 400, height: 600))
+        let pages = Pages([
+            livePage(text: "First page.", page: 4),
+            livePage(text: "Second page.", page: 5),
+        ])
+        let clock = Clock()
+        let turns = Clock()
+        let escaped = Clock()
+        let subject = session(
+            pages: pages, clock: clock, image: image, captured: window,
+            turns: {
+                turns.seconds += 1
+                // The first arrow is swallowed by a focused link.
+                if turns.seconds > 1 { pages.advance() }
+            },
+            escape: { escaped.seconds = 1 })
+        let first = try subject.snapshot()
+        let transition = try subject.advance(after: first.mark)
+        guard case .turned(let next, _) = transition else {
+            Issue.record("expected the retried turn to succeed")
+            return
+        }
+        #expect(escaped.seconds == 1)
+        #expect(next.pageNumber == 5)
     }
 
     @Test("a stalled page is reported, not skipped")

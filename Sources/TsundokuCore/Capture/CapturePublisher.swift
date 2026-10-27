@@ -52,10 +52,15 @@ public struct CaptureArtifact: Sendable {
 public struct PublishedCapture: Sendable {
     public let url: URL
     public let pageCount: Int
+    /// Non-fatal issues the publisher worked around, such as a page whose
+    /// text layer could not hold all of its text. They go into the capture's
+    /// manifest so the reader can see them.
+    public let warnings: [String]
 
-    public init(url: URL, pageCount: Int) {
+    public init(url: URL, pageCount: Int, warnings: [String] = []) {
         self.url = url
         self.pageCount = pageCount
+        self.warnings = warnings
     }
 }
 

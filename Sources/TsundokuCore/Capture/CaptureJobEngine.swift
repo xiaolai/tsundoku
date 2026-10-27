@@ -25,7 +25,8 @@ public struct CaptureJobEngine: Sendable {
         cropTop: Int = 0,
         cropBottom: Int = 0,
         cropAutomatic: Bool = false,
-        cropRect: CGRect? = nil
+        cropRect: CGRect? = nil,
+        resume: Bool = false
     ) throws -> CaptureResult {
         var cropManifest: [String: Any] = [
             "top": cropTop,
@@ -117,7 +118,8 @@ public struct CaptureJobEngine: Sendable {
 
         let store: CaptureArtifactStore
         do {
-            store = try CaptureArtifactStore(output: output)
+            store = try CaptureArtifactStore(
+                output: output, resuming: resume)
         } catch {
             // The guard may already have turned Popular Highlights off; an
             // unwritable output must not leave it that way.
@@ -172,6 +174,13 @@ public struct CaptureJobEngine: Sendable {
                 kind: subject.kind, manual: session.isManualCapture)
         }
         var current = snapshot
+        // A resumed run starts on the last page already stored. The session
+        // verified that page against the stored mark before the engine saw
+        // it, so the page is not written again.
+        var skipCurrent = resume
+        if resume {
+            pageTexts = store.entries.compactMap { $0["text"] as? String }
+        }
         let firstPageNumber = snapshot.pageNumber
         let displayScale: Double =
             snapshot.cropRect.width > 0
@@ -186,8 +195,9 @@ public struct CaptureJobEngine: Sendable {
                 pageNumber: snapshot.pageNumber)
 
         do {
-            var index = 0
-            let safetyLimit = pageLimit ?? 5_000
+            var index = store.pageURLs.count
+            let safetyLimit = index + (pageLimit ?? 5_000)
+            let targetCount = pageLimit.map { index + $0 }
             while index < safetyLimit {
                 try lifecycle.checkReady()
                 if isCancelled() {
@@ -205,52 +215,56 @@ public struct CaptureJobEngine: Sendable {
                 }
                 firstPixelSize = current.pixelSize
 
-                let text = current.text ?? ""
-                _ = try store.commitPage(
-                    image: current.image, text: text,
-                    source: current.textSource?.rawValue ?? "none")
-                pageTexts.append(text)
-                var running = Self.manifestBase(session: session, subject: subject, crop: cropManifest)
-                running["state"] = "running"
-                running["termination"] = "running"
-                running["complete"] = [
-                    "requestedRange": false,
-                    "structural": false,
-                    "wholeBook": false,
-                ]
-                try store.writeManifest(running)
-                index += 1
-                if totalPages == nil,
-                    let remaining = Self.remainingPages(
-                        pageCount: current.pageCount,
-                        pageNumber: current.pageNumber)
-                {
-                    // The run already captured `index - 1` frames before this
-                    // page number became known.
-                    totalPages =
-                        current.pageNumber == nil
-                        ? remaining : index - 1 + remaining
+                if skipCurrent {
+                    skipCurrent = false
+                } else {
+                    let text = current.text ?? ""
+                    _ = try store.commitPage(
+                        image: current.image, text: text,
+                        source: current.textSource?.rawValue ?? "none")
+                    pageTexts.append(text)
+                    var running = Self.manifestBase(session: session, subject: subject, crop: cropManifest)
+                    running["state"] = "running"
+                    running["termination"] = "running"
+                    running["complete"] = [
+                        "requestedRange": false,
+                        "structural": false,
+                        "wholeBook": false,
+                    ]
+                    try store.writeManifest(running)
+                    index += 1
+                    if totalPages == nil,
+                        let remaining = Self.remainingPages(
+                            pageCount: current.pageCount,
+                            pageNumber: current.pageNumber)
+                    {
+                        // The run already captured `index - 1` frames before
+                        // this page number became known.
+                        totalPages =
+                            current.pageNumber == nil
+                            ? remaining : index - 1 + remaining
+                    }
+                    let elapsed = pageClock.elapsed()
+                    let average = elapsed / Double(index)
+                    let remaining = totalPages.map {
+                        max(0, Double($0 - index) * average)
+                    }
+                    progress(
+                        CaptureProgress(
+                            page: index, pageLimit: pageLimit,
+                            totalPages: totalPages,
+                            estimatedRemaining: remaining,
+                            message: "Captured page \(index)"
+                                + (totalPages.map { " of \($0)" } ?? "")
+                                + (current.isEndOfBook
+                                    ? " · end of book" : "")))
                 }
-                let elapsed = pageClock.elapsed()
-                let average = elapsed / Double(index)
-                let remaining = totalPages.map {
-                    max(0, Double($0 - index) * average)
-                }
-                progress(
-                    CaptureProgress(
-                        page: index, pageLimit: pageLimit,
-                        totalPages: totalPages,
-                        estimatedRemaining: remaining,
-                        message: "Captured page \(index)"
-                            + (totalPages.map { " of \($0)" } ?? "")
-                            + (current.isEndOfBook
-                                ? " · end of book" : "")))
 
                 if current.isEndOfBook {
                     termination = .endOfBook
                     break
                 }
-                if let pageLimit, index >= pageLimit {
+                if let targetCount, index >= targetCount {
                     termination = .pageLimit
                     break
                 }
@@ -444,6 +458,9 @@ public struct CaptureJobEngine: Sendable {
         }
         addCleanPage(&manifest)
         var bundleWarnings = bundlePlan?.warnings ?? []
+        // A page whose text did not fit the PDF layer is a capture warning,
+        // not a failed capture: the images and the other pages are intact.
+        bundleWarnings.append(contentsOf: published.warnings)
         if let bundlePlan {
             do {
                 bundleWarnings.append(

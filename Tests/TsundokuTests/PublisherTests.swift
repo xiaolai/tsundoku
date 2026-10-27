@@ -43,6 +43,43 @@ private final class OnePageSession: ReaderCaptureSession {
     }
 }
 
+private final class TwoPageSession: ReaderCaptureSession {
+    let identity = ObservedIdentity(
+        title: "A Book", confidence: .titleOnly("A Book"))
+    let mode = CaptureMode(
+        layout: .reflowable, navigation: .automatic,
+        endDetection: .positive)
+    private let pages: [PageSnapshot]
+    private var index = 0
+
+    init(pages: [PageSnapshot]) { self.pages = pages }
+
+    func snapshot() throws -> PageSnapshot { pages[index] }
+
+    func advance(after mark: PageMark) throws -> PageTransition {
+        if index + 1 < pages.count {
+            index += 1
+            return .turned(
+                pages[index],
+                TurnRecord(
+                    attempted: true, posted: true, observed: true,
+                    terminal: false, unresolved: false))
+        }
+        return .endOfBook(
+            TurnRecord(
+                attempted: true, posted: true, observed: true,
+                terminal: true, unresolved: false))
+    }
+
+    func restore() -> RestoreReport {
+        RestoreReport(
+            opening: PageLocation(pageNumber: 1, pageCount: pages.count),
+            final: PageLocation(pageNumber: pages.count, pageCount: pages.count),
+            attempted: 0, posted: 0, observed: 0, terminal: 0,
+            unresolved: 0, exact: true, reason: nil)
+    }
+}
+
 private func publisherImage() throws -> CGImage {
     guard
         let context = CGContext(
@@ -132,6 +169,48 @@ struct PublisherTests {
         #expect(box.size == CGSize(width: 600, height: 800))
     }
 
+    @Test("a resumed run continues after the pages already stored")
+    func resumeAppendsPages() throws {
+        let directory = try publisherDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let archive = try Archive(
+            path: directory.appendingPathComponent("archive.sqlite"))
+        let output = directory.appendingPathComponent("capture")
+        let first = try publisherSnapshot()
+        let second = PageSnapshot(
+            identity: first.identity, image: first.image, text: "beta",
+            textSource: .accessibility, pageNumber: 2, pageCount: 2,
+            location: PageLocation(pageNumber: 2, pageCount: 2),
+            isEndOfBook: false,
+            cropRect: first.cropRect, pixelSize: first.pixelSize,
+            mark: PageMark(imageHash: 2, text: "beta"))
+        // Stage the folder as a failed first run would leave it.
+        let staged = try CaptureArtifactStore(output: output)
+        _ = try staged.commitPage(
+            image: first.image, text: "alpha", source: "accessibility")
+        try staged.writeManifest([
+            "state": "running", "title": "A Book",
+        ])
+        #expect(throws: CaptureStoreError.self) {
+            _ = try CaptureArtifactStore(output: output)
+        }
+
+        let result = try CaptureJobEngine(archive: archive).run(
+            session: TwoPageSession(pages: [first, second]),
+            subject: CaptureSubject(book: nil, kind: .kindle),
+            pageLimit: nil, output: output,
+            progress: { _ in }, isCancelled: { false },
+            lifecycle: CaptureLifecycle(locked: { false }),
+            resume: true)
+        #expect(result.pages == 2)
+        #expect(PDFWriter.pageCount(result.pdf) == 2)
+        let text = try String(
+            contentsOf: output.appendingPathComponent("text.jsonl"),
+            encoding: .utf8)
+        #expect(text.contains("\"alpha\""))
+        #expect(text.contains("\"beta\""))
+    }
+
     private func scaledImage(width: Int, height: Int) throws -> CGImage {
         guard
             let context = CGContext(
@@ -154,6 +233,39 @@ struct PublisherTests {
             String(repeating: "🎉", count: 100))
         #expect(!name.isEmpty)
         #expect(name.utf8.count <= 200)
+    }
+
+    @Test("a text layer that cannot hold a page is a capture warning")
+    func textLayerWarningReachesManifest() throws {
+        let directory = try publisherDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let archive = try Archive(
+            path: directory.appendingPathComponent("archive.sqlite"))
+        let output = directory.appendingPathComponent("capture")
+        let dense = String(repeating: "word ", count: 20_000)
+        let page = PageSnapshot(
+            identity: ObservedIdentity(
+                title: "A Book", confidence: .titleOnly("A Book")),
+            image: try publisherImage(), text: dense,
+            textSource: .accessibility, pageNumber: 1, pageCount: 1,
+            location: PageLocation(pageNumber: 1, pageCount: 1),
+            isEndOfBook: false,
+            cropRect: CGRect(x: 0, y: 0, width: 40, height: 60),
+            pixelSize: CGSize(width: 40, height: 60),
+            mark: PageMark(imageHash: 1, text: dense))
+        _ = try CaptureJobEngine(archive: archive).run(
+            session: OnePageSession(page: page),
+            subject: CaptureSubject(book: nil, kind: .kindle),
+            pageLimit: nil, output: output,
+            progress: { _ in }, isCancelled: { false },
+            lifecycle: CaptureLifecycle(locked: { false }))
+        let manifestData = try Data(
+            contentsOf: output.appendingPathComponent("manifest.json"))
+        let manifest = try #require(
+            JSONSerialization.jsonObject(with: manifestData)
+                as? [String: Any])
+        let warnings = manifest["warnings"] as? [String] ?? []
+        #expect(warnings.contains { $0.contains("text layer") })
     }
 
     @Test("a publication failure leaves the capture retryable")

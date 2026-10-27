@@ -70,7 +70,8 @@ public final class CaptureEngine: Sendable {
         configuration: ManualCaptureConfiguration,
         progress: @Sendable (CaptureProgress) -> Void,
         isCancelled: @escaping @Sendable () -> Bool,
-        bundle: CaptureBundleRequest? = nil
+        bundle: CaptureBundleRequest? = nil,
+        resume: Bool = false
     ) throws -> CaptureResult {
         let subject = CaptureSubject(book: book, kind: .kindle)
         let session = ManualKindleCaptureSession(
@@ -78,7 +79,8 @@ public final class CaptureEngine: Sendable {
             cancellation: ClosureCancellation(isCancelled),
             expectedWindow: configuration.expectedWindow,
             expectedMark: configuration.expectedMark,
-            expectedPageNumber: configuration.expectedPageNumber)
+            expectedPageNumber: configuration.expectedPageNumber,
+            isResume: configuration.isResume)
         try session.prime()
         return try CaptureJobEngine(archive: archive).run(
             session: session, subject: subject, pageLimit: pageLimit,
@@ -87,7 +89,7 @@ public final class CaptureEngine: Sendable {
             bundle: bundle,
             outputPageSize: CapturePageSize.a4.points,
             cropTop: 0, cropBottom: 0, cropAutomatic: false,
-            cropRect: configuration.crop.rect)
+            cropRect: configuration.crop.rect, resume: resume)
     }
 
     public func capture(

@@ -11,6 +11,7 @@ public struct PDFPublisher: CapturePublisher {
             "\(Self.safeFilename(artifact.metadata.title)).pdf")
         let expected =
             artifact.pageURLs.count + (artifact.coverPage == nil ? 0 : 1)
+        var warnings: [String] = []
         let pages = try PDFWriter.write(
             pageURLs: artifact.pageURLs, texts: artifact.texts,
             metadata: PDFMetadata(
@@ -22,13 +23,15 @@ public struct PDFPublisher: CapturePublisher {
             displayScale: artifact.metadata.displayScale,
             pageSize: artifact.pageSize,
             isCancelled: { artifact.cancellation.isSet },
+            warnings: { warnings.append($0) },
             to: output)
         let count = PDFWriter.pageCount(output)
         guard count == pages, count == expected else {
             throw CapturePublisherError.failed(
                 "the PDF has \(count) pages; \(expected) were expected")
         }
-        return PublishedCapture(url: output, pageCount: count)
+        return PublishedCapture(
+            url: output, pageCount: count, warnings: warnings)
     }
 
     static func safeFilename(_ value: String) -> String {

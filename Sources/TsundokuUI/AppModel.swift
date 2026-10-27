@@ -214,7 +214,6 @@ public final class AppModel: ObservableObject {
     @Published public var capturePageLimit: Int? = 10
     @Published public var manualPreview: PagePreview?
     @Published public var manualCrop: CaptureCrop?
-    @Published public var manualCropLocksA4 = false
     @Published public var manualPreviewBusy = false
     @Published public var manualPreviewError: String?
     @Published public var manualFitMessage: String?
@@ -1670,15 +1669,13 @@ public final class AppModel: ObservableObject {
                         $0, preview.windowFrame.size, tolerance: 4)
                 } ?? false
                 let currentCrop = self.manualCrop
-                let locksA4 = self.manualCropLocksA4
+                // The Kindle flow always writes A4 pages, so the crop keeps
+                // the A4 ratio by construction rather than by a toggle that
+                // can leave the image letterboxed.
                 if let currentCrop, sameSize, currentCrop.isUsable {
-                    self.manualCrop = locksA4
-                        ? currentCrop.a4Locked(in: window)
-                        : currentCrop
+                    self.manualCrop = currentCrop.a4Locked(in: window)
                 } else {
-                    self.manualCrop = locksA4
-                        ? preview.crop.a4Locked(in: window)
-                        : preview.crop
+                    self.manualCrop = preview.crop.a4Locked(in: window)
                 }
                 if showBusy { self.manualFitMessage = nil }
                 self.refreshManualReadiness(live: preview.live)
@@ -1850,8 +1847,8 @@ public final class AppModel: ObservableObject {
         // forward-only, so it captures from the previewed page to the end
         // without the rewind the automatic Kindle path would perform.
         guard let preview = manualPreview,
-            let crop = manualCrop,
-            crop.isUsable
+            let approved = manualCrop,
+            approved.isUsable
         else {
             capturePhase = .failed
             captureMessage =
@@ -1859,6 +1856,11 @@ public final class AppModel: ObservableObject {
                 + "capturing."
             return
         }
+        // The capture writes A4 pages: the crop must keep that ratio, and
+        // the same crop is used for the preview mark and for every frame.
+        let crop = approved.a4Locked(
+            in: CGRect(origin: .zero, size: preview.windowFrame.size))
+        manualCrop = crop
         refreshManualReadiness()
         if manualReadiness?.blockingIssue == .minimized {
             capturePhase = .failed
@@ -1901,8 +1903,68 @@ public final class AppModel: ObservableObject {
                 expectedPageNumber: preview.pageNumber))
     }
 
+    /// Continue a failed Kindle capture from the last page it stored. The
+    /// reader must show that page; the first snapshot verifies its pixels
+    /// against the stored page before anything new is written.
+    public func resumeCapture(_ capture: AbandonedCapture) {
+        guard capturePhase != .running else { return }
+        guard captureKind == .kindle else {
+            capturePhase = .failed
+            captureMessage = "Only Kindle captures can be resumed."
+            return
+        }
+        guard let plan = CaptureCleanup.resumePlan(for: capture.directory)
+        else {
+            capturePhase = .failed
+            captureMessage =
+                "This folder has no reviewed crop or no captured pages; it "
+                + "can be removed instead."
+            return
+        }
+        refreshManualReadiness()
+        if manualReadiness?.blockingIssue == .minimized {
+            capturePhase = .failed
+            captureMessage =
+                manualReadiness?.blockingMessage
+                ?? "The Kindle window is minimized."
+            return
+        }
+        do {
+            try KindleLive.ensureMainWindow()
+        } catch {
+            capturePhase = .failed
+            captureMessage = "\(error)"
+            return
+        }
+        refreshManualReadiness()
+        if let readiness = manualReadiness, !readiness.isReady {
+            capturePhase = .failed
+            captureMessage =
+                readiness.blockingMessage
+                ?? "The Kindle window is not ready for capture."
+            return
+        }
+        guard let live = try? KindleLive.currentPage(),
+            let frame = live.windowFrame
+        else {
+            capturePhase = .failed
+            captureMessage = "Could not read the Kindle window."
+            return
+        }
+        let window = CGRect(
+            x: frame.x, y: frame.y,
+            width: frame.width, height: frame.height)
+        beginCapture(
+            pages: nil,
+            manual: ManualCaptureConfiguration(
+                crop: plan.crop, expectedWindow: window,
+                expectedMark: plan.lastMark, isResume: true),
+            output: plan.directory, resume: true)
+    }
+
     private func beginCapture(
-        pages: Int?, manual: ManualCaptureConfiguration?
+        pages: Int?, manual: ManualCaptureConfiguration?,
+        output: URL? = nil, resume: Bool = false
     ) {
         guard let archive else { return }
         guard capturePhase != .running, !captureSession.isRunning else {
@@ -1926,7 +1988,7 @@ public final class AppModel: ObservableObject {
         captureRouteKind = nil
         captureRouteWithoutBook = false
         let title = book?.title ?? livePage?.title ?? "Book"
-        let folder = newCaptureFolder(for: title)
+        let folder = output ?? newCaptureFolder(for: title)
         if manual != nil {
             // The capture owns the reviewed crop and mark now; the full
             // window image is no longer needed.
@@ -1959,7 +2021,7 @@ public final class AppModel: ObservableObject {
             archive: archive, book: book, kind: kind, pageLimit: pages,
             output: folder, cleanPage: cleanPolicy, pageSetup: setup,
             booksPageSetup: booksSetup, bundleOptions: bundleOptions,
-            cancellation: flag, manual: manual)
+            cancellation: flag, manual: manual, resume: resume)
         captureSession.start(
             request,
             progress: { [weak self] progress in
@@ -1981,16 +2043,21 @@ public final class AppModel: ObservableObject {
                     self.reloadFromArchive()
                 case .failure(let error):
                     self.capturePhase = .failed
-                    self.captureDirectory = nil
                     var message = "\(error)"
-                    do {
-                        if FileManager.default.fileExists(atPath: folder.path) {
-                            try FileManager.default.removeItem(at: folder)
-                        }
-                    } catch {
+                    // Captured pages are the expensive part of a run. Keep
+                    // them and list the folder under failed captures; Clean
+                    // Up is the explicit way to remove them. Only a shell
+                    // with no pages is removed here.
+                    let pages = CaptureCleanup.capturedPageCount(in: folder)
+                    if pages == 0 {
+                        try? FileManager.default.removeItem(at: folder)
+                        self.captureDirectory = nil
+                    } else {
+                        self.captureDirectory = folder
                         message +=
-                            " · failed files could not be removed from "
-                            + "\(folder.path): \(error)"
+                            " · \(pages) captured "
+                            + (pages == 1 ? "page was" : "pages were")
+                            + " kept in \(folder.path)."
                     }
                     self.captureMessage = message
                     self.refreshAbandonedCaptures()

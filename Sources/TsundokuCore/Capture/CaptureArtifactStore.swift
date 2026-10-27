@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 public enum CaptureStoreError: Error, CustomStringConvertible, Sendable {
     case completedArtifact(URL)
+    case resumableArtifact(URL)
     case io(String)
 
     public var description: String {
@@ -12,6 +13,9 @@ public enum CaptureStoreError: Error, CustomStringConvertible, Sendable {
         case .completedArtifact(let url):
             "The output directory already holds a published capture: "
                 + url.path
+        case .resumableArtifact(let url):
+            "The output directory already holds captured pages; resume it "
+                + "or remove it first: " + url.path
         case .io(let message):
             "The capture store could not write: \(message)"
         }
@@ -28,7 +32,7 @@ public final class CaptureArtifactStore {
     public private(set) var pageURLs: [URL] = []
     public private(set) var entries: [[String: Any]] = []
 
-    public init(output: URL) throws {
+    public init(output: URL, resuming: Bool = false) throws {
         self.output = output
         self.pagesDirectory = output.appendingPathComponent("pages")
         // Writing into a published capture would replace its manifest with a
@@ -43,6 +47,51 @@ public final class CaptureArtifactStore {
         }
         try FileManager.default.createDirectory(
             at: pagesDirectory, withIntermediateDirectories: true)
+        let existing = try Self.pageFiles(in: pagesDirectory)
+        if resuming {
+            guard !existing.isEmpty else {
+                throw CaptureStoreError.io(
+                    "there are no captured pages to resume")
+            }
+            pageURLs = existing
+            entries = try Self.textEntries(in: output)
+            guard entries.count == pageURLs.count else {
+                throw CaptureStoreError.io(
+                    "the capture has \(pageURLs.count) pages but "
+                        + "\(entries.count) text entries")
+            }
+        } else if !existing.isEmpty {
+            // Appending to an abandoned folder would splice two runs with
+            // different settings. The reader chooses resume or removal.
+            throw CaptureStoreError.resumableArtifact(output)
+        }
+    }
+
+    /// The pages already written, in page order.
+    public var capturedPageCount: Int { pageURLs.count }
+
+    private static func pageFiles(in directory: URL) throws -> [URL] {
+        let names = try FileManager.default.contentsOfDirectory(
+            atPath: directory.path)
+        return names
+            .filter { $0.hasPrefix("page-") && $0.hasSuffix(".png") }
+            .sorted()
+            .map { directory.appendingPathComponent($0) }
+    }
+
+    private static func textEntries(in output: URL)
+        throws -> [[String: Any]]
+    {
+        let url = output.appendingPathComponent("text.jsonl")
+        guard let text = try? String(contentsOf: url, encoding: .utf8)
+        else { return [] }
+        return text.split(separator: "\n").compactMap { line in
+            guard let data = line.data(using: .utf8),
+                let object = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any]
+            else { return nil }
+            return object
+        }.sorted { ($0["page"] as? Int ?? 0) < ($1["page"] as? Int ?? 0) }
     }
 
     public func commitPage(

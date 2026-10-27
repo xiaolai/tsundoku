@@ -11,14 +11,20 @@ public struct ManualCaptureConfiguration: Sendable, Equatable {
     /// different page instead of silently starting somewhere else.
     public let expectedMark: PageMark?
     public let expectedPageNumber: Int?
+    /// A resumed run starts on the last page already stored, so a mark
+    /// mismatch means the reader is not showing that page, not that the page
+    /// moved since a preview.
+    public let isResume: Bool
 
     public init(
         crop: CaptureCrop, expectedWindow: CGRect,
-        expectedMark: PageMark? = nil, expectedPageNumber: Int? = nil
+        expectedMark: PageMark? = nil, expectedPageNumber: Int? = nil,
+        isResume: Bool = false
     ) {
         self.crop = crop
         self.expectedWindow = expectedWindow
         self.expectedMark = expectedMark
         self.expectedPageNumber = expectedPageNumber
+        self.isResume = isResume
     }
 }

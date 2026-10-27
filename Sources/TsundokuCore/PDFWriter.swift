@@ -62,7 +62,6 @@ public enum PDFWriterError: Error, CustomStringConvertible, Sendable {
     case invalidScale(CGFloat)
     case unreadablePage(index: Int, url: URL)
     case textCountMismatch(expected: Int, actual: Int)
-    case textDidNotFit(page: Int, characters: Int)
     case couldNotCreateContext
     case verificationFailed(expected: Int, actual: Int)
     case cancelled
@@ -78,9 +77,6 @@ public enum PDFWriterError: Error, CustomStringConvertible, Sendable {
             "Page \(index + 1) is missing or unreadable: \(url.lastPathComponent)"
         case .textCountMismatch(let expected, let actual):
             "The PDF has \(expected) pages but \(actual) text entries."
-        case .textDidNotFit(let page, let characters):
-            "Page \(page + 1): \(characters) characters do not fit the "
-                + "invisible text layer."
         case .couldNotCreateContext:
             "Could not create the PDF context."
         case .verificationFailed(let expected, let actual):
@@ -105,15 +101,20 @@ public enum PDFWriter {
     /// no word boxes. The PDF metadata says so, rather than implying a
     /// precision the capture does not have.
     ///
+    /// A page whose text cannot fit the layer is reported through `warnings`
+    /// and written with the part that does fit: losing the whole book over
+    /// one dense page would be worse than a page whose search text is
+    /// incomplete.
+    ///
     /// Pages are written to a temporary file, verified, then moved into place.
-    /// A corrupt page or a text layer that cannot hold its text leaves no
-    /// final PDF behind.
+    /// A corrupt page leaves no final PDF behind.
     public static func write(
         pageURLs: [URL], texts: [String], metadata: PDFMetadata,
         cover: PDFCoverPage? = nil,
         displayScale: CGFloat = 1,
         pageSize: CGSize? = nil,
         isCancelled: @Sendable () -> Bool = { false },
+        warnings: ((String) -> Void)? = nil,
         to url: URL
     ) throws -> Int {
         guard !pageURLs.isEmpty else { throw PDFWriterError.noPages }
@@ -180,12 +181,13 @@ public enum PDFWriter {
             context.beginPage(mediaBox: &box)
             context.draw(image, in: imageRect)
             if index < texts.count, !texts[index].isEmpty {
-                let fitted = drawInvisible(
+                let complete = drawInvisible(
                     texts[index], in: context, page: imageRect)
-                guard fitted else {
-                    context.endPage()
-                    throw PDFWriterError.textDidNotFit(
-                        page: index, characters: texts[index].count)
+                if !complete {
+                    warnings?(
+                        "Page \(index + 1): the PDF text layer could not "
+                            + "hold all of this page's text; search may miss "
+                            + "part of it.")
                 }
             }
             context.endPage()
@@ -454,10 +456,35 @@ public enum PDFWriter {
         return formatter.string(from: date)
     }
 
+    /// Draws the page's text invisibly. Returns false when only part of it
+    /// fitted.
+    ///
+    /// The layer is a searchable text stream, not a visual layout: hard line
+    /// breaks from the transcription carry no meaning, and a page of many
+    /// short lines would otherwise overflow the frame. Collapse every
+    /// whitespace run to one space first, then shrink the (invisible) font
+    /// until the text fits, and draw the visible prefix as a last resort.
     private static func drawInvisible(
         _ text: String, in context: CGContext, page: CGRect
     ) -> Bool {
-        let font = CTFontCreateWithName("Helvetica" as CFString, 6, nil)
+        let plain = text.split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        guard !plain.isEmpty else { return true }
+        for size in [6.0, 4.0, 3.0, 2.0] {
+            if draw(plain, in: context, page: page, size: size) {
+                return true
+            }
+        }
+        // Nothing fits at the smallest size; draw what does. The caller
+        // records the incomplete layer in the capture warnings.
+        _ = draw(plain, in: context, page: page, size: 2)
+        return false
+    }
+
+    private static func draw(
+        _ text: String, in context: CGContext, page: CGRect, size: CGFloat
+    ) -> Bool {
+        let font = CTFontCreateWithName("Helvetica" as CFString, size, nil)
         let attributes: [NSAttributedString.Key: Any] = [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorAttributeName as String):
@@ -472,12 +499,12 @@ public enum PDFWriter {
         let frame = CTFramesetterCreateFrame(
             framesetter, CFRangeMake(0, 0), path, nil)
         let visible = CTFrameGetVisibleStringRange(frame)
-        guard visible.length >= attributed.length else { return false }
+        guard visible.length > 0 else { return false }
         context.saveGState()
         context.setTextDrawingMode(.invisible)
         CTFrameDraw(frame, context)
         context.restoreGState()
-        return true
+        return visible.length >= attributed.length
     }
 
     private static func fsync(_ url: URL) throws {
