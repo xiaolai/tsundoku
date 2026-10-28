@@ -901,6 +901,10 @@ public final class AppModel: ObservableObject {
         section = .library
         bookWorkspaceID = book.asin
         bookWorkspaceSection = .chats
+        // The caller is usually the nonactivating companion panel, which can
+        // set state no visible window renders. Bringing the library forward
+        // is what makes "Manage Chats" do something the reader can see.
+        openLibraryWindow?()
         pendingChat = conversationID.map {
             PendingChat(
                 bookID: book.asin, conversationID: $0, turnID: turnID)
