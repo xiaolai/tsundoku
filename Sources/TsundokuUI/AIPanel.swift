@@ -4496,6 +4496,20 @@ struct MarkdownText: View {
                     interpretedSyntax: .inlineOnlyPreservingWhitespace))
         else { return Text(text) }
         var result = parsed
+        // Chinese words are protected from mid-word breaks before the text is
+        // laid out; see CJKLineBreaker.
+        var pieces: [(Range<AttributedString.Index>, AttributedString)] = []
+        for run in parsed.runs {
+            let characters = String(parsed[run.range].characters)
+            let protected = CJKLineBreaker.protectWords(characters)
+            guard protected != characters else { continue }
+            var replacement = AttributedString(protected)
+            replacement.font = run.font
+            pieces.append((run.range, replacement))
+        }
+        for (range, replacement) in pieces.reversed() {
+            result.replaceSubrange(range, with: replacement)
+        }
         let latin = style?.family.flatMap { Font.custom($0, size: size) }
             ?? Font.system(size: size)
         let chineseFont = style?.chineseFamily.flatMap {
