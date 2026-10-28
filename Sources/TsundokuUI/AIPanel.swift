@@ -3095,6 +3095,7 @@ public struct AIPanelView: View {
     @State private var confirmRemoveCompaction = false
     @State private var confirmNewChat = false
     @State private var confirmClose = false
+    @State private var composerFocused = false
     private let compact: Bool
     private let onActivate: () -> Void
     private let onClose: (() -> Void)?
@@ -3393,7 +3394,9 @@ public struct AIPanelView: View {
         case .failed:
             failureView
         case .ready, .idle:
-            VStack(alignment: .leading, spacing: 8) {
+            // Breathing room between blocks: a wall of paragraphs at 8 pt reads as
+        // one block; 12 lets a heading, a paragraph and a list read as three.
+        VStack(alignment: .leading, spacing: 12) {
                 Text(
                     model.pageText.isEmpty
                         ? "Reload the page to begin." : "Ask about this page"
@@ -3441,7 +3444,9 @@ public struct AIPanelView: View {
     }
 
     private var failureView: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        // Breathing room between blocks: a wall of paragraphs at 8 pt reads as
+        // one block; 12 lets a heading, a paragraph and a list read as three.
+        VStack(alignment: .leading, spacing: 12) {
             Text(model.error ?? "Something went wrong.")
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
@@ -3594,10 +3599,6 @@ public struct AIPanelView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
-                    .background(
-                        Color.primary.opacity(0.035),
-                        in: RoundedRectangle(
-                            cornerRadius: 10, style: .continuous))
             }
         }
         .id(turn.id)
@@ -3700,8 +3701,9 @@ public struct AIPanelView: View {
                         model.refreshSelection()
                     },
                     onEscape: { onClose?() },
+                    onFocus: { composerFocused = $0 },
                     scopeName: model.scope.shortName.lowercased())
-                if model.question.isEmpty {
+                if model.question.isEmpty, !composerFocused {
                     Text(
                         model.scope == .selection
                             ? "Ask about the selection…"
@@ -4106,6 +4108,8 @@ public struct ActivatingTextView: NSViewRepresentable {
     let onSubmit: () -> Void
     let onActivate: () -> Void
     let onEscape: () -> Void
+    /// Reports first-responder changes so the placeholder can follow focus.
+    var onFocus: (Bool) -> Void = { _ in }
     /// What the field is for, in the reader's words. It names the scope, so
     /// VoiceOver says whether the question is about a page, a chapter or the
     /// whole book before anything is typed.
@@ -4116,6 +4120,7 @@ public struct ActivatingTextView: NSViewRepresentable {
         onSubmit: @escaping () -> Void,
         onActivate: @escaping () -> Void,
         onEscape: @escaping () -> Void,
+        onFocus: @escaping (Bool) -> Void = { _ in },
         scopeName: String = "page"
     ) {
         self._text = text
@@ -4123,6 +4128,7 @@ public struct ActivatingTextView: NSViewRepresentable {
         self.onSubmit = onSubmit
         self.onActivate = onActivate
         self.onEscape = onEscape
+        self.onFocus = onFocus
         self.scopeName = scopeName
     }
 
@@ -4200,6 +4206,14 @@ public struct ActivatingTextView: NSViewRepresentable {
 
         init(_ parent: ActivatingTextView) {
             self.parent = parent
+        }
+
+        public func textDidBeginEditing(_ notification: Notification) {
+            parent.onFocus(true)
+        }
+
+        public func textDidEndEditing(_ notification: Notification) {
+            parent.onFocus(false)
         }
 
         public func textDidChange(_ notification: Notification) {
@@ -4345,7 +4359,9 @@ struct MarkdownText: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        // Breathing room between blocks: a wall of paragraphs at 8 pt reads as
+        // one block; 12 lets a heading, a paragraph and a list read as three.
+        VStack(alignment: .leading, spacing: 12) {
             ForEach(
                 Array(MarkdownBlocks.parse(text).enumerated()), id: \.offset
             ) { _, block in
@@ -4359,12 +4375,15 @@ struct MarkdownText: View {
     private func view(for block: MarkdownBlock) -> some View {
         switch block {
         case .heading(let text, let level):
-            inline(text)
-                .font(font(level <= 1 ? 1.35 : level == 2 ? 1.2 : 1.1).bold())
+            inline(
+                text,
+                size: (size * (level <= 1 ? 1.3 : level == 2 ? 1.18 : 1.08))
+                    .rounded(),
+                bold: true)
                 .lineSpacing(lineSpacing)
-                .padding(.top, 2)
+                .padding(.top, 4)
         case .paragraph(let text):
-            inline(text).font(font()).lineSpacing(lineSpacing)
+            inline(text, size: size).lineSpacing(lineSpacing)
         case .list(let items):
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
@@ -4376,8 +4395,7 @@ struct MarkdownText: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                         .frame(minWidth: 14, alignment: .trailing)
-                        inline(item.text)
-                            .font(font())
+                        inline(item.text, size: size)
                             .lineSpacing(lineSpacing)
                     }
                     .padding(.leading, CGFloat(item.depth) * 14)
@@ -4388,8 +4406,7 @@ struct MarkdownText: View {
                 Rectangle()
                     .fill(.quaternary)
                     .frame(width: 2)
-                inline(text)
-                    .font(font())
+                inline(text, size: size)
                     .foregroundStyle(.secondary)
                     .lineSpacing(lineSpacing)
             }
@@ -4407,7 +4424,7 @@ struct MarkdownText: View {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
                 GridRow {
                     ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
-                        inline(cell).font(font().bold())
+                        inline(cell, size: size, bold: true)
                     }
                 }
                 Divider()
@@ -4415,7 +4432,7 @@ struct MarkdownText: View {
                     GridRow {
                         ForEach(Array(row.enumerated()), id: \.offset) {
                             _, cell in
-                            inline(cell).font(font())
+                            inline(cell, size: size)
                         }
                     }
                 }
@@ -4425,22 +4442,55 @@ struct MarkdownText: View {
                 .quaternary.opacity(0.3),
                 in: RoundedRectangle(cornerRadius: 6))
         case .rule:
-            Divider()
+            Divider().padding(.vertical, 2)
         }
     }
 
-    /// Inline emphasis inside a block. Anything the inline parser rejects is
-    /// shown as written rather than dropped.
-    private func inline(_ text: String) -> Text {
-        if let attributed = try? AttributedString(
-            markdown: text,
-            options: AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .inlineOnlyPreservingWhitespace))
-        {
-            return Text(attributed)
+    /// Inline text with each script in its own face: Chinese in the chosen
+    /// face at the chosen tracking, Latin in the reader's. A single font for
+    /// both makes one script a fallback of the other, which is what a
+    /// PingFang answer in a Latin panel looks like.
+    private func inline(
+        _ text: String, size: CGFloat, bold: Bool = false
+    ) -> Text {
+        guard
+            let parsed = try? AttributedString(
+                markdown: text,
+                options: AttributedString.MarkdownParsingOptions(
+                    interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        else { return Text(text) }
+        var result = parsed
+        let latin = style?.family.flatMap { Font.custom($0, size: size) }
+            ?? Font.system(size: size)
+        let chineseFont = style?.chineseFamily.flatMap {
+            Font.custom($0, size: size)
         }
-        return Text(text)
+        let tracking = style?.chineseTracking ?? 0
+        for run in parsed.runs {
+            let characters = String(parsed[run.range].characters)
+            let isChinese = characters.unicodeScalars.contains {
+                Self.isHan($0)
+            }
+            var attributes = AttributeContainer()
+            attributes.font = isChinese
+                ? (chineseFont ?? latin) : latin
+            if isChinese, tracking != 0 { attributes.kern = tracking }
+            if bold { attributes.inlinePresentationIntent = .stronglyEmphasized }
+            result[run.range].mergeAttributes(attributes)
+        }
+        return Text(result)
     }
+
+    static func isHan(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x3000...0x303F, 0x3400...0x4DBF, 0x4E00...0x9FFF,
+            0xF900...0xFAFF, 0xFF00...0xFFEF, 0x20000...0x2FA1F:
+            return true
+        default:
+            return false
+        }
+    }
+
 }
 
 /// The side pane's one-shot page image. It is not an Exports page and cannot
