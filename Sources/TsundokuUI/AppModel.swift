@@ -1324,7 +1324,7 @@ public final class AppModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard passage.count >= 12 else { return nil }
         let captures = (try? archive.captures()) ?? []
-        let normalized = ConversationKey.normalize(annotation.bookTitle ?? "")
+        let normalized = ConversationKey.normalize(annotation.bookTitle)
         guard
             let record = captures.first(where: {
                 $0.asin.caseInsensitiveCompare(annotation.asin)

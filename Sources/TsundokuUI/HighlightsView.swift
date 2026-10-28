@@ -746,6 +746,13 @@ struct AICardView: View {
         return parts.joined(separator: " · ")
     }
 
+    /// The card's headline. A turn that asked nothing is titled by what it
+    /// did, so a quick action does not render a row with no title at all.
+    private var title: String {
+        if !card.question.isEmpty { return card.question }
+        return card.action?.displayName ?? "AI answer"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
@@ -758,16 +765,15 @@ struct AICardView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Text(
-                card.question.isEmpty
-                    ? card.action?.displayName ?? "AI answer"
-                    : card.question
-            )
-            .font(.system(size: readingSize, weight: .semibold))
+            Text(title)
+                .font(.system(size: readingSize, weight: .semibold))
             .lineLimit(2)
             .textSelection(.enabled)
             MarkdownText(
-                text: card.answer,
+                text: card.answer.isEmpty
+                    ? "The answer is not in the archive. Open the chat this "
+                        + "card came from to read it."
+                    : card.answer,
                 style: CompanionTextStyle(
                     family: nil, size: readingSize, lineSpacing: 3))
                 .lineLimit(excerptLines)
