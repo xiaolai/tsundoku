@@ -63,113 +63,7 @@ public struct ExportsView: View {
     public var body: some View {
         Form {
             if !model.captureTargetIsBooks {
-                Section("Prepare Kindle") {
-                    Text(
-                        "Set the Kindle window, font, and first page first. "
-                            + "Hide Kindle's chrome, then preview the page and "
-                            + "approve the crop before starting.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                    HStack(spacing: 8) {
-                        Button("Fit A4") {
-                            model.fitKindleWindowToA4()
-                        }
-                        .disabled(model.manualPreviewBusy)
-                        .help(
-                            "Resize the Kindle window from its current width "
-                                + "to an A4 page box. It moves the window "
-                                + "within the usable display area and reduces "
-                                + "the width only if the page cannot fit.")
-                        Button("Preview Current Page") {
-                            model.refreshManualPreview()
-                        }
-                        .disabled(model.manualPreviewBusy)
-                        .help(
-                            "Capture the current page once. This does not "
-                                + "turn a page or activate Kindle.")
-                        if model.manualPreviewBusy {
-                            ProgressView().controlSize(.small)
-                        }
-                    }
-                    if let message = model.manualFitMessage {
-                        Text(message)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let error = model.manualPreviewError {
-                        Label(error, systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                    if let readiness = model.manualReadiness {
-                        if let blocking = readiness.blockingMessage {
-                            Label(
-                                blocking,
-                                systemImage: "exclamationmark.triangle")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else if let warning = readiness.warnings.first {
-                            Text(warning.message)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Label(
-                                "Ready to capture from this page.",
-                                systemImage: "checkmark.circle")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    if let preview = model.manualPreview {
-                        HStack(alignment: .top, spacing: 12) {
-                            Image(decorative: preview.image, scale: 1)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(maxWidth: 240, maxHeight: 180)
-                                .clipShape(
-                                    RoundedRectangle(cornerRadius: 6))
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(
-                                    "Page \(preview.pageNumber.map(String.init) ?? "?")"
-                                        + (preview.pageCount.map {
-                                            " of \($0)"
-                                        } ?? ""))
-                                    .font(.callout.weight(.semibold))
-                                Text(
-                                    "Page box \(Int(preview.pageBox.width))×"
-                                        + "\(Int(preview.pageBox.height)) pt · "
-                                        + "crop "
-                                        + String(
-                                            format: "%.3f",
-                                            preview.pageRatio))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                if let note = preview.pageBoxNote {
-                                    Text(note)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Button("Edit Crop…") {
-                                    showCropEditor = true
-                                }
-                                .disabled(model.manualCrop == nil)
-                                if model.manualPreviewFollowing {
-                                    Text("Updates when you turn a page.")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer()
-                        }
-                    } else {
-                        Text(
-                            "No preview yet. The first page is the page "
-                                + "Kindle is showing when capture starts.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+                prepareKindleSection
             }
 
             Section("Capture") {
@@ -321,32 +215,6 @@ public struct ExportsView: View {
                     }
                 }
 
-                HStack(spacing: 8) {
-                    if model.capturePhase == .running {
-                        IconButton(
-                            "Cancel", systemImage: "xmark",
-                            tooltip: "Cancel capture"
-                        ) {
-                            model.cancelCapture()
-                        }
-                    } else {
-                        Button {
-                            activeAlert = .startCapture
-                        } label: {
-                            Label("Start Capture", systemImage: "play.fill")
-                        }
-                        .labelStyle(.iconOnly)
-                        .help(
-                            model.captureTargetIsBooks
-                                ? "Start capture"
-                                : "Start capture from the previewed page")
-                        .buttonStyle(.borderedProminent)
-                        .disabled(
-                            !model.captureTargetIsBooks
-                                && model.manualCrop == nil)
-                    }
-                }
-
                 statusArea
             }
 
@@ -477,6 +345,7 @@ public struct ExportsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+        .safeAreaInset(edge: .bottom, spacing: 0) { actionBar }
         .onAppear {
             model.refreshActivity()
             model.refreshAbandonedCaptures()
@@ -526,8 +395,13 @@ public struct ExportsView: View {
                 .frame(minWidth: 360, minHeight: 180)
             }
         }
-        .alert(item: $activeAlert) { alert in
-            switch alert {
+        .alert(item: $activeAlert) { alert(for: $0) }
+    }
+
+    /// The alerts are factored out of the view body: keeping the whole
+    /// switch inline pushed the body past the type checker's limits.
+    private func alert(for pending: ExportsAlert) -> Alert {
+        switch pending {
             case .startCapture:
                 return Alert(
                     title: Text("Capture Will Control the Reader"),
@@ -592,6 +466,122 @@ public struct ExportsView: View {
                         model.resumeCapture(capture)
                     },
                     secondaryButton: .cancel())
+        }
+    }
+
+    @ViewBuilder
+    private var prepareKindleSection: some View {
+        Section("Prepare Kindle") {
+            Text(
+                "Set the Kindle window, font, and first page first. "
+                    + "Hide Kindle's chrome, then preview the page and "
+                    + "approve the crop before starting.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button("Fit A4") {
+                    model.fitKindleWindowToA4()
+                }
+                .disabled(model.manualPreviewBusy)
+                .help(
+                    "Resize the Kindle window from its current width "
+                        + "to an A4 page box. It moves the window "
+                        + "within the usable display area and reduces "
+                        + "the width only if the page cannot fit.")
+                if model.canRestoreKindleWindow {
+                    Button("Restore Window") {
+                        model.restoreKindleWindow()
+                    }
+                    .help(
+                        "Put the Kindle window back where Fit A4 "
+                            + "found it.")
+                }
+                Button("Preview Current Page") {
+                    model.refreshManualPreview()
+                }
+                .disabled(model.manualPreviewBusy)
+                .help(
+                    "Capture the current page once. This does not "
+                        + "turn a page or activate Kindle.")
+                if model.manualPreviewBusy {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            if let message = model.manualFitMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let error = model.manualPreviewError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            if let readiness = model.manualReadiness {
+                if let blocking = readiness.blockingMessage {
+                    Label(
+                        blocking,
+                        systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let warning = readiness.warnings.first {
+                    Text(warning.message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label(
+                        "Ready to capture from this page.",
+                        systemImage: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let preview = model.manualPreview {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(decorative: preview.image, scale: 1)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 240, maxHeight: 180)
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: 6))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(
+                            preview.pageNumber.map {
+                                "Page \($0)"
+                                    + (preview.pageCount.map {
+                                        " of \($0)"
+                                    } ?? "")
+                            } ?? "Page number unavailable")
+                            .font(.callout.weight(.semibold))
+                        Text(
+                            "Crop \(Int(preview.pageBox.width))×"
+                                + "\(Int(preview.pageBox.height)) pt · A4")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let note = preview.pageBoxNote {
+                            Text(note)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("Edit Crop…") {
+                            showCropEditor = true
+                        }
+                        .disabled(model.manualCrop == nil)
+                        if model.manualPreviewFollowing {
+                            Text("Updates when you turn a page.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                }
+            } else {
+                Text(
+                    "Preview the current page to set the crop. "
+                        + "Start Capture then begins at that page.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -655,6 +645,69 @@ public struct ExportsView: View {
         return parts.joined(separator: " · ")
     }
 
+    /// The flow's primary action lives outside the scrolling form, so it is
+    /// visible without hunting and cannot fall below the window edge.
+    @ViewBuilder
+    private var actionBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            HStack(spacing: 12) {
+                switch model.capturePhase {
+                case .running:
+                    ProgressView().controlSize(.small)
+                    Text(model.captureMessage).font(.callout)
+                    Spacer()
+                    Button("Cancel Capture") { model.cancelCapture() }
+                        .buttonStyle(.bordered)
+                case .finished:
+                    Label(
+                        model.captureMessage,
+                        systemImage: "checkmark.circle")
+                    Spacer()
+                    Button("Open PDF") { model.openPDF() }
+                    Button("Reveal") { model.revealCapture() }
+                case .failed, .idle:
+                    if let reason = startBlockedReason {
+                        Text(reason)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if startBlockedReason != nil {
+                        Button("Preview Current Page") {
+                            model.refreshManualPreview()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    Button {
+                        activeAlert = .startCapture
+                    } label: {
+                        Label("Start Capture", systemImage: "play.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(startBlockedReason != nil)
+                    .help(
+                        model.captureTargetIsBooks
+                            ? "Start capture"
+                            : "Start capture from the previewed page")
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+        }
+        .background(.bar)
+    }
+
+    /// Why Start is unavailable, in the reader's words. A Kindle capture
+    /// needs the reviewed crop the preview produces. An Apple Books capture
+    /// reads its own page setup and can begin on a book the archive does not
+    /// know, so it has no precondition here.
+    private var startBlockedReason: String? {
+        guard !model.captureTargetIsBooks else { return nil }
+        return model.manualCrop == nil
+            ? "Preview the current page to set the crop." : nil
+    }
+
     @ViewBuilder
     private var statusArea: some View {
         switch model.capturePhase {
@@ -683,15 +736,6 @@ public struct ExportsView: View {
                     Label(
                         model.captureMessage,
                         systemImage: "checkmark.circle")
-                    Spacer()
-                    IconButton("Open PDF", systemImage: "arrow.up.right.square")
-                    { model.openPDF() }
-                    .controlSize(.small)
-                    IconButton(
-                        "Reveal", systemImage: "folder",
-                        tooltip: "Show in Finder"
-                    ) { model.revealCapture() }
-                    .controlSize(.small)
                 }
                 if let note = model.captureCleanPage?.note {
                     Text(note)
