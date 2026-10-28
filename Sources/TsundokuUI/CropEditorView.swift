@@ -13,6 +13,10 @@ struct CropEditorView: View {
     @State private var dragStart: CGRect?
     @State private var zoom: CGFloat = 1
     @State private var outputThumbnail: CGImage?
+    /// The crop as the sheet found it. Cancel puts it back: the binding
+    /// writes to the model on every drag, so without this the only way out of
+    /// a bad drag was to re-drag it.
+    @State private var originalCrop: CaptureCrop?
 
     private enum DragHandle: String, CaseIterable {
         case topLeft
@@ -38,6 +42,11 @@ struct CropEditorView: View {
                     .font(.headline)
                 Spacer()
                 Button("Refresh Preview", action: onRefresh)
+                Button("Cancel") {
+                    if let originalCrop { crop = originalCrop }
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)
             }
@@ -52,60 +61,77 @@ struct CropEditorView: View {
                     y: (geometry.size.height - imageSize.height) / 2)
                 let viewRect = viewRect(
                     scale: scale, imageOrigin: imageOrigin)
-                ZStack(alignment: .topLeading) {
-                    Image(decorative: preview.image, scale: 1)
-                        .resizable()
-                        .frame(
-                            width: imageSize.width, height: imageSize.height)
-                        .offset(x: imageOrigin.x, y: imageOrigin.y)
-                    Path { path in
-                        path.addRect(
-                            CGRect(origin: .zero, size: geometry.size))
-                        path.addRect(viewRect)
+                let canvas = CGSize(
+                    width: max(imageSize.width, geometry.size.width),
+                    height: max(imageSize.height, geometry.size.height))
+                ScrollView([.horizontal, .vertical]) {
+                    ZStack(alignment: .topLeading) {
+                        Image(decorative: preview.image, scale: 1)
+                            .resizable()
+                            .frame(
+                                width: imageSize.width,
+                                height: imageSize.height)
+                            .offset(x: imageOrigin.x, y: imageOrigin.y)
+                        Path { path in
+                            path.addRect(
+                                CGRect(origin: .zero, size: canvas))
+                            path.addRect(viewRect)
+                        }
+                        .fill(
+                            Color.black.opacity(0.42),
+                            style: FillStyle(eoFill: true))
+                        Rectangle()
+                            .fill(Color.clear)
+                            .frame(
+                                width: viewRect.width, height: viewRect.height)
+                            .contentShape(Rectangle())
+                            .offset(x: viewRect.minX, y: viewRect.minY)
+                            .gesture(
+                                moveGesture(
+                                    scale: scale, imageOrigin: imageOrigin))
+                        Rectangle()
+                            .stroke(Color.accentColor, lineWidth: 2)
+                            .frame(
+                                width: viewRect.width, height: viewRect.height)
+                            .offset(x: viewRect.minX, y: viewRect.minY)
+                            .allowsHitTesting(false)
+                        handles(
+                            viewRect: viewRect, scale: scale,
+                            imageOrigin: imageOrigin)
                     }
-                    .fill(
-                        Color.black.opacity(0.42),
-                        style: FillStyle(eoFill: true))
-                    Rectangle()
-                        .stroke(Color.accentColor, lineWidth: 2)
-                        .frame(width: viewRect.width, height: viewRect.height)
-                        .offset(x: viewRect.minX, y: viewRect.minY)
-                    handles(
-                        viewRect: viewRect, scale: scale,
-                        imageOrigin: imageOrigin)
+                    .frame(width: canvas.width, height: canvas.height)
                 }
-                .contentShape(Rectangle())
                 .onTapGesture {}
-                .gesture(
-                    moveGesture(scale: scale, imageOrigin: imageOrigin))
             }
-            .frame(minHeight: 320)
+            .frame(minHeight: 240)
             .background(Color(nsColor: .windowBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
             controls
-            HStack {
-                Text(
-                    "Crop \(Int(crop.rect.width))×\(Int(crop.rect.height)) pt "
-                        + "· ratio "
-                        + String(format: "%.3f", crop.rect.width
-                            / max(1, crop.rect.height))
-                )
+            DisclosureGroup("Crop Numbers") {
+                HStack {
+                    Text(
+                        "Crop \(Int(crop.rect.width))×"
+                            + "\(Int(crop.rect.height)) pt · ratio "
+                            + String(format: "%.3f", crop.rect.width
+                                / max(1, crop.rect.height))
+                    )
+                    Spacer()
+                    Text("A4 output 595×842 pt")
+                }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                Spacer()
-                Text("A4 output 595×842 pt")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
+            .font(.caption)
         }
         .padding(16)
-        .frame(minWidth: 680, minHeight: 620)
+        .frame(minWidth: 680, minHeight: 520)
         .focusable()
         .onKeyPress(.leftArrow) { nudge(dx: -1, dy: 0); return .handled }
         .onKeyPress(.rightArrow) { nudge(dx: 1, dy: 0); return .handled }
         .onKeyPress(.upArrow) { nudge(dx: 0, dy: -1); return .handled }
         .onKeyPress(.downArrow) { nudge(dx: 0, dy: 1); return .handled }
+        .onAppear { if originalCrop == nil { originalCrop = crop } }
         .task(id: crop) {
             try? await Task.sleep(for: .milliseconds(60))
             outputThumbnail = makeOutputImage()
@@ -113,10 +139,17 @@ struct CropEditorView: View {
     }
 
     private var controls: some View {
+        VStack(spacing: 10) {
+            geometryControls
+            zoomControls
+        }
+    }
+
+    private var geometryControls: some View {
         HStack(spacing: 16) {
             // The capture writes A4 pages, so the crop always keeps the
             // A4 ratio; there is no free-form mode to switch to.
-            Label("A4 ratio 210:297", systemImage: "lock")
+            Label("Fits an A4 page", systemImage: "lock")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Button("Reset Crop") {
@@ -157,6 +190,12 @@ struct CropEditorView: View {
                     rect.size.width = rect.height * CaptureCrop.a4Ratio
                     crop = CaptureCrop(rect: clamped(rect))
                 })
+            Spacer()
+        }
+    }
+
+    private var zoomControls: some View {
+        HStack(spacing: 12) {
             if let output = outputThumbnail {
                 Image(decorative: output, scale: 1)
                     .resizable()

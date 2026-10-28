@@ -5,17 +5,17 @@ import TsundokuCore
 public struct ExportsView: View {
     @ObservedObject var model: AppModel
     @State private var showCropEditor = false
+    @State private var showAllCaptures = false
+    @State private var showStartDialog = false
     @State private var activeAlert: ExportsAlert?
 
     private enum ExportsAlert: Identifiable {
-        case startCapture
         case delete(CaptureRecord)
         case cleanup(Int)
         case resume(AbandonedCapture)
 
         var id: String {
             switch self {
-            case .startCapture: "start"
             case .delete(let capture): "delete-\(capture.id)"
             case .cleanup(let count): "cleanup-\(count)"
             case .resume(let capture): "resume-\(capture.id)"
@@ -241,11 +241,23 @@ public struct ExportsView: View {
             }
 
             Section("Recent Captures") {
+                if model.captures.count > 10 {
+                    Button(
+                        showAllCaptures
+                            ? "Show Recent Only"
+                            : "See All \(model.captures.count) Captures") {
+                        showAllCaptures.toggle()
+                    }
+                    .controlSize(.small)
+                }
                 if model.captures.isEmpty {
                     Text("No exports yet.")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(model.captures.prefix(10)) { capture in
+                    ForEach(
+                        showAllCaptures
+                            ? model.captures : Array(model.captures.prefix(10))
+                    ) { capture in
                         HStack(alignment: .firstTextBaseline) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(capture.title)
@@ -257,6 +269,25 @@ public struct ExportsView: View {
                                 )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                if let termination = capture.termination,
+                                    !termination.isEmpty
+                                {
+                                    Text(termination)
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                }
+                                if !capture.warnings.isEmpty {
+                                    Label(
+                                        capture.warnings.count == 1
+                                            ? "1 warning"
+                                            : "\(capture.warnings.count) warnings",
+                                        systemImage: "exclamationmark.triangle")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .help(
+                                            capture.warnings.joined(
+                                                separator: "\n"))
+                                }
                             }
                             Spacer()
                             if let path = capture.pdfPath {
@@ -346,6 +377,29 @@ public struct ExportsView: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .safeAreaInset(edge: .bottom, spacing: 0) { actionBar }
+        .confirmationDialog(
+            "Capture Will Control the Reader",
+            isPresented: $showStartDialog,
+            titleVisibility: .visible
+        ) {
+            Button("Start Capture") { beginCaptureNow() }
+            Button("Start and Don't Ask Again") {
+                startNoticeAcknowledged = true
+                beginCaptureNow()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Tsundoku sends page-turn keys to the reader and photographs "
+                    + "the screen. Do not move the mouse, type, switch apps, "
+                    + "move the reader window, or minimize it until it "
+                    + "finishes. The warning stays in Prepare Kindle either "
+                    + "way.")
+        }
+        .onChange(of: startNoticeAcknowledged) { _, value in
+            UserDefaults.standard.set(
+                value, forKey: Self.startNoticeKey)
+        }
         .onAppear {
             model.refreshActivity()
             model.refreshAbandonedCaptures()
@@ -398,32 +452,25 @@ public struct ExportsView: View {
         .alert(item: $activeAlert) { alert(for: $0) }
     }
 
+    /// Whether the reader has said they know what a capture does. Kept in
+    /// defaults, because the warning is a fact about the feature, not about
+    /// this window.
+    private static let startNoticeKey = "tsundoku.captureStartNoticeAcknowledged"
+    @State private var startNoticeAcknowledged =
+        UserDefaults.standard.bool(forKey: ExportsView.startNoticeKey)
+
+    private func beginCaptureNow() {
+        if model.captureTargetIsBooks {
+            model.startCapture(pages: model.capturePageLimit)
+        } else {
+            model.startManualCapture(pages: model.capturePageLimit)
+        }
+    }
+
     /// The alerts are factored out of the view body: keeping the whole
     /// switch inline pushed the body past the type checker's limits.
     private func alert(for pending: ExportsAlert) -> Alert {
         switch pending {
-            case .startCapture:
-                return Alert(
-                    title: Text("Capture Will Control the Reader"),
-                    message: Text(
-                        "Tsundoku sends page-turn keys to the reader and "
-                            + "photographs the screen. Do not move the mouse, "
-                            + "type, switch apps, move the reader window, or "
-                            + "minimize it until it finishes. Input can turn "
-                            + "a page, change focus, or make the capture fail; "
-                            + "a minimized reader cannot receive page turns "
-                            + "reliably. Start only after the preview and crop "
-                            + "are approved."),
-                    primaryButton: .default(Text("Start Capture")) {
-                        activeAlert = nil
-                        if model.captureTargetIsBooks {
-                            model.startCapture(pages: model.capturePageLimit)
-                        } else {
-                            model.startManualCapture(
-                                pages: model.capturePageLimit)
-                        }
-                    },
-                    secondaryButton: .cancel())
             case .delete(let capture):
                 return Alert(
                     title: Text("Delete Capture?"),
@@ -671,6 +718,18 @@ public struct ExportsView: View {
                         Text(reason)
                             .font(.callout)
                             .foregroundStyle(.secondary)
+                    } else if model.captureTargetIsBooks,
+                        model.captureBook() == nil
+                    {
+                        // Apple Books capture reads the open window; a book
+                        // the archive does not know still captures, but the
+                        // file cannot carry its title.
+                        Text(
+                            "No library book matched, so the PDF will be "
+                                + "titled “Book”."
+                        )
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                     }
                     Spacer()
                     if startBlockedReason != nil {
@@ -680,7 +739,11 @@ public struct ExportsView: View {
                         .buttonStyle(.bordered)
                     }
                     Button {
-                        activeAlert = .startCapture
+                        if startNoticeAcknowledged {
+                            beginCaptureNow()
+                        } else {
+                            showStartDialog = true
+                        }
                     } label: {
                         Label("Start Capture", systemImage: "play.fill")
                     }
