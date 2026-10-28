@@ -17,10 +17,16 @@ struct TsundokuCommands: Commands {
         CommandGroup(replacing: .singleWindowList) {}
 
         CommandGroup(after: .newItem) {
+            // ⌘O opens the library itself — the same thing the status menu's
+            // "Library…" does. The annotations workspace moved to ⇧⌘O so one
+            // key cannot mean two places.
+            Button("Library") { delegate.showLibrarySection() }
+                .keyboardShortcut("o")
+
             Button("Open Book Annotations") {
                 delegate.performBrowserCommand("open")
             }
-            .keyboardShortcut("o")
+            .keyboardShortcut("o", modifiers: [.command, .shift])
             .disabled(!state.canOpenBook)
 
             Button("Import Library") { delegate.importFromMenu() }
