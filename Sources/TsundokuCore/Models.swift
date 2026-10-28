@@ -420,7 +420,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         model: String = "",
         endpoint: String = "http://127.0.0.1:11434/v1",
         httpProfileID: String = "custom",
-        language: String = "Simplified Chinese",
+        language: String = "",
         sessionLogging: Bool = false,
         answerTokens: Int = 65_536,
         cleanPageDuringCapture: Bool = true,
