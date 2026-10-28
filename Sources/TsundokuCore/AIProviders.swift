@@ -63,12 +63,28 @@ public enum AIService {
         }
     }
 
-    /// What an answer is labelled with. HTTP names the service, not the wire.
+    /// What an answer is labelled with. HTTP names the service, not the wire:
+    /// "OpenAI-compatible HTTP" describes the transport protocol and tells a
+    /// reader nothing about which service answered.
     public static func providerName(for settings: AISettings) -> String {
         guard settings.provider == .http else {
             return settings.provider.displayName
         }
-        return httpProfile(settings).name
+        let profile = httpProfile(settings)
+        // The catalogue labels some services "(OpenAI-compatible)"; that names
+        // the protocol the panel speaks, which a reader already knows, and it
+        // crowded out the part that identifies the service.
+        let label = profile.name.replacingOccurrences(
+            of: " (OpenAI-compatible)", with: "")
+        guard profile.id == AIProviderProfile.custom.id
+            || profile.baseURL == nil
+        else { return label }
+        // A custom endpoint has no name worth showing; its host does.
+        guard let url = URL(string: settings.endpoint),
+            let host = url.host, !host.isEmpty
+        else { return label }
+        if let port = url.port { return "\(label) · \(host):\(port)" }
+        return "\(label) · \(host)"
     }
 
     // MARK: - HTTP

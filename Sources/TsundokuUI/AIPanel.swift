@@ -2039,7 +2039,7 @@ public final class AIPanelModel: ObservableObject {
         error = nil
         saveError = nil
         failureKind = nil
-        provider = settings.provider.displayName
+        provider = AIService.providerName(for: settings)
         providerModel = settings.model.trimmingCharacters(
             in: .whitespacesAndNewlines)
         submittedRequest = request
