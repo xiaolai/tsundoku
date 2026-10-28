@@ -375,6 +375,21 @@ struct ConversationHistoryTests {
         #expect(try archive.conversation(id: conversation.id)?.title == "")
     }
 
+    @Test("a delete confirmation omits zero clauses and agrees in number")
+    func deletionSentenceGrammar() {
+        let simple = ConversationDeletionImpact(
+            conversations: 2, turns: 1, compactions: 0, notes: 0, cards: 0)
+        #expect(
+            simple.deletionSentence(includeConversations: true)
+                == "2 chats and 1 turn will be deleted.")
+        let full = ConversationDeletionImpact(
+            conversations: 1, turns: 2, compactions: 1, notes: 3, cards: 1)
+        #expect(
+            full.deletionSentence(includeConversations: true)
+                == "1 chat, 2 turns and 1 summary will be deleted. "
+                    + "3 saved notes are kept. 1 card will leave Cards.")
+    }
+
     @Test("deleting a chat keeps notes but removes cards and summaries")
     func deleteKeepsNotes() throws {
         let (archive, path) = try temporaryArchive()

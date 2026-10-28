@@ -307,6 +307,45 @@ public struct ConversationDeletionImpact: Sendable, Equatable {
         self.cards = cards
     }
 
+    /// A sentence for a confirmation, with zero clauses omitted so
+    /// “0 saved notes are kept” never appears.
+    public func deletionSentence(includeConversations: Bool = false) -> String {
+        var deleted: [String] = []
+        if includeConversations {
+            deleted.append(Self.count(conversations, "chat"))
+        }
+        deleted.append(Self.count(turns, "turn"))
+        if compactions > 0 {
+            deleted.append(Self.count(compactions, "summary", "summaries"))
+        }
+        var sentence =
+            Self.list(deleted) + " will be deleted."
+        if notes > 0 {
+            sentence += notes == 1
+                ? " 1 saved note is kept."
+                : " \(notes) saved notes are kept."
+        }
+        if cards > 0 {
+            sentence += cards == 1
+                ? " 1 card will leave Cards."
+                : " \(cards) cards will leave Cards."
+        }
+        return sentence
+    }
+
+    private static func count(
+        _ value: Int, _ singular: String, _ plural: String? = nil
+    ) -> String {
+        "\(value) " + (value == 1 ? singular : (plural ?? singular + "s"))
+    }
+
+    /// “a”, “a and b”, “a, b and c”.
+    private static func list(_ items: [String]) -> String {
+        guard let last = items.last else { return "" }
+        guard items.count > 1 else { return last }
+        return items.dropLast().joined(separator: ", ") + " and " + last
+    }
+
     public static func + (
         left: ConversationDeletionImpact, right: ConversationDeletionImpact
     ) -> ConversationDeletionImpact {
