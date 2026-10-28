@@ -79,8 +79,11 @@ public enum AIService {
         guard profile.id == AIProviderProfile.custom.id
             || profile.baseURL == nil
         else { return label }
-        // A custom endpoint has no name worth showing; its host does.
-        guard let url = URL(string: settings.endpoint),
+        // A custom endpoint has no name worth showing; its host does. The URL
+        // comes from the same accessor the request uses, which trims it: a
+        // pasted endpoint with spaces sends fine and would otherwise label
+        // the answer without its host.
+        guard let url = httpBaseURL(settings),
             let host = url.host, !host.isEmpty
         else { return label }
         if let port = url.port { return "\(label) · \(host):\(port)" }

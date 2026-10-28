@@ -16,6 +16,10 @@ struct BookChatsView: View {
     @State private var turns: [ConversationTurn] = []
     @State private var compaction: ConversationCompaction?
     @State private var search = ""
+    /// The search the rows on screen were loaded for. The count is only true
+    /// for that query: during the debounce and after a failed load the rows
+    /// still belong to the previous one.
+    @State private var loadedSearch = ""
     @State private var searchTask: Task<Void, Never>?
     @State private var isLoading = true
     @State private var loadingTurns = false
@@ -310,7 +314,9 @@ struct BookChatsView: View {
                 }
             }
             .padding(10)
-            if !search.isEmpty, !isLoading {
+            if !search.isEmpty, !isLoading, summariesError == nil,
+                loadedSearch == search
+            {
                 // A search that returns nothing and one that returns three
                 // read the same in a list; the count says which happened.
                 let matches = summaries.count == 1
@@ -1063,6 +1069,7 @@ struct BookChatsView: View {
                 captureCache = (loaded.captures, loaded.fingerprints)
             }
             summaries = loaded.rows
+            loadedSearch = searchQuery
             incompleteCaptures = loaded.incomplete
             isLoading = false
             if selectedID == nil

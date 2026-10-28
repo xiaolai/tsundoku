@@ -34,6 +34,17 @@ struct ProviderNamingTests {
         #expect(!name.contains("OpenAI-compatible"))
     }
 
+    @Test("an endpoint pasted with spaces still names its host")
+    func paddedEndpoint() {
+        var settings = AISettings()
+        settings.provider = .http
+        settings.httpProfileID = AIProviderProfile.custom.id
+        // The request trims the endpoint, so the label must trim it too.
+        settings.endpoint = "  http://192.0.2.10:11434/v1  "
+        let name = AIService.providerName(for: settings)
+        #expect(name.contains("192.0.2.10"))
+    }
+
     @Test("the command-line providers keep their own names")
     func commandLine() {
         var settings = AISettings()
