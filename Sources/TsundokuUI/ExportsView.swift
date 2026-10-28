@@ -251,7 +251,7 @@ public struct ExportsView: View {
                     .controlSize(.small)
                 }
                 if model.captures.isEmpty {
-                    Text("No exports yet.")
+                    Text("No captures yet.")
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(

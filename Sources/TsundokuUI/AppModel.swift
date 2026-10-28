@@ -463,6 +463,7 @@ public final class AppModel: ObservableObject {
     /// the book query free of capture-index work on the main thread.
     public func refreshAICards() {
         guard let archive else { return }
+        isLoadingAICards = true
         aiCardsGeneration += 1
         let generation = aiCardsGeneration
         Task {
@@ -474,12 +475,15 @@ public final class AppModel: ObservableObject {
                 aiCards = cards
                 cardTurnIDs = Set(cards.map(\.turnID))
                 aiCardsLoaded = true
+                isLoadingAICards = false
                 TsundokuDiagnostics.shared.event(
                     "ai_cards_loaded", ["cards": cards.count])
             } catch {
                 TsundokuDiagnostics.shared.event(
                     "ai_cards_failed", ["error": "\(error)"])
-                post("Could not read AI cards: \(error)", seconds: 12)
+                postBanner(
+                    "Could not read AI cards.", severity: .error,
+                    detail: "\(error)")
             }
         }
     }
@@ -488,8 +492,14 @@ public final class AppModel: ObservableObject {
     /// access defaults so a test or a launch option can point them elsewhere.
     public var composerDefaults: UserDefaults { .standard }
 
+    /// True while the notes list is being read. The window shows progress
+    /// instead of claiming there are no notes.
+    @Published public private(set) var isLoadingAINotes = false
+    @Published public private(set) var isLoadingAICards = false
+
     public func refreshAINotes() {
         guard let archive else { return }
+        isLoadingAINotes = true
         aiNotesGeneration += 1
         let generation = aiNotesGeneration
         Task {
@@ -499,8 +509,11 @@ public final class AppModel: ObservableObject {
                 }.value
                 guard generation == self.aiNotesGeneration else { return }
                 savedAINotes = notes
+                isLoadingAINotes = false
             } catch {
-                post("Could not read saved AI notes: \(error)", seconds: 12)
+                postBanner(
+                    "Could not read saved AI notes.", severity: .error,
+                    detail: "\(error)")
             }
         }
     }
@@ -520,7 +533,9 @@ public final class AppModel: ObservableObject {
                     seconds: 5)
                 refreshAINotes()
             } catch {
-                post("Could not delete the saved note: \(error)", seconds: 12)
+                postBanner(
+                    "Could not delete the saved note.", severity: .error,
+                    detail: "\(error)")
             }
         }
     }
@@ -540,7 +555,9 @@ public final class AppModel: ObservableObject {
                         : "Deleted \(count) saved notes.", seconds: 6)
                 refreshAINotes()
             } catch {
-                post("Could not delete the saved notes: \(error)", seconds: 12)
+                postBanner(
+                    "Could not delete the saved notes.", severity: .error,
+                    detail: "\(error)")
             }
         }
     }
@@ -619,7 +636,9 @@ public final class AppModel: ObservableObject {
                         seconds: 12)
                 }
             } catch {
-                post("Could not read chat history: \(error)", seconds: 12)
+                postBanner(
+                    "Could not read chat history.", severity: .error,
+                    detail: "\(error)")
             }
         }
     }
@@ -669,7 +688,9 @@ public final class AppModel: ObservableObject {
                 retentionReviewCardNoteIDs = reviewed.cardNoteIDs
                 retentionImpact = reviewed.impact
             } catch {
-                post("Could not inspect old chats: \(error)", seconds: 12)
+                postBanner(
+                    "Could not inspect old chats.", severity: .error,
+                    detail: "\(error)")
             }
         }
     }
@@ -754,7 +775,9 @@ public final class AppModel: ObservableObject {
                         + "; \(impact.notes) saved notes were kept.",
                     seconds: 8)
             } catch {
-                post("Could not remove old chats: \(error)", seconds: 12)
+                postBanner(
+                    "Could not remove old chats.", severity: .error,
+                    detail: "\(error)")
             }
         }
     }
@@ -781,7 +804,9 @@ public final class AppModel: ObservableObject {
                 refreshConversationCounts()
             }
         } catch {
-            post("Could not remove old chats: \(error)", seconds: 12)
+            postBanner(
+                    "Could not remove old chats.", severity: .error,
+                    detail: "\(error)")
         }
     }
 
@@ -933,7 +958,9 @@ public final class AppModel: ObservableObject {
                 // The row is still there; put the ID back so the companion
                 // does not claim "Add to Cards" over an existing card.
                 self.cardTurnIDs.insert(card.turnID)
-                self.post("Could not remove the AI card: \(error)", seconds: 12)
+                self.postBanner(
+                    "Could not remove the AI card.", severity: .error,
+                    detail: "\(error)")
             }
         }
     }
@@ -1076,7 +1103,9 @@ public final class AppModel: ObservableObject {
             reloadFromArchive()
         } catch {
             archiveError = "\(error)"
-            post("Could not open the archive: \(error)", seconds: 12)
+            postBanner(
+                    "Could not open the archive.", severity: .error,
+                    detail: "\(error)")
         }
     }
 
@@ -1272,6 +1301,28 @@ public final class AppModel: ObservableObject {
     }
 
     /// A short-lived message for the sidebar footer.
+    public struct Banner: Identifiable, Equatable {
+        public enum Severity: String, Equatable, Sendable {
+            case info, warning, error
+        }
+        public let id = UUID()
+        public let text: String
+        public let severity: Severity
+        /// The raw error text, when there is one. Shown behind a disclosure,
+        /// never in place of the sentence.
+        public let detail: String?
+        public let createdAt = Date()
+    }
+
+    /// The message the reader is looking at right now. The sidebar footer is
+    /// easy to miss: it lives in another column and, with the sidebar
+    /// collapsed, nowhere at all.
+    @Published public private(set) var banner: Banner?
+    /// Failures that were shown and dismissed. A reader who dismissed a
+    /// banner by reflex can find out what it said.
+    @Published public private(set) var errorLog: [Banner] = []
+    private var bannerTask: Task<Void, Never>?
+
     public func post(
         _ message: String, seconds: Double = 6, enabled: Bool = true
     ) {
@@ -1283,6 +1334,33 @@ public final class AppModel: ObservableObject {
             guard !Task.isCancelled else { return }
             self?.notice = nil
         }
+    }
+
+    /// Show a message in the window. `seconds` nil keeps it until dismissed,
+    /// which is what a failure needs: a six-second failure message is a
+    /// message nobody finished reading.
+    public func postBanner(
+        _ text: String, severity: Banner.Severity = .info,
+        detail: String? = nil, seconds: Double? = nil
+    ) {
+        let banner = Banner(text: text, severity: severity, detail: detail)
+        self.banner = banner
+        if severity != .info {
+            errorLog.insert(banner, at: 0)
+            if errorLog.count > 20 { errorLog.removeLast(errorLog.count - 20) }
+        }
+        bannerTask?.cancel()
+        guard let seconds else { return }
+        bannerTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            guard !Task.isCancelled else { return }
+            if self?.banner?.id == banner.id { self?.banner = nil }
+        }
+    }
+
+    public func dismissBanner() {
+        bannerTask?.cancel()
+        banner = nil
     }
 
     public func requestLibraryAccess() {
@@ -1573,9 +1651,11 @@ public final class AppModel: ObservableObject {
 
     public func showAIPanel() {
         if capturePhase == .running {
-            status =
-                "The reader is busy capturing. The reading panel waits until the "
-                + "capture finishes."
+            let message =
+                "The reader is busy capturing. The reading panel waits until "
+                + "the capture finishes."
+            status = message
+            postBanner(message, severity: .warning, seconds: 8)
             return
         }
         openCompanion?()
@@ -2334,7 +2414,9 @@ public final class AppModel: ObservableObject {
                 self.refreshAbandonedCaptures()
                 self.post("Deleted capture “\(capture.title)”.")
             case .failure(let error):
-                self.post("Could not delete the capture: \(error)", seconds: 12)
+                self.postBanner(
+                    "Could not delete the capture.", severity: .error,
+                    detail: "\(error)")
             }
         }
     }

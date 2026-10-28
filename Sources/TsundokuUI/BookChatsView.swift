@@ -164,6 +164,9 @@ struct BookChatsView: View {
             // the replacement load instead of dropping it here.
             _ = await loadSummaries()
         }
+        .onChange(of: selectedID) { _, _ in
+            actionError = nil
+        }
         .onChange(of: search) { _, _ in
             // Re-query after a pause, not on every keystroke: each load is a
             // SQLite query over the archive.
@@ -346,7 +349,7 @@ struct BookChatsView: View {
                                 Text(
                                     "\(summary.turnCount) "
                                         + (summary.turnCount == 1
-                                            ? "message" : "messages")
+                                            ? "turn" : "turns")
                                         + " · "
                                         + TsundokuFormat.annotationDate(
                                             summary.conversation.updatedAt)
@@ -363,7 +366,9 @@ struct BookChatsView: View {
                                 if !ConversationFiling.isFiled(
                                     summary.conversation, under: book)
                                 {
-                                    Label("Unfiled", systemImage: "tray")
+                                    Label(
+                                        "Not yet linked to this book",
+                                        systemImage: "tray")
                                         .font(.caption2)
                                         .foregroundStyle(.orange)
                                 }
@@ -385,11 +390,15 @@ struct BookChatsView: View {
                                 }
                             } label: {
                                 Image(systemName: "ellipsis")
+                                    .frame(width: 22, height: 22)
+                                    .contentShape(Rectangle())
                             }
                             .menuStyle(.borderlessButton)
                             .menuIndicator(.hidden)
                             .fixedSize()
                             .help("Actions for this chat")
+                            .accessibilityLabel(
+                                "Actions for \(summary.displayTitle)")
                         }
                         .tag(summary.id)
                         .padding(.vertical, 2)
@@ -489,7 +498,7 @@ struct BookChatsView: View {
                             .disabled(!companionAvailable)
                             .controlSize(.small)
                     }
-                    Button("Compact") { compactSelected() }
+                    Button("Summarize Older Turns") { compactSelected() }
                         .buttonStyle(.bordered)
                         .help(
                             canCompact
@@ -564,7 +573,7 @@ struct BookChatsView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Label(
-                "Earlier messages summarized for the model",
+                "Earlier turns summarized for the model",
                 systemImage: "text.append")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -587,7 +596,7 @@ struct BookChatsView: View {
                     .textSelection(.enabled)
             }
             HStack(spacing: 8) {
-                Button("Recompact") { compactSelected() }
+                Button("Summarize Again") { compactSelected() }
                     .controlSize(.small)
                     .disabled(!canCompact)
                 Button("Remove Summary") {
@@ -603,7 +612,7 @@ struct BookChatsView: View {
             Color.secondary.opacity(0.08),
             in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Earlier messages summarized for the model")
+        .accessibilityLabel("Earlier turns summarized for the model")
     }
 
     /// A chat can span weeks; a divider before the first turn of a day keeps

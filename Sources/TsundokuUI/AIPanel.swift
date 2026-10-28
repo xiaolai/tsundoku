@@ -3263,7 +3263,7 @@ public struct AIPanelView: View {
         Menu {
             Button("New Chat") { model.newChat() }
                 .disabled(model.turns.isEmpty && model.conversationID == nil)
-            Button("Compact Conversation…") {
+            Button("Summarize Older Turns…") {
                 model.compactConversation()
             }
             .disabled(!model.canCompact)
@@ -3423,7 +3423,7 @@ public struct AIPanelView: View {
         if let compaction = model.compaction {
             VStack(alignment: .leading, spacing: 7) {
                 Label(
-                    "Earlier messages summarized for the model",
+                    "Earlier turns summarized for the model",
                     systemImage: "text.append")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -3451,7 +3451,7 @@ public struct AIPanelView: View {
                         .frame(maxHeight: 220, alignment: .topLeading)
                 }
                 HStack(spacing: 8) {
-                    Button("Recompact") { model.compactConversation() }
+                    Button("Summarize Again") { model.compactConversation() }
                         .controlSize(.small)
                         .disabled(!model.canCompact)
                     Button("Remove Summary") {
@@ -3468,7 +3468,7 @@ public struct AIPanelView: View {
                 in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .accessibilityElement(children: .contain)
             .accessibilityLabel(
-                "Earlier messages summarized for the model")
+                "Earlier turns summarized for the model")
         }
     }
 
@@ -3782,7 +3782,13 @@ public struct AIPanelView: View {
             .buttonStyle(.plain)
             .disabled(!model.canSend)
             .opacity(model.canSend ? 1 : 0.45)
-            .help("Send")
+            .help(
+                model.canSend
+                    ? "Send"
+                    : model.question
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .isEmpty
+                        ? "Type a question first" : "Wait for the current answer")
             .accessibilityLabel("Send")
             Rectangle()
                 .fill(Color.white.opacity(0.25))

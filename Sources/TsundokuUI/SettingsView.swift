@@ -321,11 +321,11 @@ public struct SettingsView: View {
 
                 Section("Conversation Context") {
                     Toggle(
-                        "Compact automatically when context is large",
+                        "Summarize older turns before a large request",
                         isOn: $model.settings.autoCompact
                     )
                     TextField(
-                        "Compact at characters",
+                        "Summarize at characters",
                         value: $model.settings.compactThresholdCharacters,
                         format: .number
                     )

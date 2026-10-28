@@ -323,3 +323,113 @@ struct LibraryImportReportView: View {
         .padding(24).frame(width: 540, height: 430)
     }
 }
+
+/// The window's own feedback. It sits over the content, has a severity, and
+/// keeps failures until dismissed; the sidebar footer stays for import status.
+struct BannerView: View {
+    @ObservedObject var model: AppModel
+    @State private var showLog = false
+
+    var body: some View {
+        if let banner = model.banner {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: symbol(for: banner.severity))
+                    .foregroundStyle(tint(for: banner.severity))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(banner.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let detail = banner.detail {
+                        DisclosureGroup("Technical Detail") {
+                            Text(detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        .font(.caption)
+                    }
+                }
+                Spacer(minLength: 8)
+                if !model.errorLog.isEmpty {
+                    Button("Earlier Errors") { showLog = true }
+                        .controlSize(.small)
+                }
+                Button {
+                    model.dismissBanner()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Dismiss message")
+                .help("Dismiss")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(tint(for: banner.severity).opacity(0.35)))
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .sheet(isPresented: $showLog) {
+                BannerLogView(model: model)
+            }
+        }
+    }
+
+    private func symbol(for severity: AppModel.Banner.Severity) -> String {
+        switch severity {
+        case .info: "info.circle"
+        case .warning: "exclamationmark.triangle"
+        case .error: "xmark.octagon"
+        }
+    }
+
+    private func tint(for severity: AppModel.Banner.Severity) -> Color {
+        switch severity {
+        case .info: .secondary
+        case .warning: .orange
+        case .error: .red
+        }
+    }
+}
+
+private struct BannerLogView: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Earlier Messages").font(.title3.bold())
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            if model.errorLog.isEmpty {
+                Text("Nothing yet.").foregroundStyle(.secondary)
+            } else {
+                List(model.errorLog) { entry in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(
+                            entry.createdAt.formatted(
+                                date: .abbreviated, time: .standard)
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        Text(entry.text)
+                        if let detail = entry.detail {
+                            Text(detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 460, minHeight: 320)
+    }
+}

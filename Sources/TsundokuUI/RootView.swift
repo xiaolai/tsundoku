@@ -25,6 +25,12 @@ public struct RootView: View {
             // Wide enough for the sidebar plus the books table's minimum
             // columns; at 760 the table had to hide its own content.
             .frame(minWidth: 880, minHeight: 560)
+            // Feedback belongs over the content the action changed, not only
+            // in a sidebar column that can be collapsed.
+            .overlay(alignment: .top) {
+                BannerView(model: model)
+                    .animation(.easeOut(duration: 0.15), value: model.banner?.id)
+            }
         }
         .sheet(isPresented: $model.showImportReport) {
             LibraryImportReportView(model: model)

@@ -122,7 +122,10 @@ struct SavedAINotesView: View {
 
     @ViewBuilder
     private var content: some View {
-        if model.savedAINotes.isEmpty {
+        if model.isLoadingAINotes, model.savedAINotes.isEmpty {
+            ProgressView("Reading saved notes…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if model.savedAINotes.isEmpty {
             ContentUnavailableView(
                 "No Saved AI Notes", systemImage: "sparkles",
                 description: Text("Save an answer in the reading companion."))
