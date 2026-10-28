@@ -81,6 +81,24 @@ struct CompanionPageTurnTests {
     /// Waits until the write and the conversation refresh it triggers have
     /// settled. The panel refuses a send while it re-reads a transcript, so
     /// a test that sends again must wait for that window to close.
+    /// Sends only when the panel would let a reader press Send. The UI
+    /// disables the button while the panel is busy; a test that calls send()
+    /// inside that window gets its message dropped by the guard in run(),
+    /// which is not a product defect but does make the test racy under load.
+    private func sendWhenReady(
+        _ panel: AIPanelModel, scope: CompanionScope, question: String
+    ) async {
+        // The question is set first: canSend is false until there is one.
+        panel.scope = scope
+        panel.question = question
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !panel.canSend, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(panel.canSend, "the panel never accepted a send")
+        panel.send()
+    }
+
     private func awaitPersistence(_ panel: AIPanelModel) async {
         let deadline = ContinuousClock.now + .seconds(5)
         while (panel.persisting || !panel.canRun),
@@ -1067,9 +1085,9 @@ struct CompanionPageTurnTests {
         await panelModel.awaitPageLoad()
         defer { panelModel.cancel() }
 
-        panelModel.scope = .currentChapter
-        panelModel.question = "Summarize the chapter"
-        panelModel.send()
+        await sendWhenReady(
+            panelModel, scope: .currentChapter,
+            question: "Summarize the chapter")
         await panelModel.sendPreparationTask?.value
         await panelModel.awaitAnswer()
         let chapter = try #require(log.requests.last)
@@ -1079,9 +1097,8 @@ struct CompanionPageTurnTests {
         #expect(panelModel.sendNote?.contains("sent instead") != true)
         await awaitPersistence(panelModel)
 
-        panelModel.scope = .wholeBook
-        panelModel.question = "Summarize the book"
-        panelModel.send()
+        await sendWhenReady(
+            panelModel, scope: .wholeBook, question: "Summarize the book")
         await panelModel.sendPreparationTask?.value
         await panelModel.awaitAnswer()
         let book = try #require(log.requests.last)
@@ -1109,9 +1126,9 @@ struct CompanionPageTurnTests {
         await panelModel.awaitPageLoad()
         defer { panelModel.cancel() }
 
-        panelModel.scope = .currentChapter
-        panelModel.question = "Summarize the chapter"
-        panelModel.send()
+        await sendWhenReady(
+            panelModel, scope: .currentChapter,
+            question: "Summarize the chapter")
         await panelModel.sendPreparationTask?.value
         await panelModel.awaitAnswer()
         let request = try #require(log.requests.last)
