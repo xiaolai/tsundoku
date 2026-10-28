@@ -710,6 +710,7 @@ struct AICardView: View {
     @ObservedObject var model: AppModel
     let readingSize: CGFloat
     let excerptLines: Int
+    @State private var expanded = false
 
     private var targetBook: Book? {
         // A supplied book is trusted only when it passes the same filter as
@@ -839,6 +840,7 @@ struct AnnotationCard: View {
     let excerptLines: Int
     let select: () -> Void
     let inspect: () -> Void
+    @State private var expanded = false
 
     private var borderColor: Color {
         guard randomBorders else { return Color(nsColor: .separatorColor) }
@@ -882,14 +884,26 @@ struct AnnotationCard: View {
                 .help("\(row.kind) · \(row.source)")
             if let passage = row.annotation.passageText {
                 Text(passage).font(.system(size: readingSize)).lineSpacing(3)
-                    .lineLimit(excerptLines)
+                    .lineLimit(expanded ? nil : excerptLines)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
+                // A long passage was cut at the preview length with no way to
+                // read the rest; the card grows only when asked to.
+                if passage.count > 240 {
+                    Button(expanded ? "Show Less" : "Show More") {
+                        expanded.toggle()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityLabel(
+                        expanded ? "Collapse the passage" : "Show the whole passage")
+                }
             }
             if let note = row.annotation.personalNote {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(note).font(.system(size: readingSize)).lineLimit(
-                        excerptLines
+                        expanded ? nil : excerptLines
                     ).fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
