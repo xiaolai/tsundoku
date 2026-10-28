@@ -1045,6 +1045,13 @@ struct AnnotationInspector: View {
                     .disabled(
                         (row.annotation.passageText ?? row.annotation
                             .personalNote ?? "").isEmpty)
+                    Button(
+                        row.annotation.bookSource == .appleBooks
+                            ? "Open in Apple Books"
+                            : "Open in Kindle"
+                    ) {
+                        model.openInReader(row.annotation)
+                    }
                     Button("Show This Book in the Library") {
                         model.bookWorkspaceID = nil
                         model.section = .library

@@ -1279,6 +1279,40 @@ public final class AppModel: ObservableObject {
 
     /// The page observations stored for one session, newest first. The sheet
     /// asks once, so the read happens here rather than in the view's body.
+    /// Opens the book an annotation belongs to in its reader. Apple Books
+    /// opens the file when the asset is on disk; otherwise the app comes
+    /// forward. Kindle has no per-book address, so it comes forward at
+    /// whatever it last had open.
+    public func openInReader(_ annotation: Annotation) {
+        switch annotation.bookSource {
+        case .appleBooks:
+            if let asset = try? BooksAssetReader().asset(for: annotation.asin),
+                let path = asset.path, asset.drm == .clear
+            {
+                NSWorkspace.shared.open(path)
+                return
+            }
+            activateReader(bundleID: "com.apple.iBooksX")
+        case .kindle:
+            activateReader(bundleID: "com.amazon.Lassen")
+        }
+    }
+
+    private func activateReader(bundleID: String) {
+        let app = NSRunningApplication.runningApplications(
+            withBundleIdentifier: bundleID).first
+        if let app {
+            app.activate()
+            return
+        }
+        guard
+            let url = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: bundleID)
+        else { return }
+        NSWorkspace.shared.openApplication(
+            at: url, configuration: NSWorkspace.OpenConfiguration())
+    }
+
     /// The captured page that contains this passage, for a reader who wants
     /// to see the annotation in the book as it was captured. Nil when the
     /// book has no capture or the passage is not in it.
