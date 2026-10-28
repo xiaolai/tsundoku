@@ -158,6 +158,9 @@ public final class AIPanelModel: ObservableObject {
     }
     @Published public var phase: Phase = .idle
     @Published public var provider = ""
+    /// The model behind the provider, when the settings name one. Shown with
+    /// the provider so two answers from different models are distinguishable.
+    @Published public var providerModel = ""
     @Published public var error: String?
     /// The turn whose answer was written to the archive. `saved` is derived
     /// from the latest turn, so a new answer is unsaved even after an earlier
@@ -590,6 +593,37 @@ public final class AIPanelModel: ObservableObject {
 
     /// Opening must not send anything. The caller chooses when to read the
     /// page; `run()` is only reached from an explicit action.
+    /// The composer holds a draft that matters: a half-written question is
+    /// not recoverable once the panel closes, and the panel closes on Escape.
+    /// Drafts are stored per book so a draft about one book can never be sent
+    /// about another.
+    static func draftDefaultsKey(_ key: String?) -> String? {
+        guard let key, !key.isEmpty else { return nil }
+        return "tsundoku.composerDraft." + key
+    }
+
+    public func saveDraft() {
+        guard let defaults = app?.composerDefaults,
+            let key = Self.draftDefaultsKey(bookKey)
+        else { return }
+        let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty {
+            defaults.removeObject(forKey: key)
+        } else {
+            defaults.set(question, forKey: key)
+        }
+    }
+
+    public func restoreDraft() {
+        guard question.isEmpty,
+            let defaults = app?.composerDefaults,
+            let key = Self.draftDefaultsKey(bookKey),
+            let draft = defaults.string(forKey: key),
+            !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+        question = draft
+    }
+
     public func loadPage() {
         pageTask?.cancel()
         pageWork?.cancel()
@@ -691,6 +725,7 @@ public final class AIPanelModel: ObservableObject {
                 }
                 self.phase = .idle
                 if key != previousKey {
+                    self.restoreDraft()
                     // The old book's turns must not be sent, or shown, while
                     // the new book's history loads.
                     self.turns = []
@@ -2005,6 +2040,8 @@ public final class AIPanelModel: ObservableObject {
         saveError = nil
         failureKind = nil
         provider = settings.provider.displayName
+        providerModel = settings.model.trimmingCharacters(
+            in: .whitespacesAndNewlines)
         submittedRequest = request
         submittedOnDevice = settings.provider == .appleOnDevice
         let prompt = AIComposer.prompt(for: request, settings: settings)
@@ -3023,6 +3060,7 @@ public struct AIPanelView: View {
     @State private var showCompactionSummary = false
     @State private var confirmRemoveCompaction = false
     @State private var confirmNewChat = false
+    @State private var confirmClose = false
     private let compact: Bool
     private let onActivate: () -> Void
     private let onClose: (() -> Void)?
@@ -3067,8 +3105,25 @@ public struct AIPanelView: View {
             onDismiss: { model.quickCapture = nil }
         ) {
             if let capture = model.quickCapture {
-                QuickPageCaptureView(capture: capture)
+                QuickPageCaptureView(capture: capture) { text in
+                    model.question = text
+                    model.send()
+                }
             }
+        }
+        .confirmationDialog(
+            "Close the Companion?",
+            isPresented: $confirmClose,
+            titleVisibility: .visible
+        ) {
+            Button("Close and Discard Unsaved Turns", role: .destructive) {
+                onClose?()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "This chat is not fully stored. Anything unsaved will be lost. "
+                    + "Your typed question is kept.")
         }
         .confirmationDialog(
             "Start a New Chat?",
@@ -3116,22 +3171,22 @@ public struct AIPanelView: View {
 
     // MARK: Header
 
+    /// Line one is the book, because that is what the reader is looking for.
+    /// Everything else — reader, page, characters, who answered — is one line
+    /// of provenance under it, so five controls no longer squeeze the title.
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.headerTitle)
                 .font(compact ? .subheadline : .headline)
                 .lineLimit(1)
-                Text(model.readerLabel)
+                .truncationMode(.middle)
+                Text(provenanceLine)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 4)
-            if !model.provider.isEmpty {
-                Text(model.provider).font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
             historyMenu
             Button {
                 if model.hasUnsavedWork {
@@ -3141,31 +3196,42 @@ public struct AIPanelView: View {
                 }
             } label: {
                 Image(systemName: "square.and.pencil")
+                    .frame(
+                        width: CompanionMetrics.closeSize,
+                        height: CompanionMetrics.closeSize)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .help("Start a new chat about this book")
             .accessibilityLabel("New chat")
             .disabled(model.turns.isEmpty && model.conversationID == nil)
-            Button {
-                model.loadPage()
+            Menu {
+                Button("Reload Page") { model.loadPage() }
+                    .disabled(model.phase == .loadingPage)
+                Button("Capture This Page…") { model.captureCurrentPage() }
+                    .disabled(model.quickCaptureBusy)
             } label: {
-                Image(systemName: "arrow.clockwise")
+                Image(systemName: "ellipsis.circle")
+                    .frame(
+                        width: CompanionMetrics.closeSize,
+                        height: CompanionMetrics.closeSize)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
-            .disabled(model.phase == .loadingPage)
-            .help("Read the current page and selection again")
-            .accessibilityLabel("Reload page")
-            Button {
-                model.captureCurrentPage()
-            } label: {
-                Image(systemName: "camera")
-            }
-            .buttonStyle(.borderless)
-            .disabled(model.quickCaptureBusy)
-            .help("Capture this page as an image")
-            .accessibilityLabel("Capture this page")
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Page actions")
+            .accessibilityLabel("Page actions")
             if let onClose {
-                Button(action: onClose) {
+                Button {
+                    // A session-only turn disappears with the panel; ask
+                    // before throwing work away.
+                    if model.hasUnsavedWork {
+                        confirmClose = true
+                    } else {
+                        onClose()
+                    }
+                } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .semibold))
                         .frame(
@@ -3180,6 +3246,17 @@ public struct AIPanelView: View {
                 .accessibilityLabel("Close companion")
             }
         }
+    }
+
+    private var provenanceLine: String {
+        var parts = [model.readerLabel]
+        if !model.provider.isEmpty {
+            parts.append(
+                model.providerModel.isEmpty
+                    ? model.provider
+                    : "\(model.provider) · \(model.providerModel)")
+        }
+        return parts.joined(separator: " · ")
     }
 
     private var historyMenu: some View {
@@ -3572,7 +3649,8 @@ public struct AIPanelView: View {
                         onActivate()
                         model.refreshSelection()
                     },
-                    onEscape: { onClose?() })
+                    onEscape: { onClose?() },
+                    scopeName: model.scope.shortName.lowercased())
                 if model.question.isEmpty {
                     Text(
                         model.scope == .selection
@@ -3972,18 +4050,24 @@ public struct ActivatingTextView: NSViewRepresentable {
     let onSubmit: () -> Void
     let onActivate: () -> Void
     let onEscape: () -> Void
+    /// What the field is for, in the reader's words. It names the scope, so
+    /// VoiceOver says whether the question is about a page, a chapter or the
+    /// whole book before anything is typed.
+    var scopeName: String = "page"
 
     public init(
         text: Binding<String>, height: Binding<CGFloat>,
         onSubmit: @escaping () -> Void,
         onActivate: @escaping () -> Void,
-        onEscape: @escaping () -> Void
+        onEscape: @escaping () -> Void,
+        scopeName: String = "page"
     ) {
         self._text = text
         self._height = height
         self.onSubmit = onSubmit
         self.onActivate = onActivate
         self.onEscape = onEscape
+        self.scopeName = scopeName
     }
 
     public func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -4000,7 +4084,13 @@ public struct ActivatingTextView: NSViewRepresentable {
         textView.importsGraphics = false
         textView.isEditable = true
         textView.isSelectable = true
-        textView.font = .systemFont(ofSize: 13)
+        // A body font follows the system text size; 13 pt did not.
+        textView.font =
+            NSFont.preferredFont(forTextStyle: .body)
+        textView.setAccessibilityLabel(
+            "Question about the \(scopeName)")
+        textView.setAccessibilityHelp(
+            "Cmd+Return sends; Return adds a new line.")
         textView.textContainerInset = NSSize(width: 6, height: 6)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
@@ -4170,34 +4260,121 @@ final class ComposerTextView: NSTextView {
 
 // MARK: - Markdown
 
+/// An answer, laid out by block. Lists get bullets and numbers, headings get
+/// sizes, code gets a monospaced box, quotes get a rule, and tables get
+/// columns — inline Markdown alone turned all of it into one paragraph.
 struct MarkdownText: View {
     let text: String
     var style: CompanionTextStyle? = nil
 
-    private var font: Font {
-        guard let style else { return .body }
-        if let family = style.family {
-            return .custom(family, size: style.size)
+    private var size: CGFloat { style?.size ?? 13 }
+
+    private func font(_ scale: CGFloat = 1) -> Font {
+        let pointSize = size * scale
+        if let family = style?.family {
+            return .custom(family, size: pointSize)
         }
-        return .system(size: style.size)
+        return .system(size: pointSize)
     }
 
     private var lineSpacing: CGFloat { style?.lineSpacing ?? 3 }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(
+                Array(MarkdownBlocks.parse(text).enumerated()), id: \.offset
+            ) { _, block in
+                view(for: block)
+            }
+        }
+        .textSelection(.enabled)
+    }
+
+    @ViewBuilder
+    private func view(for block: MarkdownBlock) -> some View {
+        switch block {
+        case .heading(let text, let level):
+            inline(text)
+                .font(font(level <= 1 ? 1.35 : level == 2 ? 1.2 : 1.1).bold())
+                .lineSpacing(lineSpacing)
+                .padding(.top, 2)
+        case .paragraph(let text):
+            inline(text).font(font()).lineSpacing(lineSpacing)
+        case .list(let items):
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(
+                            item.number.map { "\($0)." } ?? "•"
+                        )
+                        .font(font())
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 14, alignment: .trailing)
+                        inline(item.text)
+                            .font(font())
+                            .lineSpacing(lineSpacing)
+                    }
+                    .padding(.leading, CGFloat(item.depth) * 14)
+                }
+            }
+        case .quote(let text):
+            HStack(alignment: .top, spacing: 8) {
+                Rectangle()
+                    .fill(.quaternary)
+                    .frame(width: 2)
+                inline(text)
+                    .font(font())
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(lineSpacing)
+            }
+        case .code(let text, _):
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(text)
+                    .font(.system(size: max(11, size - 1), design: .monospaced))
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(
+                .quaternary.opacity(0.4),
+                in: RoundedRectangle(cornerRadius: 6))
+        case .table(let header, let rows):
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                GridRow {
+                    ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
+                        inline(cell).font(font().bold())
+                    }
+                }
+                Divider()
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    GridRow {
+                        ForEach(Array(row.enumerated()), id: \.offset) {
+                            _, cell in
+                            inline(cell).font(font())
+                        }
+                    }
+                }
+            }
+            .padding(6)
+            .background(
+                .quaternary.opacity(0.3),
+                in: RoundedRectangle(cornerRadius: 6))
+        case .rule:
+            Divider()
+        }
+    }
+
+    /// Inline emphasis inside a block. Anything the inline parser rejects is
+    /// shown as written rather than dropped.
+    private func inline(_ text: String) -> Text {
         if let attributed = try? AttributedString(
             markdown: text,
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace))
         {
-            Text(attributed)
-                .font(font)
-                .lineSpacing(lineSpacing)
-        } else {
-            Text(text)
-                .font(font)
-                .lineSpacing(lineSpacing)
+            return Text(attributed)
         }
+        return Text(text)
     }
 }
 
@@ -4205,7 +4382,11 @@ struct MarkdownText: View {
 /// turn the reader.
 struct QuickPageCaptureView: View {
     let capture: QuickPageCapture
+    /// Ask the companion about the captured text. It is the reason the camera
+    /// exists in a reading panel; without it the sheet was a dead end.
+    var askAboutText: ((String) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
+    @State private var saveError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -4242,8 +4423,58 @@ struct QuickPageCaptureView: View {
                 }
                 .frame(maxHeight: 180)
             }
+            if let saveError {
+                Text(saveError)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            HStack(spacing: 8) {
+                Button("Copy Image") { copyImage() }
+                Button("Save Image…") { saveImage() }
+                if !capture.text.isEmpty {
+                    Button("Copy Text") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(
+                            capture.text, forType: .string)
+                    }
+                    if let askAboutText {
+                        Button("Ask About This Text") {
+                            askAboutText(capture.text)
+                            dismiss()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                Spacer()
+            }
+            .controlSize(.small)
         }
         .padding(16)
         .frame(minWidth: 520, minHeight: 480)
+    }
+
+    private var pngData: Data? {
+        let rep = NSBitmapImageRep(cgImage: capture.image)
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    private func copyImage() {
+        guard let data = pngData else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setData(data, forType: .png)
+    }
+
+    private func saveImage() {
+        guard let data = pngData else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue =
+            "Page \(capture.pageNumber.map(String.init) ?? "capture").png"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            saveError = "Could not save the image: \(error)"
+        }
     }
 }

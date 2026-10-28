@@ -56,12 +56,15 @@ struct CompanionGeometryTests {
             x: 808, y: 512, width: 56, height: 56))
     }
 
+    // A bottom drawer now takes the tallest of its preferred heights that
+    // fits the screen, so these expectations are the largest drawer the
+    // geometry allows rather than a fixed 300 pt.
     @Test("a landscape reader with room below gets a bottom drawer")
     func landscapeBottom() {
         let result = layout(CGRect(x: 100, y: 400, width: 1400, height: 700))
         #expect(result.mode == .bottom)
         #expect(result.panelFrame == CGRect(
-            x: 100, y: 92, width: 1400, height: 300))
+            x: 100, y: 32, width: 1400, height: 360))
     }
 
     @Test("no horizontal room falls back to the bottom drawer")
@@ -69,7 +72,7 @@ struct CompanionGeometryTests {
         let result = layout(CGRect(x: 60, y: 500, width: 1800, height: 1000))
         #expect(result.mode == .bottom)
         #expect(result.panelFrame == CGRect(
-            x: 60, y: 192, width: 1800, height: 300))
+            x: 60, y: 72, width: 1800, height: 420))
     }
 
     @Test("no room outside becomes a side overlay inside the reader edge")

@@ -9,7 +9,10 @@ import Foundation
 public enum CompanionMetrics {
     public static let gap: CGFloat = 8
     public static let sideWidth: CGFloat = 400
-    public static let bottomHeight: CGFloat = 300
+    /// The bottom drawer's preferred height, tried in order. 300 left about
+    /// 150 pt of transcript under a header, a context bar and a composer.
+    public static let bottomHeights: [CGFloat] = [420, 360, 300]
+    public static let bottomHeight: CGFloat = 420
     public static let cornerRadius: CGFloat = 28
     public static let triggerSize: CGFloat = 56
     public static let triggerInset: CGFloat = 12
@@ -164,24 +167,28 @@ public enum CompanionGeometry {
         guard width >= CompanionMetrics.minimumPanelWidth else {
             return nil
         }
-        let height = min(CompanionMetrics.bottomHeight, visible.height)
-        guard height >= CompanionMetrics.minimumPanelHeight else {
-            return nil
-        }
         let x = clampedOrigin(
             reader.midX - width / 2, span: width, in: visible.minX...visible.maxX)
         guard let x else { return nil }
-        let below = CGRect(
-            x: x, y: reader.minY - CompanionMetrics.gap - height,
-            width: width, height: height)
-        if visible.contains(below) {
-            return below
-        }
-        let above = CGRect(
-            x: x, y: reader.maxY + CompanionMetrics.gap,
-            width: width, height: height)
-        if visible.contains(above) {
-            return above
+        // The tallest drawer the screen allows, so a bottom panel earns its
+        // space instead of squeezing the transcript to a few lines.
+        for preferred in CompanionMetrics.bottomHeights {
+            let height = min(preferred, visible.height)
+            guard height >= CompanionMetrics.minimumPanelHeight else {
+                continue
+            }
+            let below = CGRect(
+                x: x, y: reader.minY - CompanionMetrics.gap - height,
+                width: width, height: height)
+            if visible.contains(below) {
+                return below
+            }
+            let above = CGRect(
+                x: x, y: reader.maxY + CompanionMetrics.gap,
+                width: width, height: height)
+            if visible.contains(above) {
+                return above
+            }
         }
         return nil
     }

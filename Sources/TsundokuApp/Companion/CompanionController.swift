@@ -126,6 +126,11 @@ final class CompanionController {
     func showPanel() {
         guard let reader else {
             TsundokuDiagnostics.shared.event("companion_no_reader")
+            // A hotkey that does nothing is indistinguishable from a broken
+            // one; the status item says why nothing opened.
+            messageSink?(
+                "Open a book in Kindle or Apple Books first. The companion "
+                    + "appears next to the reader window.")
             return
         }
         let wasPanel = output.presentation == .panel
@@ -240,6 +245,9 @@ final class CompanionController {
         guard output.presentation == .panel || state.panelOpen else {
             return
         }
+        // A half-written question survives the panel; it is keyed by book, so
+        // it comes back with that book and never with another.
+        panelModel?.saveDraft()
         cancelPanelModel()
         output = state.closePanel(
             visible: reader.map(visibleFrame(for:)) ?? .zero)

@@ -484,6 +484,10 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// Defaults the companion keeps per-book state in. Separate from the
+    /// access defaults so a test or a launch option can point them elsewhere.
+    public var composerDefaults: UserDefaults { .standard }
+
     public func refreshAINotes() {
         guard let archive else { return }
         aiNotesGeneration += 1
