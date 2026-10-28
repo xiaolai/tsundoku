@@ -150,7 +150,7 @@ public struct HighlightsView: View {
                         ))
                 } else {
                     AnnotationInspector(
-                        row: current,
+                        row: current, model: model,
                         readingSize: CGFloat(max(13, min(28, readingSize))))
                 }
             }
@@ -988,7 +988,9 @@ struct AnnotationCard: View {
 
 struct AnnotationInspector: View {
     let row: AnnotationTableRow?
+    @ObservedObject var model: AppModel
     let readingSize: CGFloat
+
     var body: some View {
         if let row {
             Form {
@@ -1004,33 +1006,65 @@ struct AnnotationInspector: View {
                             .textSelection(.enabled)
                     }
                 }
-                if !row.annotation.hasContent {
-                    Section("Saved Location") {
-                        Text(
-                            "Only a location is available."
-                        ).foregroundStyle(
-                            .secondary)
-                    }
-                }
-                Section("Details") {
-                    LabeledContent("Kind", value: row.kind)
+                Section("In the Book") {
                     LabeledContent("Book", value: row.bookTitle)
                     LabeledContent("Source", value: row.source)
                     LabeledContent(
-                        "Created",
+                        "Added",
                         value: TsundokuFormat.annotationDate(
                             row.annotation.createdAt))
+                    if let page = capturedPage {
+                        LabeledContent("Captured page") {
+                            HStack(spacing: 8) {
+                                Text("Page \(page.page)")
+                                    .monospacedDigit()
+                                if let pdf = page.pdf {
+                                    Button("Open PDF") {
+                                        NSWorkspace.shared.open(pdf)
+                                    }
+                                    .controlSize(.small)
+                                }
+                            }
+                        }
+                    } else {
+                        Text(
+                            "No capture of this book contains this passage."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                Section {
+                    Button("Copy Passage") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(
+                            row.annotation.passageText
+                                ?? row.annotation.personalNote ?? "",
+                            forType: .string)
+                    }
+                    .disabled(
+                        (row.annotation.passageText ?? row.annotation
+                            .personalNote ?? "").isEmpty)
+                    Button("Show This Book in the Library") {
+                        model.bookWorkspaceID = nil
+                        model.section = .library
+                        model.selectedBookID = row.annotation.asin
+                        model.openLibraryWindow?()
+                    }
+                }
+                // What the reader can act on is above; what the archive
+                // happened to record is here, and says so.
+                DisclosureGroup("Technical Detail") {
+                    LabeledContent("Kind", value: row.kind)
+                    LabeledContent(
+                        "Location",
+                        value: positionLabel(row.annotation.start)
+                            ?? "Unavailable")
                     if let modified = row.annotation.modifiedAt {
                         LabeledContent(
                             "Modified",
                             value: TsundokuFormat.annotationDate(modified))
                     }
-                    LabeledContent(
-                        "Location",
-                        value: positionLabel(row.annotation.start)
-                            ?? "Unavailable")
-                }
-                DisclosureGroup("Import Records") {
                     Text(row.annotation.sources.joined(separator: ", "))
                         .textSelection(.enabled)
                     if let raw = row.annotation.start {
@@ -1045,6 +1079,11 @@ struct AnnotationInspector: View {
                     "Select an annotation to read it here."
                 ))
         }
+    }
+
+    private var capturedPage: (page: Int, pdf: URL?)? {
+        guard let row else { return nil }
+        return model.capturedPage(for: row.annotation)
     }
 }
 

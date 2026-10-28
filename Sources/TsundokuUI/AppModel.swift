@@ -1279,6 +1279,34 @@ public final class AppModel: ObservableObject {
 
     /// The page observations stored for one session, newest first. The sheet
     /// asks once, so the read happens here rather than in the view's body.
+    /// The captured page that contains this passage, for a reader who wants
+    /// to see the annotation in the book as it was captured. Nil when the
+    /// book has no capture or the passage is not in it.
+    public func capturedPage(
+        for annotation: Annotation
+    ) -> (page: Int, pdf: URL?)? {
+        guard let archive else { return nil }
+        let passage = (annotation.passageText ?? annotation.personalNote ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard passage.count >= 12 else { return nil }
+        let captures = (try? archive.captures()) ?? []
+        let normalized = ConversationKey.normalize(annotation.bookTitle ?? "")
+        guard
+            let record = captures.first(where: {
+                $0.asin.caseInsensitiveCompare(annotation.asin)
+                    == .orderedSame
+                    || (!normalized.isEmpty
+                        && ConversationKey.normalize($0.title) == normalized)
+            }),
+            let index = try? BookTextIndex.load(
+                directory: URL(fileURLWithPath: record.directory)),
+            let match = index.match(pageText: passage)
+        else { return nil }
+        return (
+            page: match.page,
+            pdf: record.pdfPath.map { URL(fileURLWithPath: $0) })
+    }
+
     public func sessionObservations(
         _ session: ReadingSession
     ) -> [PageObservation] {
