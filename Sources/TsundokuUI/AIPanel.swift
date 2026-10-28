@@ -4496,15 +4496,6 @@ struct MarkdownText: View {
                     interpretedSyntax: .inlineOnlyPreservingWhitespace))
         else { return Text(text) }
         var result = parsed
-        // Chinese has no spaces: the default breaker splits a phrase between
-        // any two characters ("不 / 要"). The standard strategy keeps a CJK
-        // word together and still breaks between words, and never splits a
-        // Latin word.
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakStrategy = .standard
-        for run in parsed.runs {
-            result[run.range].paragraphStyle = paragraph
-        }
         let latin = style?.family.flatMap { Font.custom($0, size: size) }
             ?? Font.system(size: size)
         let chineseFont = style?.chineseFamily.flatMap {
