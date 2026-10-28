@@ -3096,6 +3096,7 @@ public struct AIPanelView: View {
     @State private var confirmNewChat = false
     @State private var confirmClose = false
     @State private var composerFocused = false
+    @State private var showContextInfo = false
     private let compact: Bool
     private let onActivate: () -> Void
     private let onClose: (() -> Void)?
@@ -3663,28 +3664,46 @@ public struct AIPanelView: View {
             .help(help ?? text)
     }
 
+    /// What was sent, where it came from and what the archive could not
+    /// resolve. A Menu was the wrong container: menu items are single-line
+    /// labels, so a long explanation rendered as one enormous strip across
+    /// the screen. A popover wraps.
     private var contextInfoButton: some View {
-        Menu {
-            if !model.excerpt.isEmpty {
-                Text(model.excerpt)
-                Divider()
-            }
-            Text(model.transmissionLabel)
-            Text(model.transmissionDetail)
-            if !model.identityNote.isEmpty {
-                Divider()
-                Text(model.identityNote)
-            }
+        Button {
+            showContextInfo.toggle()
         } label: {
             Image(systemName: "info.circle")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .buttonStyle(.borderless)
         .help(model.transmissionLabel)
         .accessibilityLabel(model.transmissionLabel)
+        .popover(isPresented: $showContextInfo, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(model.transmissionLabel)
+                    .font(.caption.weight(.semibold))
+                Text(model.transmissionDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !model.identityNote.isEmpty {
+                    Divider()
+                    Text(model.identityNote)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if !model.excerpt.isEmpty {
+                    Divider()
+                    Text(model.excerpt)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(12)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: 280, alignment: .leading)
+            .padding(12)
+        }
     }
 
     // MARK: Composer
