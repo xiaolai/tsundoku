@@ -51,4 +51,41 @@ struct RouteTests {
         #expect(model.section == .highlights)
         #expect(model.annotationBookID == "B0ROUTE")
     }
+
+    @Test("the capture exports route brings the library forward")
+    func openCaptureExports() throws {
+        let (model, directory) = try model()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var presented = 0
+        model.openLibraryWindow = { presented += 1 }
+        model.openCaptureExports(bookID: nil, readerKind: .kindle)
+        #expect(presented == 1)
+        #expect(model.section == .exports)
+    }
+
+    @Test("returning to a capture after granting access brings the library forward")
+    func returnToCapture() throws {
+        let (model, directory) = try model()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var presented = 0
+        model.openLibraryWindow = { presented += 1 }
+        model.returnToCapture()
+        #expect(presented == 1)
+        #expect(model.section == .exports)
+    }
+
+    @Test("access routes open Settings, not the library")
+    func accessRoutes() throws {
+        let (model, directory) = try model()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var settings = 0
+        var library = 0
+        model.openSettingsWindow = { _ in settings += 1 }
+        model.openLibraryWindow = { library += 1 }
+        model.openAccess(focus: .library)
+        #expect(settings == 1)
+        model.requestCaptureAccess(pages: nil)
+        #expect(settings == 2)
+        #expect(library == 0)
+    }
 }

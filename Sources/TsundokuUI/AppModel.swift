@@ -844,7 +844,7 @@ public final class AppModel: ObservableObject {
         captureRouteWithoutBook = match == nil
         bookWorkspaceID = nil
         section = .exports
-        openLibraryWindow?()
+        revealLibrary()
     }
 
     public struct PendingChat: Sendable, Equatable {
@@ -1403,6 +1403,7 @@ public final class AppModel: ObservableObject {
         captureAccessDraft = nil
         discardCaptureAccessRelaunch()
         section = .exports
+        revealLibrary()
     }
 
     public func persistCaptureAccessForRelaunch() {
