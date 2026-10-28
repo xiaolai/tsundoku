@@ -29,6 +29,16 @@ public struct LibraryView: View {
         }
     }
 
+    /// A route from elsewhere asked for one book; the scope filter is this
+    /// view's own state, so clearing it is this view's job. The request is
+    /// consumed, so reopening the window does not jump back to it.
+    private func applyReveal() {
+        guard let reveal = model.libraryReveal else { return }
+        scope = .all
+        model.selectedBookID = reveal.asin
+        model.consumeLibraryReveal(reveal.generation)
+    }
+
     private func resetFilters() {
         model.search = ""
         model.sourceFilter = .all
@@ -175,6 +185,8 @@ public struct LibraryView: View {
             if rows.contains(where: { $0.asin == selected }) { return }
             model.selectedBookID = rows.first?.asin
         }
+        .onChange(of: model.libraryReveal) { _, _ in applyReveal() }
+        .onAppear { applyReveal() }
         .browserSearch(text: $model.search, prompt: "Search books and authors")
         .toolbar {
             ToolbarItem {

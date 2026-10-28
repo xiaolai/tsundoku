@@ -132,8 +132,35 @@ public struct BookTextIndex: Sendable {
             page: best.page.page, chapter: chapter(for: best.page.page))
     }
 
-    // MARK: Chapter headings
+    /// Finds the page that contains a passage quoted from the book.
+    ///
+    /// `match(pageText:)` answers a different question — is this live page
+    /// this captured page — and its rules suit a page: at least 20
+    /// characters, and three shingles before a fuzzy match. An annotation is
+    /// usually one sentence, so it is searched for as a substring of the
+    /// normalised page first, and only then through the page matcher.
+    /// The shortest passage worth searching for, measured after normalising:
+    /// `"a     b"` is seven characters and three of them survive normalising,
+    /// and it is the three that would be matched.
+    public static let minimumPassageLength = 6
 
+    /// Whether a passage is long enough to locate rather than guess at.
+    public static func isSearchable(_ passage: String) -> Bool {
+        normalize(passage).count >= minimumPassageLength
+    }
+
+    public func containing(passage: String) -> Match? {
+        let needle = Self.normalize(passage)
+        guard needle.count >= Self.minimumPassageLength else { return nil }
+        for (index, page) in pages.enumerated()
+        where normalizedPages[index].contains(needle)
+        {
+            return Match(page: page.page, chapter: chapter(for: page.page))
+        }
+        return match(pageText: passage)
+    }
+
+    // MARK: Chapter headings
     private static func chapterMarks(in pages: [IndexedPage]) -> [ChapterMark] {
         var marks: [ChapterMark] = []
         for page in pages {
@@ -799,7 +826,7 @@ public enum ReadingContextResolver {
                     epubPath: bestFolder.path)
             }
         }
-        let source = kind == .kindle ? "kindle" : "applebooks"
+        let source = kind.captureSource
         // The book the live page names comes first; otherwise a full-book
         // capture outranks a recent two-page sample.
         let candidates = captures.filter { $0.source == source }
@@ -1006,6 +1033,20 @@ private final class BoundedIndexCache<Value>: @unchecked Sendable {
         values.removeValue(forKey: key)
         order.removeAll { $0 == key }
     }
+
+    /// Removes every entry whose key starts with `prefix`.
+    ///
+    /// Keys carry the file state they were built from, so a directory's entry
+    /// cannot be named again once the file changes — invalidation has to find
+    /// them by the directory they belong to.
+    func removeAll(wherePrefix prefix: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        for key in values.keys where key.hasPrefix(prefix) {
+            values.removeValue(forKey: key)
+        }
+        order.removeAll { $0.hasPrefix(prefix) }
+    }
 }
 
 private final class CaptureIndexCache: @unchecked Sendable {
@@ -1026,7 +1067,11 @@ private final class CaptureIndexCache: @unchecked Sendable {
     }
 
     func remove(directory: String) {
-        cache.remove(Self.key(directory))
+        // By directory, not by a key recomputed from the filesystem: the
+        // callers invalidate after deleting the folder, so a recomputed key
+        // would name a file that no longer exists and leave the real index
+        // resident.
+        cache.removeAll(wherePrefix: "\(directory)|")
     }
 
     private static func key(_ directory: String) -> String {

@@ -469,6 +469,42 @@ public final class AppModel: ObservableObject {
         openLibraryWindow?()
     }
 
+    /// A request for the library to show one book, with the filters that could
+    /// hide it cleared. It is consumed once: a later reopen of the window must
+    /// not jump back to a book the reader has since moved off.
+    public struct LibraryReveal: Equatable, Sendable {
+        public let asin: String
+        public let generation: Int
+    }
+
+    @Published public var libraryReveal: LibraryReveal?
+    /// Monotonic, so two requests for the same book are still two requests.
+    private var revealGeneration = 0
+
+    /// Shows one book in the library whatever filters were in force.
+    ///
+    /// The search and source filters are model state; the read/annotated
+    /// scope is view state, and a route that only set state it could reach
+    /// left the book hidden. The view clears its own scope when it consumes
+    /// this.
+    public func revealBook(asin: String) {
+        search = ""
+        sourceFilter = .all
+        selectedBookID = asin
+        bookWorkspaceID = nil
+        section = .library
+        revealGeneration += 1
+        libraryReveal = LibraryReveal(
+            asin: asin, generation: revealGeneration)
+        revealLibrary()
+    }
+
+    /// Called by the library once it has shown the requested book.
+    public func consumeLibraryReveal(_ generation: Int) {
+        guard libraryReveal?.generation == generation else { return }
+        libraryReveal = nil
+    }
+
     /// Loads every AI card. The Cards view filters by book; loading all keeps
     /// the book query free of capture-index work on the main thread.
     public func refreshAICards() {
@@ -1286,10 +1322,27 @@ public final class AppModel: ObservableObject {
     public func openInReader(_ annotation: Annotation) {
         switch annotation.bookSource {
         case .appleBooks:
-            if let asset = try? BooksAssetReader().asset(for: annotation.asin),
-                let path = asset.path, asset.drm == .clear
+            // The asset is opened with Books itself: the default association
+            // for a PDF is Preview, which is not where the annotation lives.
+            if let asset = try? BooksAssetReader(paths: booksImportPaths)
+                .asset(for: annotation.asin),
+                let path = asset.path, asset.drm == .clear,
+                let books = NSWorkspace.shared.urlForApplication(
+                    withBundleIdentifier: "com.apple.iBooksX")
             {
-                NSWorkspace.shared.open(path)
+                let configuration = NSWorkspace.OpenConfiguration()
+                let file = path
+                Task { [weak self] in
+                    do {
+                        try await NSWorkspace.shared.open(
+                            [file], withApplicationAt: books,
+                            configuration: configuration)
+                    } catch {
+                        // A failed open falls back to bringing Books
+                        // forward, so the button never does nothing.
+                        self?.activateReader(bundleID: "com.apple.iBooksX")
+                    }
+                }
                 return
             }
             activateReader(bundleID: "com.apple.iBooksX")
@@ -1313,32 +1366,93 @@ public final class AppModel: ObservableObject {
             at: url, configuration: NSWorkspace.OpenConfiguration())
     }
 
+    /// What an annotation's capture lookup found.
+    public enum CapturedPageLookup: Sendable, Equatable {
+        case found(page: Int, pdf: URL?)
+        /// Captures of the book were read, and none contains the passage.
+        case notFound
+        /// Nothing could be read — no archive, no captures for the book, or
+        /// no readable index — so absence is not established.
+        case unavailable
+        /// The passage is too short to locate: a match would be a guess.
+        case tooShort
+        /// The annotation has no passage text at all, so there is nothing to
+        /// look for; this is not a statement about the captures.
+        case noPassage
+    }
+
     /// The captured page that contains this passage, for a reader who wants
-    /// to see the annotation in the book as it was captured. Nil when the
-    /// book has no capture or the passage is not in it.
+    /// to see the annotation in the book as it was captured.
+    ///
+    /// The lookup runs off the main actor: it reads capture indexes, which
+    /// are whole books. Identifiers come first and a title is only trusted
+    /// when it names one capture, because two editions can share a title and
+    /// a newer capture of the other edition must not answer for this one.
     public func capturedPage(
         for annotation: Annotation
-    ) -> (page: Int, pdf: URL?)? {
-        guard let archive else { return nil }
-        let passage = (annotation.passageText ?? annotation.personalNote ?? "")
+    ) async -> CapturedPageLookup {
+        // Only the text that came from the book. A note is the reader's own
+        // words, and looking for those in a capture answers a different
+        // question — usually with a false miss. This is asked before the
+        // archive, because "there is nothing to look for" is true whether or
+        // not an archive is open.
+        let passage = (annotation.passageText ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard passage.count >= 12 else { return nil }
+        guard !passage.isEmpty else { return .noPassage }
+        guard let archive else { return .unavailable }
+        // Below this a substring match is a coincidence more often than a
+        // location, and saying "no capture contains it" would be a guess.
+        // The length that matters is the normalised one the index matches on.
+        guard BookTextIndex.isSearchable(passage) else { return .tooShort }
         let captures = (try? archive.captures()) ?? []
+        guard !captures.isEmpty else { return .unavailable }
+        let candidates = Self.captureCandidates(
+            for: annotation, among: captures)
+        // No candidate means nothing was read, which is not the same as a
+        // capture that was read and did not contain the passage.
+        guard !candidates.isEmpty else { return .unavailable }
+        var readable = false
+        for record in candidates {
+            let directory = record.directory
+            let index = await Task.detached { () -> BookTextIndex? in
+                try? BookTextIndex.load(
+                    directory: URL(fileURLWithPath: directory))
+            }.value
+            guard let index else { continue }
+            readable = true
+            if let match = index.containing(passage: passage) {
+                return .found(
+                    page: match.page,
+                    pdf: record.pdfPath.map { URL(fileURLWithPath: $0) })
+            }
+        }
+        return readable ? .notFound : .unavailable
+    }
+
+    /// Captures that could be this annotation's book, best identity first:
+    /// the same ASIN and reader, newest first; failing that, a title that
+    /// names exactly one capture of the same reader.
+    static func captureCandidates(
+        for annotation: Annotation, among captures: [CaptureRecord]
+    ) -> [CaptureRecord] {
+        let source = annotation.bookSource.captureSource
+        // A capture's `source` column uses the same spelling (`captureSource`),
+        // not `BookSource.rawValue`: "Kindle" never equals "kindle".
+        let exact = captures
+            .filter {
+                $0.source == source
+                    && $0.asin.caseInsensitiveCompare(annotation.asin)
+                        == .orderedSame
+            }
+            .sorted { $0.createdAt > $1.createdAt }
+        if !exact.isEmpty { return exact }
         let normalized = ConversationKey.normalize(annotation.bookTitle)
-        guard
-            let record = captures.first(where: {
-                $0.asin.caseInsensitiveCompare(annotation.asin)
-                    == .orderedSame
-                    || (!normalized.isEmpty
-                        && ConversationKey.normalize($0.title) == normalized)
-            }),
-            let index = try? BookTextIndex.load(
-                directory: URL(fileURLWithPath: record.directory)),
-            let match = index.match(pageText: passage)
-        else { return nil }
-        return (
-            page: match.page,
-            pdf: record.pdfPath.map { URL(fileURLWithPath: $0) })
+        guard !normalized.isEmpty else { return [] }
+        let titled = captures.filter {
+            $0.source == source
+                && ConversationKey.normalize($0.title) == normalized
+        }
+        return titled.count == 1 ? titled : []
     }
 
     public func sessionObservations(

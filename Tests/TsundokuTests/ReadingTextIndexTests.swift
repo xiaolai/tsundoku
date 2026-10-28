@@ -297,3 +297,61 @@ struct ReadingTextIndexTests {
         #expect(prompt.contains("The passage is from Ch. 3."))
     }
 }
+
+@Suite("Passage lookup")
+struct PassageLookupTests {
+    private func capture(_ pages: [(Int, String)]) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsundoku-passage-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let lines = try pages.map { page, text -> String in
+            let object: [String: Any] = [
+                "page": page, "text": text, "source": "accessibility",
+            ]
+            let data = try JSONSerialization.data(withJSONObject: object)
+            return String(decoding: data, as: UTF8.self)
+        }
+        try lines.joined(separator: "\n").write(
+            to: directory.appendingPathComponent("text.jsonl"),
+            atomically: true, encoding: .utf8)
+        return directory
+    }
+
+    @Test("a short highlight inside a page is found")
+    func shortPassage() throws {
+        let directory = try capture([
+            (1, "Momentum is a direction, not a speed: it is where a trend is going."),
+            (2, "Reversal is the moment a trend turns, and it is the hardest thing to see while it happens."),
+        ])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let index = try BookTextIndex.load(directory: directory)
+        // Five words, well under the page matcher's 20-character floor for a
+        // whole-page match, and under its three-shingle rule.
+        let match = try #require(
+            index.containing(passage: "the hardest thing to see"))
+        #expect(match.page == 2)
+    }
+
+    @Test("a passage too short to locate is not searched")
+    func tooShort() throws {
+        let directory = try capture([
+            (1, "Momentum is a direction, not a speed.")
+        ])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let index = try BookTextIndex.load(directory: directory)
+        // "the" occurs on every page; a match would be a coincidence, not a
+        // location.
+        #expect(index.containing(passage: "the") == nil)
+    }
+
+    @Test("a passage from no page is not found")
+    func absentPassage() throws {
+        let directory = try capture([
+            (1, "Momentum is a direction, not a speed: it is where a trend is going.")
+        ])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let index = try BookTextIndex.load(directory: directory)
+        #expect(index.containing(passage: "not in this book at all") == nil)
+    }
+}

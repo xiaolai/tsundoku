@@ -996,6 +996,10 @@ struct AnnotationInspector: View {
     let row: AnnotationTableRow?
     @ObservedObject var model: AppModel
     let readingSize: CGFloat
+    /// Resolved once per selection, off the view body: the lookup reads a
+    /// whole capture index, and a body is evaluated far more often than a
+    /// selection changes.
+    @State private var capturedPage: AppModel.CapturedPageLookup?
 
     var body: some View {
         if let row {
@@ -1019,12 +1023,13 @@ struct AnnotationInspector: View {
                         "Added",
                         value: TsundokuFormat.annotationDate(
                             row.annotation.createdAt))
-                    if let page = capturedPage {
+                    switch capturedPage {
+                    case .found(let page, let pdf):
                         LabeledContent("Captured page") {
                             HStack(spacing: 8) {
-                                Text("Page \(page.page)")
+                                Text("Page \(page)")
                                     .monospacedDigit()
-                                if let pdf = page.pdf {
+                                if let pdf {
                                     Button("Open PDF") {
                                         NSWorkspace.shared.open(pdf)
                                     }
@@ -1032,12 +1037,27 @@ struct AnnotationInspector: View {
                                 }
                             }
                         }
-                    } else {
+                    case .notFound:
                         Text(
                             "No capture of this book contains this passage."
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    case .unavailable, nil:
+                        // Saying "no capture contains it" when nothing could
+                        // be read is a claim the app cannot make.
+                        Text("This book has no readable capture.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    case .tooShort:
+                        Text(
+                            "The passage is too short to find in a capture."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    case .noPassage:
+                        // Nothing to look for: the row would be noise.
+                        EmptyView()
                     }
                 }
                 Section {
@@ -1059,10 +1079,7 @@ struct AnnotationInspector: View {
                         model.openInReader(row.annotation)
                     }
                     Button("Show This Book in the Library") {
-                        model.bookWorkspaceID = nil
-                        model.section = .library
-                        model.selectedBookID = row.annotation.asin
-                        model.openLibraryWindow?()
+                        model.revealBook(asin: row.annotation.asin)
                     }
                 }
                 // What the reader can act on is above; what the archive
@@ -1084,7 +1101,18 @@ struct AnnotationInspector: View {
                         Text(raw).textSelection(.enabled)
                     }
                 }
-            }.formStyle(.grouped)
+            }
+            .formStyle(.grouped)
+            .task(id: row.annotation.id) {
+                capturedPage = nil
+                guard row.annotation.passageText != nil else {
+                    capturedPage = .noPassage
+                    return
+                }
+                let lookup = await model.capturedPage(for: row.annotation)
+                guard !Task.isCancelled else { return }
+                capturedPage = lookup
+            }
         } else {
             ContentUnavailableView(
                 "Choose an Annotation", systemImage: "text.cursor",
@@ -1094,10 +1122,7 @@ struct AnnotationInspector: View {
         }
     }
 
-    private var capturedPage: (page: Int, pdf: URL?)? {
-        guard let row else { return nil }
-        return model.capturedPage(for: row.annotation)
-    }
+
 }
 
 func positionLabel(_ value: String?) -> String? {
