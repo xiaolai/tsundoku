@@ -871,10 +871,7 @@ struct AnnotationCard: View {
                     .foregroundStyle(.secondary)
                     .help(row.source)
                     .accessibilityLabel(row.source)
-                    if selected {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(Color.accentColor)
-                    }
+
                 }.font(.caption).contentShape(Rectangle())
             }.buttonStyle(.plain)
                 .accessibilityLabel(
@@ -978,7 +975,10 @@ struct AnnotationCard: View {
                 .onTapGesture(perform: select)
                 .onTapGesture(count: 2, perform: inspect)
         )
+        // Focus is for the Return key, not a second highlight: the system's
+        // focus ring drew its own blue rectangle inside the selection border.
         .focusable()
+        .focusEffectDisabled()
         .onKeyPress(.return) {
             inspect()
             return .handled
