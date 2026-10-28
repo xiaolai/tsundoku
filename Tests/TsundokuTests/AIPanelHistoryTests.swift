@@ -157,6 +157,10 @@ struct AIPanelHistoryTests {
         #expect(panel.turns.count == 5)
         #expect(try archive.conversationTurns(
             conversationID: conversation.id).count == 5)
+        // Only the three turns after the boundary remain; the compactor
+        // has nothing new to summarize, so the action must be unavailable
+        // instead of failing with “no new turns”.
+        #expect(!panel.canCompact)
     }
 
     @Test("a failed manual compaction keeps the old projection")
@@ -422,6 +426,32 @@ struct AIPanelHistoryTests {
         }
         #expect(panel.conversationID == nil)
         #expect(panel.turns.isEmpty)
+    }
+
+    @Test("the chosen export folder is remembered and falls back when gone")
+    func exportFolderPersistence() throws {
+        let directory = try temporaryDirectory("export-folder")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(
+            "Chosen", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: url, withIntermediateDirectories: true)
+        let key = AppModel.exportFolderDefaultsKey
+        let previous = UserDefaults.standard.string(forKey: key)
+        defer {
+            if let previous {
+                UserDefaults.standard.set(previous, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        UserDefaults.standard.set(url.path, forKey: key)
+        #expect(
+            AppModel.storedExportFolder().standardizedFileURL
+                == url.standardizedFileURL)
+        try FileManager.default.removeItem(at: url)
+        #expect(
+            AppModel.storedExportFolder().lastPathComponent == "Tsundoku")
     }
 
     @Test("deleting the open chat keeps an unsaved answer for retry")

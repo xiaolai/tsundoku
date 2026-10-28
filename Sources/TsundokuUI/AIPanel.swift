@@ -436,7 +436,15 @@ public final class AIPanelModel: ObservableObject {
     /// Compaction needs a persisted conversation; a session-only chat has no
     /// row to attach a summary to yet.
     public var canCompact: Bool {
-        conversationID != nil && turns.count > ConversationCompactor.keepRecentTurns
+        // Match the compactor's own guard: only turns after the summary
+        // boundary can be summarized. A chat with total turns but no new
+        // ones cannot compact.
+        let fresh = turns.filter { turn in
+            guard let id = turn.persistedID else { return false }
+            return compaction.map { id > $0.throughTurnID } ?? true
+        }
+        return conversationID != nil
+            && fresh.count > ConversationCompactor.keepRecentTurns
             && turns.allSatisfy { $0.persistedID != nil }
             && !historyLoading && !historyLoadFailed && !persisting
             && !compactionRefreshing && !compactionRefreshFailed
@@ -446,6 +454,13 @@ public final class AIPanelModel: ObservableObject {
 
     public var canRetrySave: Bool {
         pendingSave != nil || pendingPromotion != nil
+    }
+
+    /// True when New Chat would discard something that is not in the archive:
+    /// a failed save, an unfiled promotion, or a session-only turn.
+    public var hasUnsavedWork: Bool {
+        pendingSave != nil || pendingPromotion != nil
+            || turns.contains { $0.persistedID == nil }
     }
 
     public var compactionCoveredTurnCount: Int {
@@ -1862,6 +1877,11 @@ public final class AIPanelModel: ObservableObject {
         }
     }
 
+    /// Open Settings on the AI pane from a failure that retrying cannot fix.
+    public func openAISettings() {
+        app?.openSettingsWindow?(SettingsRoute(pane: .ai))
+    }
+
     public func openChats() {
         guard let book = identity?.book
             ?? app?.books.first(where: {
@@ -3002,6 +3022,7 @@ public struct AIPanelView: View {
     @State private var composerHeight: CGFloat = 80
     @State private var showCompactionSummary = false
     @State private var confirmRemoveCompaction = false
+    @State private var confirmNewChat = false
     private let compact: Bool
     private let onActivate: () -> Void
     private let onClose: (() -> Void)?
@@ -3049,10 +3070,24 @@ public struct AIPanelView: View {
                 QuickPageCaptureView(capture: capture)
             }
         }
+        .confirmationDialog(
+            "Start a New Chat?",
+            isPresented: $confirmNewChat,
+            titleVisibility: .visible
+        ) {
+            Button("Discard Unsaved Turns", role: .destructive) {
+                model.newChat()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "This chat is not fully stored. Anything unsaved will be "
+                    + "lost.")
+        }
         .alert(
             "Remove Summary?", isPresented: $confirmRemoveCompaction
         ) {
-            Button("Remove Summary", role: .destructive) {
+            Button("Remove Summary") {
                 model.removeCompaction()
             }
             Button("Cancel", role: .cancel) {}
@@ -3075,10 +3110,7 @@ public struct AIPanelView: View {
                 model.dismissChatDeletion()
             }
         } message: { impact in
-            Text(
-                "\(impact.turns) turns and \(impact.compactions) summaries "
-                    + "will be deleted. \(impact.notes) saved notes are kept; "
-                    + "\(impact.cards) cards will leave Cards.")
+            Text(impact.deletionSentence())
         }
     }
 
@@ -3102,7 +3134,11 @@ public struct AIPanelView: View {
             }
             historyMenu
             Button {
-                model.newChat()
+                if model.hasUnsavedWork {
+                    confirmNewChat = true
+                } else {
+                    model.newChat()
+                }
             } label: {
                 Image(systemName: "square.and.pencil")
             }
@@ -3275,10 +3311,18 @@ public struct AIPanelView: View {
             Text(model.error ?? "Something went wrong.")
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-            IconButton("Try Again", systemImage: "arrow.clockwise") {
-                model.retry()
+            HStack(spacing: 8) {
+                IconButton("Try Again", systemImage: "arrow.clockwise") {
+                    model.retry()
+                }
+                .controlSize(compact ? .small : .regular)
+                // A missing CLI, key or sign-in is setup, not a transient
+                // failure; retrying alone can never succeed.
+                Button("AI Provider Settings…") {
+                    model.openAISettings()
+                }
+                .controlSize(compact ? .small : .regular)
             }
-            .controlSize(compact ? .small : .regular)
         }
     }
 
@@ -3528,6 +3572,9 @@ public struct AIPanelView: View {
             .frame(height: composerHeight)
             HStack(alignment: .center, spacing: 8) {
                 scopeMenu
+                Text("⌘↩ Send · ↩ New line")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 Spacer(minLength: 0)
                 if model.phase == .loadingAnswer {
                     Button {
@@ -3557,8 +3604,9 @@ public struct AIPanelView: View {
                 .strokeBorder(dividerColor, lineWidth: 0.5))
     }
 
-    /// A "+" menu on the composer's bottom row: what the answer covers. The
-    /// collapsed control is an icon; the scope names appear only when open.
+    /// The composer's scope control: what the answer covers. Its collapsed
+    /// label names the current scope, so the reader can see what will be
+    /// sent without opening the menu.
     private var scopeMenu: some View {
         Menu {
             ForEach(CompanionScope.allCases) { scope in
@@ -3603,15 +3651,21 @@ public struct AIPanelView: View {
                         + "Capture more pages to include them.")
             }
         } label: {
-            Image(systemName: "plus")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(
-                    model.scope == .currentPage
-                        ? Color.secondary : Color.accentColor)
-                .frame(width: 28, height: 28)
-                .background(
-                    Color.primary.opacity(0.06), in: Circle())
-                .contentShape(Circle())
+            HStack(spacing: 4) {
+                Image(systemName: model.scope.symbolName)
+                    .font(.system(size: 10, weight: .medium))
+                Text(model.scope.shortName)
+                    .font(.system(size: 11, weight: .medium))
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 7, weight: .semibold))
+            }
+            .foregroundStyle(
+                model.scope == .currentPage
+                    ? Color.secondary : Color.accentColor)
+            .padding(.horizontal, 8)
+            .frame(height: 28)
+            .background(Color.primary.opacity(0.06), in: Capsule())
+            .contentShape(Capsule())
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -3998,19 +4052,22 @@ enum ComposerKeyPolicy {
         case none
     }
 
+    /// Return inserts a newline; Cmd+Return sends. macOS text views reserve
+    /// Return for composition, and a two-line question must not send on the
+    /// first line.
     static func action(
-        keyCode: UInt16, shift: Bool, hasMarkedText: Bool
+        keyCode: UInt16, command: Bool, hasMarkedText: Bool
     ) -> Action {
         guard !hasMarkedText else { return .none }
         switch keyCode {
-        case 36, 76: return shift ? .newline : .send
+        case 36, 76: return command ? .send : .newline
         case 53: return .escape
         default: return .none
         }
     }
 }
 
-/// The text view intercepts Return and Shift+Return before the text system
+/// The text view intercepts Return and Cmd+Return before the text system
 /// turns them into commands, and activates the app on the click that focuses
 /// it. An input-method composition keeps Return until it is committed.
 final class ComposerTextView: NSTextView {
@@ -4044,7 +4101,7 @@ final class ComposerTextView: NSTextView {
     override func keyDown(with event: NSEvent) {
         switch ComposerKeyPolicy.action(
             keyCode: event.keyCode,
-            shift: event.modifierFlags.contains(.shift),
+            command: event.modifierFlags.contains(.command),
             hasMarkedText: hasMarkedText())
         {
         case .send: onSubmit?()

@@ -162,6 +162,17 @@ public enum CompanionScope: String, Codable, CaseIterable, Identifiable,
         }
     }
 
+    /// A short name for the composer's scope control, where “Current page”
+    /// next to Send would crowd the row.
+    public var shortName: String {
+        switch self {
+        case .currentPage: "Page"
+        case .currentChapter: "Chapter"
+        case .wholeBook: "Book"
+        case .selection: "Selection"
+        }
+    }
+
     public var symbolName: String {
         switch self {
         case .currentPage: "doc.text"

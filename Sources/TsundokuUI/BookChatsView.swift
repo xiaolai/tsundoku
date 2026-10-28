@@ -16,6 +16,7 @@ struct BookChatsView: View {
     @State private var turns: [ConversationTurn] = []
     @State private var compaction: ConversationCompaction?
     @State private var search = ""
+    @State private var searchTask: Task<Void, Never>?
     @State private var isLoading = true
     @State private var loadingTurns = false
     @State private var actionError: String?
@@ -101,8 +102,16 @@ struct BookChatsView: View {
     }
 
     private var canCompact: Bool {
-        selectedConversation != nil && turns.count > 3 && !compactionBusy
-            && !loadingTurns
+        // The compactor only has work when more than `keepRecentTurns`
+        // turns sit after the last summary. Counting every turn left
+        // Recompact enabled right after a successful compaction, where it
+        // could only fail with “no turns newer than the last compaction”.
+        let fresh = turns.filter { turn in
+            compaction.map { turn.id > $0.throughTurnID } ?? true
+        }
+        return selectedConversation != nil
+            && fresh.count > ConversationCompactor.keepRecentTurns
+            && !compactionBusy && !loadingTurns
     }
 
     private var selectedIsFiled: Bool {
@@ -156,7 +165,14 @@ struct BookChatsView: View {
             _ = await loadSummaries()
         }
         .onChange(of: search) { _, _ in
-            Task { _ = await loadSummaries() }
+            // Re-query after a pause, not on every keystroke: each load is a
+            // SQLite query over the archive.
+            searchTask?.cancel()
+            searchTask = Task {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled else { return }
+                _ = await loadSummaries()
+            }
         }
         .sheet(item: $renameTarget) { summary in
             RenameChatSheet(
@@ -175,10 +191,7 @@ struct BookChatsView: View {
                     title: Text("Delete Chat?"),
                     message: Text(
                         "\(summary.displayTitle)\n\n"
-                            + "\(impact.turns) turns and "
-                            + "\(impact.compactions) summaries will be "
-                            + "deleted. \(impact.notes) saved notes are kept; "
-                            + "\(impact.cards) cards will leave Cards."),
+                            + impact.deletionSentence()),
                     primaryButton: .destructive(Text("Delete Chat")) {
                         performDelete(
                             [summary.id],
@@ -198,10 +211,7 @@ struct BookChatsView: View {
                 return Alert(
                     title: Text("Delete All Chats for This Book?"),
                     message: Text(
-                        "\(impact.conversations) chats, \(impact.turns) turns "
-                            + "and \(impact.compactions) summaries will be "
-                            + "deleted. \(impact.notes) saved notes are kept; "
-                            + "\(impact.cards) cards will leave Cards."),
+                        impact.deletionSentence(includeConversations: true)),
                     primaryButton: .destructive(Text("Delete All Chats")) {
                         performDelete(
                             ids, expectedUpdatedAt: expectedUpdatedAt,
@@ -217,7 +227,7 @@ struct BookChatsView: View {
                     message: Text(
                         "The next message will send the full transcript; "
                             + "nothing is deleted."),
-                    primaryButton: .destructive(Text("Remove Summary")) {
+                    primaryButton: .default(Text("Remove Summary")) {
                         removeCompaction(id, compactionID: compactionID)
                     },
                     secondaryButton: .cancel())
@@ -864,6 +874,8 @@ struct BookChatsView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try text.write(to: url, atomically: true, encoding: .utf8)
+            model.post(
+                "Exported chat to \(url.lastPathComponent).", seconds: 6)
         } catch {
             actionError = "Could not write the export: \(error)"
         }
