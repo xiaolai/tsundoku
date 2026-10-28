@@ -133,7 +133,7 @@ struct PublisherTests {
             metadata: CaptureMetadata(
                 title: "A Book", author: "Author", identifier: "B01",
                 source: "Kindle"),
-            termination: .endOfBook)
+            termination: .endOfBook, includePageIndex: false)
         let published = try PDFPublisher().publish(artifact)
         #expect(published.pageCount == 1)
         #expect(FileManager.default.fileExists(atPath: published.url.path))
@@ -201,7 +201,7 @@ struct PublisherTests {
             pageLimit: nil, output: output,
             progress: { _ in }, isCancelled: { false },
             lifecycle: CaptureLifecycle(locked: { false }),
-            resume: true)
+            resume: true, includePageIndex: false)
         #expect(result.pages == 2)
         #expect(PDFWriter.pageCount(result.pdf) == 2)
         let text = try String(

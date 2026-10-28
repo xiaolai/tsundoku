@@ -124,7 +124,11 @@ public enum CaptureVerifier {
         }
         let pdfURL = directory.appendingPathComponent(pdfName)
         let coverPage = manifest["coverPage"] as? Bool ?? false
-        let expectedPDFPages = pages.count + (coverPage ? 1 : 0)
+        // Pages the index appended after the book's own; they are part of the
+        // document and must be expected, not treated as a count error.
+        let indexPages = manifest["indexPages"] as? Int ?? 0
+        let expectedPDFPages =
+            pages.count + (coverPage ? 1 : 0) + indexPages
         guard
             FileManager.default.fileExists(atPath: pdfURL.path),
             let document = CGPDFDocument(pdfURL as CFURL),

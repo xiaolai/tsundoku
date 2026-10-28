@@ -71,7 +71,8 @@ public final class CaptureEngine: Sendable {
         progress: @Sendable (CaptureProgress) -> Void,
         isCancelled: @escaping @Sendable () -> Bool,
         bundle: CaptureBundleRequest? = nil,
-        resume: Bool = false
+        resume: Bool = false,
+        includePageIndex: Bool = true
     ) throws -> CaptureResult {
         let subject = CaptureSubject(book: book, kind: .kindle)
         let session = ManualKindleCaptureSession(
@@ -89,7 +90,8 @@ public final class CaptureEngine: Sendable {
             bundle: bundle,
             outputPageSize: CapturePageSize.a4.points,
             cropTop: 0, cropBottom: 0, cropAutomatic: false,
-            cropRect: configuration.crop.rect, resume: resume)
+            cropRect: configuration.crop.rect, resume: resume,
+            includePageIndex: includePageIndex)
     }
 
     public func capture(
@@ -101,7 +103,8 @@ public final class CaptureEngine: Sendable {
         isCancelled: @escaping @Sendable () -> Bool,
         cleanPage: CleanPagePolicy = .asDisplayed,
         pageSetup: PageSetupRequest = PageSetupRequest(),
-        bundle: CaptureBundleRequest? = nil
+        bundle: CaptureBundleRequest? = nil,
+        includePageIndex: Bool = true
     ) throws -> CaptureResult {
         let subject = CaptureSubject(book: book, kind: kind)
         let session: any ReaderCaptureSession
@@ -146,6 +149,7 @@ public final class CaptureEngine: Sendable {
             outputPageSize: outputPageSize,
             cropTop: pageCrop.top,
             cropBottom: pageCrop.bottom,
-            cropAutomatic: pageCrop.automaticPageNumber)
+            cropAutomatic: pageCrop.automaticPageNumber,
+            includePageIndex: includePageIndex)
     }
 }

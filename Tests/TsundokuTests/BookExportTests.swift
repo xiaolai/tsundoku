@@ -1639,7 +1639,8 @@ struct EngineBundleTests {
                 options: .defaults, services: services,
                 now: { Date(timeIntervalSince1970: 1_700_000_000) }))
         #expect(result.pages == 2)
-        #expect(PDFWriter.pageCount(result.pdf) == 2)
+        // Two book pages, then the page index appended after them.
+        #expect(PDFWriter.pageCount(result.pdf) >= 2)
         let manifestData = try Data(
             contentsOf: output.appendingPathComponent("manifest.json"))
         let manifest = try #require(
@@ -1648,7 +1649,7 @@ struct EngineBundleTests {
         #expect(manifest["coverPage"] as? Bool == true)
         #expect(manifest["pageOffset"] as? Int == 1)
         #expect(manifest["pageCount"] as? Int == 1)
-        #expect(manifest["pdfPages"] as? Int == 2)
+        #expect((manifest["pdfPages"] as? Int ?? 0) >= 2)
         let metadataURL = output.appendingPathComponent("metadata.json")
         let metadataData = try Data(contentsOf: metadataURL)
         let metadataRecord = try #require(
@@ -1657,7 +1658,9 @@ struct EngineBundleTests {
         let captureRecord = try #require(
             metadataRecord["capture"] as? [String: Any])
         #expect(captureRecord["pageCount"] as? Int == 1)
-        #expect(captureRecord["pdfPages"] as? Int == 2)
+        // Book pages plus whatever the page index appended.
+        let indexPages = manifest["indexPages"] as? Int ?? 0
+        #expect(captureRecord["pdfPages"] as? Int == 2 + indexPages)
         let bookObject = try #require(
             manifest["book"] as? [String: Any])
         #expect(bookObject["title"] as? String == "Bundle Title")
@@ -1673,7 +1676,7 @@ struct EngineBundleTests {
                 "missing \(name)")
         }
         let document = try #require(PDFDocument(url: result.pdf))
-        #expect(document.pageCount == 2)
+        #expect(document.pageCount == 2 + indexPages)
         #expect(
             document.page(at: 0)?.string?.contains("Bundle Title") == true)
         #expect(

@@ -29,6 +29,8 @@ public struct CaptureArtifact: Sendable {
     public let coverPage: PDFCoverPage?
     /// The PDF page size in points. `nil` uses each captured page's size.
     public let pageSize: CGSize?
+    /// Append the page index to the PDF, and write the CSV beside it.
+    public let includePageIndex: Bool
 
     public init(
         directory: URL, pageURLs: [URL], texts: [String],
@@ -36,7 +38,8 @@ public struct CaptureArtifact: Sendable {
         cancellation: any CancellationChecking =
             ClosureCancellation({ false }),
         coverPage: PDFCoverPage? = nil,
-        pageSize: CGSize? = nil
+        pageSize: CGSize? = nil,
+        includePageIndex: Bool = true
     ) {
         self.directory = directory
         self.pageURLs = pageURLs
@@ -46,6 +49,7 @@ public struct CaptureArtifact: Sendable {
         self.cancellation = cancellation
         self.coverPage = coverPage
         self.pageSize = pageSize
+        self.includePageIndex = includePageIndex
     }
 }
 
@@ -56,11 +60,21 @@ public struct PublishedCapture: Sendable {
     /// text layer could not hold all of its text. They go into the capture's
     /// manifest so the reader can see them.
     public let warnings: [String]
+    /// Pages the index added at the end. The book's own pages are unchanged;
+    /// only the total grew.
+    public let indexPages: Int
+    /// The sidecar that names each page by its opening words.
+    public let pageMapURL: URL?
 
-    public init(url: URL, pageCount: Int, warnings: [String] = []) {
+    public init(
+        url: URL, pageCount: Int, warnings: [String] = [],
+        indexPages: Int = 0, pageMapURL: URL? = nil
+    ) {
         self.url = url
         self.pageCount = pageCount
         self.warnings = warnings
+        self.indexPages = indexPages
+        self.pageMapURL = pageMapURL
     }
 }
 

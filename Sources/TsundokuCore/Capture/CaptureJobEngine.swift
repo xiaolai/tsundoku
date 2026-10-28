@@ -26,7 +26,8 @@ public struct CaptureJobEngine: Sendable {
         cropBottom: Int = 0,
         cropAutomatic: Bool = false,
         cropRect: CGRect? = nil,
-        resume: Bool = false
+        resume: Bool = false,
+        includePageIndex: Bool = true
     ) throws -> CaptureResult {
         var cropManifest: [String: Any] = [
             "top": cropTop,
@@ -378,7 +379,8 @@ public struct CaptureJobEngine: Sendable {
                     termination: termination,
                     cancellation: ClosureCancellation(isCancelled),
                     coverPage: bundlePlan?.coverPage,
-                    pageSize: outputPageSize))
+                    pageSize: outputPageSize,
+                    includePageIndex: includePageIndex))
         } catch {
             var failure = Self.manifestBase(session: session, subject: subject, crop: cropManifest)
             addCleanPage(&failure)
@@ -398,8 +400,11 @@ public struct CaptureJobEngine: Sendable {
         }
         let pdfURL = published.url
         let pdfPages = published.pageCount
+        // The page index is appended after the book's pages, so the book's own
+        // numbering is untouched and the total grows by the index's pages.
         let expectedPDFPages =
             capturedPages + (bundlePlan?.coverPage == nil ? 0 : 1)
+            + published.indexPages
         guard pdfPages == expectedPDFPages else {
             throw ReaderCaptureError.captureFailed(
                 subject.kind,
@@ -414,6 +419,10 @@ public struct CaptureJobEngine: Sendable {
         manifest["state"] = Self.state(termination)
         manifest["pageCount"] = capturedPages
         manifest["pdfPages"] = pdfPages
+        manifest["indexPages"] = published.indexPages
+        if let map = published.pageMapURL {
+            manifest["pageMap"] = map.lastPathComponent
+        }
         manifest["pdf"] = pdfURL.lastPathComponent
         manifest["termination"] = Self.termination(termination)
         manifest["startPage"] = firstPageNumber ?? NSNull()
@@ -543,8 +552,11 @@ public struct CaptureJobEngine: Sendable {
         } else {
             cleanSummary = nil
         }
+        // `pages` is the book's pages. The index is a reading aid appended
+        // after them; counting it would tell the reader their book grew.
         return CaptureResult(
-            directory: output, pdf: pdfURL, pages: pdfPages, title: title,
+            directory: output, pdf: pdfURL,
+            pages: pdfPages - published.indexPages, title: title,
             cleanPage: cleanSummary, pageSetup: session.pageSetupOutcome)
     }
 

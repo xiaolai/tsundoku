@@ -50,9 +50,75 @@ struct TsundokuCLI {
             BooksProbe.run(Array(arguments.dropFirst()))
         case "context-index":
             contextIndex(Array(arguments.dropFirst()))
+        case "page-index":
+            pageIndex(Array(arguments.dropFirst()))
         default:
             usage()
             exit(2)
+        }
+    }
+
+    /// page-index <capture folder> [--pdf <file>]
+    ///
+    /// Names every captured page by its opening words: appends the index to
+    /// the PDF and writes `page-map.csv` beside it. Kindle publishes no page
+    /// number while its chrome is hidden, so this is how a reader finds a
+    /// page in the reader again.
+    private static func pageIndex(_ arguments: [String]) {
+        guard let folder = arguments.first else {
+            print("usage: tsundoku-cli page-index <capture folder> [--pdf <file>]")
+            exit(2)
+        }
+        let directory = URL(fileURLWithPath: folder)
+        var pdf = directory
+        if let flag = arguments.firstIndex(of: "--pdf"),
+            arguments.indices.contains(flag + 1)
+        {
+            pdf = URL(fileURLWithPath: arguments[flag + 1])
+        } else {
+            let candidates = (try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil)) ?? []
+            guard
+                let found = candidates.first(where: {
+                    $0.pathExtension.lowercased() == "pdf"
+                })
+            else {
+                print("no PDF in \(folder); pass --pdf")
+                exit(1)
+            }
+            pdf = found
+        }
+        let pages = directory.appendingPathComponent("pages")
+        let files = ((try? FileManager.default.contentsOfDirectory(
+            at: pages, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension.lowercased() == "txt" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !files.isEmpty else {
+            print("no page text in \(pages.path)")
+            exit(1)
+        }
+        let texts = files.compactMap {
+            try? String(contentsOf: $0, encoding: .utf8)
+        }
+        let manifest = (try? Data(contentsOf: directory.appendingPathComponent(
+            "manifest.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let coverPage = manifest?["coverPage"] as? Bool ?? true
+        let title = (manifest?["title"] as? String).flatMap {
+            $0.isEmpty ? nil : $0
+        } ?? pdf.deletingPathExtension().lastPathComponent
+        let rows = PageIndex.rows(
+            texts: texts, firstPDFPage: coverPage ? 2 : 1)
+        let csv = pdf.deletingPathExtension()
+            .appendingPathExtension("page-map.csv")
+        do {
+            let total = try PageIndex.append(
+                to: pdf, rows: rows, title: title,
+                pageSize: CGSize(width: 595.28, height: 841.89), csvURL: csv)
+            print("pages=\(texts.count) pdf=\(total) map=\(csv.path)")
+        } catch {
+            print("failed: \(error)")
+            exit(1)
         }
     }
 

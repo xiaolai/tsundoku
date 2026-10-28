@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 public struct PDFPublisher: CapturePublisher {
@@ -12,6 +13,12 @@ public struct PDFPublisher: CapturePublisher {
         let expected =
             artifact.pageURLs.count + (artifact.coverPage == nil ? 0 : 1)
         var warnings: [String] = []
+        // The index is written with the pages, not appended afterwards: one
+        // write, one verification, no read-modify-write of the PDF.
+        let firstPDFPage = artifact.coverPage == nil ? 1 : 2
+        let index = artifact.includePageIndex
+            ? PageIndex.rows(texts: artifact.texts, firstPDFPage: firstPDFPage)
+            : []
         let pages = try PDFWriter.write(
             pageURLs: artifact.pageURLs, texts: artifact.texts,
             metadata: PDFMetadata(
@@ -22,16 +29,30 @@ public struct PDFPublisher: CapturePublisher {
             cover: artifact.coverPage,
             displayScale: artifact.metadata.displayScale,
             pageSize: artifact.pageSize,
+            index: index,
+            indexTitle: artifact.metadata.title,
             isCancelled: { artifact.cancellation.isSet },
             warnings: { warnings.append($0) },
             to: output)
+        // The writer verified the file while writing it, including the
+        // index pages; this re-read catches a file damaged on disk.
         let count = PDFWriter.pageCount(output)
-        guard count == pages, count == expected else {
+        guard count == pages else {
             throw CapturePublisherError.failed(
-                "the PDF has \(count) pages; \(expected) were expected")
+                "the PDF has \(count) pages; \(pages) were written")
         }
+        let indexPages = max(0, pages - expected)
+        guard indexPages > 0 else {
+            return PublishedCapture(
+                url: output, pageCount: pages, warnings: warnings)
+        }
+        let csv = output.deletingPathExtension()
+            .appendingPathExtension("page-map.csv")
+        try? PageIndex.csv(index).write(
+            to: csv, atomically: true, encoding: .utf8)
         return PublishedCapture(
-            url: output, pageCount: count, warnings: warnings)
+            url: output, pageCount: pages, warnings: warnings,
+            indexPages: indexPages, pageMapURL: csv)
     }
 
     static func safeFilename(_ value: String) -> String {

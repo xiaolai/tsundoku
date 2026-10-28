@@ -49,7 +49,9 @@ struct VerifierTests {
             metadata: CaptureMetadata(
                 title: "A Book", author: nil, identifier: nil,
                 source: "Kindle"),
-            termination: .endOfBook)
+            // The verifier counts the index from the manifest; these tests
+            // pin the book's own pagination, so they publish without one.
+            termination: .endOfBook, includePageIndex: false)
         return try PDFPublisher().publish(artifact).url.lastPathComponent
     }
 
@@ -103,7 +105,7 @@ struct VerifierTests {
             metadata: CaptureMetadata(
                 title: "A Book", author: nil, identifier: nil,
                 source: "Kindle"),
-            termination: .endOfBook)
+            termination: .endOfBook, includePageIndex: false)
         let published = try PDFPublisher().publish(artifact)
         try store.writeManifest([
             "version": 2, "termination": "endOfBook", "startPage": 1,

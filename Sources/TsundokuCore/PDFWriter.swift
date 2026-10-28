@@ -113,6 +113,8 @@ public enum PDFWriter {
         cover: PDFCoverPage? = nil,
         displayScale: CGFloat = 1,
         pageSize: CGSize? = nil,
+        index: [PageIndexRow] = [],
+        indexTitle: String = "",
         isCancelled: @Sendable () -> Bool = { false },
         warnings: ((String) -> Void)? = nil,
         to url: URL
@@ -192,16 +194,26 @@ public enum PDFWriter {
             }
             context.endPage()
         }
+        // The page index goes after the book's own pages: in the same context,
+        // so the file is written once, and at the end, so the pages the reader
+        // already knows keep their numbers.
+        var indexPages = 0
+        if !index.isEmpty {
+            let body = PageIndex.attributedBody(rows: index, title: indexTitle)
+            indexPages = PageIndex.draw(
+                body, in: context, pageSize: outputSize)
+        }
         context.closePDF()
         if isCancelled() { throw PDFWriterError.cancelled }
         try fsync(partial)
 
+        let expectedTotal = expectedPages + indexPages
         guard
             let document = CGPDFDocument(partial as CFURL),
-            document.numberOfPages == expectedPages
+            document.numberOfPages == expectedTotal
         else {
             throw PDFWriterError.verificationFailed(
-                expected: expectedPages,
+                expected: expectedTotal,
                 actual: CGPDFDocument(partial as CFURL)?.numberOfPages ?? 0)
         }
 
@@ -210,7 +222,7 @@ public enum PDFWriter {
         } else {
             try fileManager.moveItem(at: partial, to: url)
         }
-        return expectedPages
+        return expectedTotal
     }
 
     /// Compatibility entry point for the current capture engine. The adapter
