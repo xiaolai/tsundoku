@@ -41,15 +41,20 @@ public struct PDFPublisher: CapturePublisher {
             throw CapturePublisherError.failed(
                 "the PDF has \(count) pages; \(pages) were written")
         }
+        // The map is always written: it is one small file and it is the thing
+        // that makes a page findable. The index inside the PDF is a choice,
+        // because it adds pages to every capture.
         let indexPages = max(0, pages - expected)
-        guard indexPages > 0 else {
-            return PublishedCapture(
-                url: output, pageCount: pages, warnings: warnings)
+        var csv: URL?
+        if !artifact.texts.isEmpty {
+            let url = output.deletingPathExtension()
+                .appendingPathExtension("page-map.csv")
+            let rows = PageIndex.rows(
+                texts: artifact.texts, firstPDFPage: firstPDFPage)
+            try? PageIndex.csv(rows).write(
+                to: url, atomically: true, encoding: .utf8)
+            csv = url
         }
-        let csv = output.deletingPathExtension()
-            .appendingPathExtension("page-map.csv")
-        try? PageIndex.csv(index).write(
-            to: csv, atomically: true, encoding: .utf8)
         return PublishedCapture(
             url: output, pageCount: pages, warnings: warnings,
             indexPages: indexPages, pageMapURL: csv)

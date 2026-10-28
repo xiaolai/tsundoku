@@ -23,6 +23,11 @@ public struct PageIndexRow: Sendable, Equatable {
 }
 
 public enum PageIndex {
+    /// Index pages are A4 whatever the capture's page size is: a box the size
+    /// of a captured screenshot fits a handful of characters and turns one
+    /// row into dozens of pages.
+    public static let pageSize = CGSize(width: 595.28, height: 841.89)
+
     /// How much of a page's opening to keep. Enough to recognise the page in
     /// Kindle's search, short enough to fit one line in a narrow column.
     public static let openingLength = 70

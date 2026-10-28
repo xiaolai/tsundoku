@@ -382,6 +382,10 @@ public struct AISettings: Codable, Sendable, Equatable {
     /// Turn Kindle's Popular Highlights display off for a capture and restore
     /// the setting afterwards. Default on.
     public var cleanPageDuringCapture: Bool
+    /// Append a Page Index to captured PDFs, naming each page by its opening
+    /// words. Off by default: it adds pages to every capture. The CSV page map
+    /// is written either way.
+    public var capturePageIndex: Bool
     /// The PDF page size. `a4` resizes the reader's window for the capture.
     public var capturePageSize: CapturePageSize
     /// Which reader a capture runs against. Default automatic.
@@ -424,6 +428,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         sessionLogging: Bool = false,
         answerTokens: Int = 65_536,
         cleanPageDuringCapture: Bool = true,
+        capturePageIndex: Bool = false,
         capturePageSize: CapturePageSize = .asDisplayed,
         captureReader: CaptureReader = .automatic,
         captureFontSize: Int? = nil,
@@ -449,6 +454,7 @@ public struct AISettings: Codable, Sendable, Equatable {
         self.sessionLogging = sessionLogging
         self.answerTokens = max(1, answerTokens)
         self.cleanPageDuringCapture = cleanPageDuringCapture
+        self.capturePageIndex = capturePageIndex
         self.capturePageSize = capturePageSize
         self.captureReader = captureReader
         self.captureFontSize = captureFontSize
@@ -468,7 +474,7 @@ public struct AISettings: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case provider, model, endpoint, language, sessionLogging
         case httpProfileID, answerTokens
-        case cleanPageDuringCapture
+        case cleanPageDuringCapture, capturePageIndex
         case capturePageSize, captureReader, captureFontSize, booksFontSteps
         case captureCropTop, booksCropBottom, kindleCropBottom
         case includeCoverPage, writeSidecars
@@ -514,6 +520,10 @@ public struct AISettings: Codable, Sendable, Equatable {
             try container.decodeIfPresent(
                 Bool.self, forKey: .cleanPageDuringCapture)
             ?? defaults.cleanPageDuringCapture
+        capturePageIndex =
+            try container.decodeIfPresent(
+                Bool.self, forKey: .capturePageIndex)
+            ?? defaults.capturePageIndex
         capturePageSize =
             try container.decodeIfPresent(
                 CapturePageSize.self, forKey: .capturePageSize)

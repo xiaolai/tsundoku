@@ -258,15 +258,16 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         /// reopens the sheet on the next arrow.
         func dismissEndSheet() -> Bool {
             guard endSheetDismissals < 2 else { return false }
-            // Both Escapes are sent even when the tree stops reporting the
-            // sheet after the first: the panel behind it does not carry the
-            // sheet's identifier, and the reader measured that one Escape
-            // leaves the arrow reopening the sheet.
             for _ in 0..<2 {
                 try? escape()
                 endSheetDismissals += 1
                 dismissedAt = now()
                 sleep(0.45)
+                // Re-read between the two Escapes. The reader reported that
+                // two are needed, but a blind second Escape in a reader that
+                // is already back can close the book, which would lose the
+                // capture instead of finishing it.
+                if let page = try? readCurrent(), !page.endOfBook { break }
             }
             return true
         }

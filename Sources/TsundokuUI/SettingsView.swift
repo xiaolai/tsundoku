@@ -381,6 +381,14 @@ public struct SettingsView: View {
                         }
                     }
                     Toggle(
+                        "Add a page index to captured PDFs",
+                        isOn: $model.settings.capturePageIndex
+                    )
+                    .help(
+                        "Lists every captured page by its opening words at "
+                            + "the end of the PDF. The CSV page map is "
+                            + "written either way.")
+                    Toggle(
                         "Record Pages While Tracking",
                         isOn: $model.settings.sessionLogging
                     )

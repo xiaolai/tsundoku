@@ -2281,7 +2281,8 @@ public final class AppModel: ObservableObject {
             archive: archive, book: book, kind: kind, pageLimit: pages,
             output: folder, cleanPage: cleanPolicy, pageSetup: setup,
             booksPageSetup: booksSetup, bundleOptions: bundleOptions,
-            cancellation: flag, manual: manual, resume: resume)
+            cancellation: flag, manual: manual, resume: resume,
+            includePageIndex: settings.capturePageIndex)
         captureSession.start(
             request,
             progress: { [weak self] progress in

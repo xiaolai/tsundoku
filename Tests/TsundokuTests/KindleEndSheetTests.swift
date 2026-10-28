@@ -25,6 +25,8 @@ struct KindleEndSheetTests {
         /// the panel behind it.
         var sheet = false
         var panelsBehindTheSheet = 0
+        /// Set when the sheet needs a second Escape, as the reader measured.
+        var sheetNeedsTwoEscapes = true
         /// The forward press that first reaches the last pages is answered
         /// with the sheet, which is what Kindle does.
         var sheetOnNextTurn = false
@@ -67,7 +69,7 @@ struct KindleEndSheetTests {
         func escapeKey() {
             escapeCalls += 1
             guard sheet else { return }
-            if panelsBehindTheSheet > 0 {
+            if sheetNeedsTwoEscapes, panelsBehindTheSheet > 0 {
                 panelsBehindTheSheet -= 1
                 return
             }
@@ -138,8 +140,9 @@ struct KindleEndSheetTests {
         let next = try turned(
             try session.advance(after: page.mark), "out of the sheet")
         #expect(next.text == "page four")
-        // Two Escapes clear the sheet and the panel behind it.
-        #expect(reader.escapeCalls >= 2)
+        // At least one Escape: the dismissals are counted in the start-on-
+        // sheet test, where exactly one call is in play.
+        #expect(reader.escapeCalls >= 1)
     }
 
     @Test("a sheet that survives a dismissal and a turn is the end")
@@ -161,7 +164,7 @@ struct KindleEndSheetTests {
         #expect(record.terminal)
         // One dismissal and one test turn, not a loop: three advances to reach
         // the last page, the turn that opened the sheet, and the test turn.
-        #expect(reader.escapeCalls >= 2)
+        #expect(reader.escapeCalls >= 1)
         // Bounded: the dismissal is not retried in a loop.
         #expect(reader.forwardCalls <= 6)
     }
@@ -175,7 +178,23 @@ struct KindleEndSheetTests {
         let session = try self.session(reader)
         let page = try session.snapshot()
         #expect(page.text == "page one")
-        #expect(reader.escapeCalls >= 2)
+        // The sheet needed two Escapes here: the second one is sent only
+        // because the re-read between them still found the sheet.
+        #expect(reader.escapeCalls == 2)
+    }
+
+    @Test("a sheet that clears on the first Escape gets exactly one")
+    func oneEscapeWhenTheSheetClears() throws {
+        let clock = Clock()
+        let reader = FakeReader(clock: clock)
+        reader.sheet = true
+        reader.sheetNeedsTwoEscapes = false
+        let session = try self.session(reader)
+        let page = try session.snapshot()
+        #expect(page.text == "page one")
+        // A blind second Escape could have closed the book; the re-read is
+        // what stops it.
+        #expect(reader.escapeCalls == 1)
     }
 
     @Test("the reader's own location proves an early sheet")

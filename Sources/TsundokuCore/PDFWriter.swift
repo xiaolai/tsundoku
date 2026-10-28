@@ -201,7 +201,7 @@ public enum PDFWriter {
         if !index.isEmpty {
             let body = PageIndex.attributedBody(rows: index, title: indexTitle)
             indexPages = PageIndex.draw(
-                body, in: context, pageSize: outputSize)
+                body, in: context, pageSize: PageIndex.pageSize)
         }
         context.closePDF()
         if isCancelled() { throw PDFWriterError.cancelled }

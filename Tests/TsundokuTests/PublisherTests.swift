@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import PDFKit
 import Testing
 
 @testable import TsundokuCore
@@ -296,5 +297,61 @@ struct PublisherTests {
         #expect(
             !FileManager.default.fileExists(
                 atPath: output.appendingPathComponent("A Book.pdf").path))
+    }
+}
+
+@Suite("Page map and index")
+struct PageMapTests {
+    private func artifact(
+        _ directory: URL, store: CaptureArtifactStore, texts: [String],
+        index: Bool
+    ) -> CaptureArtifact {
+        CaptureArtifact(
+            directory: directory, pageURLs: store.pageURLs, texts: texts,
+            metadata: CaptureMetadata(
+                title: "A Book", author: nil, identifier: nil,
+                source: "Kindle"),
+            termination: .endOfBook, includePageIndex: index)
+    }
+
+    @Test("the page map is written without an index in the PDF")
+    func mapWithoutIndex() throws {
+        let directory = try publisherDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CaptureArtifactStore(output: directory)
+        _ = try store.commitPage(
+            image: try publisherImage(), text: "alpha words",
+            source: "accessibility")
+        let published = try PDFPublisher().publish(
+            artifact(directory, store: store, texts: ["alpha words"],
+                     index: false))
+        #expect(published.indexPages == 0)
+        #expect(published.pageCount == 1)
+        let csv = try #require(published.pageMapURL)
+        let text = try String(contentsOf: csv, encoding: .utf8)
+        #expect(text.contains("pdf_page,opening_words"))
+        #expect(text.contains("1,alpha words"))
+    }
+
+    @Test("the index is added only when asked for")
+    func indexOnRequest() throws {
+        let directory = try publisherDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CaptureArtifactStore(output: directory)
+        _ = try store.commitPage(
+            image: try publisherImage(), text: "alpha words",
+            source: "accessibility")
+        let published = try PDFPublisher().publish(
+            artifact(directory, store: store, texts: ["alpha words"],
+                     index: true))
+        #expect(published.indexPages > 0)
+        #expect(published.pageCount == 1 + published.indexPages)
+        let document = try #require(PDFDocument(url: published.url))
+        #expect(document.pageCount == published.pageCount)
+        let last = document.page(at: document.pageCount - 1)?.string ?? ""
+        #expect(published.indexPages >= 1)
+        #expect(last.contains("Page Index"))
+        #expect(last.contains("alpha words"))
+        #expect(published.pageMapURL != nil)
     }
 }

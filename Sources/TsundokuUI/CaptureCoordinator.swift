@@ -21,6 +21,7 @@ enum CaptureCoordinator {
         let cancellation: CancellationFlag
         let manual: ManualCaptureConfiguration?
         let resume: Bool
+        let includePageIndex: Bool
 
         func run(
             progress: @escaping @Sendable (CaptureProgress) -> Void
@@ -32,7 +33,8 @@ enum CaptureCoordinator {
                     configuration: manual, progress: progress,
                     isCancelled: { cancellation.isSet },
                     bundle: CaptureBundleRequest(options: bundleOptions),
-                    resume: resume)
+                    resume: resume,
+                    includePageIndex: includePageIndex)
             }
             return try engine.capture(
                 book: book,
@@ -43,7 +45,8 @@ enum CaptureCoordinator {
                 isCancelled: { cancellation.isSet },
                 cleanPage: kind == .kindle ? cleanPage : .asDisplayed,
                 pageSetup: kind == .kindle ? pageSetup : booksPageSetup,
-                bundle: CaptureBundleRequest(options: bundleOptions))
+                bundle: CaptureBundleRequest(options: bundleOptions),
+                includePageIndex: includePageIndex)
         }
     }
 
