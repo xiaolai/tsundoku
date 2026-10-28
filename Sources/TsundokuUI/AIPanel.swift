@@ -319,6 +319,12 @@ public final class AIPanelModel: ObservableObject {
     private var failureKind: FailureKind?
     private var submittedRequest: AIRequest?
     private var submittedOnDevice = false
+    /// What a failed answer was asked for. The composer is empty by then, so
+    /// Retry needs its own copy of the request. The scope is the one the
+    /// reader asked for, not the page a scope could be downgraded to, and the
+    /// passage is not kept: retry resolves it again for the current page.
+    private var failedAttempt:
+        (action: AIAction, question: String, scope: CompanionScope)?
     /// The key this page's conversation is filed under; nil while the page
     /// is unidentified. Read-only outside the model.
     public private(set) var bookKey: String?
@@ -1387,9 +1393,12 @@ public final class AIPanelModel: ObservableObject {
             acquiredSelectionKey = nil
         }
         if bookChanged {
+            // The answer belonged to the other book. The *send* is left
+            // running so it can report the move; only the answer work stops.
             answerTask?.cancel()
             answerTask = nil
             answerGeneration += 1
+            clearPendingRequest()
             if phase == .loadingAnswer { phase = .idle }
             turns = []
             transcriptMutationGeneration += 1
@@ -1507,10 +1516,18 @@ public final class AIPanelModel: ObservableObject {
             let resolver = contextResolver
             let archive = app.archive
             let captures = (try? archive?.captures()) ?? []
+            let generation = localResultGeneration
             let result = await Task.detached {
                 resolver(page, captures, archive)
             }.value
-            if let result { localResult = result }
+            // Publish only if this is still the page the panel is on: a late
+            // answer for the previous page must not become the cache every
+            // later request reads.
+            if let result, generation == localResultGeneration,
+                localContextPage == page
+            {
+                localResult = result
+            }
         }
         guard let result = localResult, captureMatchesBook(result.capture)
         else { return nil }
@@ -1578,12 +1595,32 @@ public final class AIPanelModel: ObservableObject {
         guard canRun else { return }
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         if action == .ask, text.isEmpty { return }
-        let requested = action
-        let requestedScope = scope
+        send(action: action, question: text, scope: scope)
+    }
+
+    /// Composes and sends one request. The scope's text is resolved here, not
+    /// passed in, so a retry asks the same question about the page the reader
+    /// is on now instead of the chapter text saved when it first failed.
+    private func send(
+        action requested: AIAction, question text: String,
+        scope requestedScope: CompanionScope,
+        restoringFailureOnAbort: Bool = false
+    ) {
         sendGeneration += 1
         let generation = sendGeneration
         let task = Task { [weak self] in
             guard let self else { return }
+            defer {
+                // A retry that never started has to leave the failure — and
+                // its Retry — on screen, or the panel ends up idle with an
+                // unsendable request and nothing to press.
+                if restoringFailureOnAbort,
+                    generation == self.sendGeneration,
+                    self.phase == .idle, self.failureKind == .answer
+                {
+                    self.phase = .failed
+                }
+            }
             if requestedScope == .selection {
                 self.refreshSelection()
                 await self.awaitSelectionRefresh()
@@ -1662,6 +1699,20 @@ public final class AIPanelModel: ObservableObject {
                 compactedForSend ? nil
                 : (attemptedAutoCompaction ? self.promptProjection()
                     : projectionAtCompose)
+            // Compaction can take a while, and a chapter turn during it is
+            // not a conversation change: the passage resolved above belongs
+            // to the page this request started on. Checking the page again
+            // is what keeps a chapter-1 passage from being sent with
+            // chapter-2 metadata.
+            guard self.bookKey == bookAtSend,
+                self.pageText == pageAtSend,
+                self.localResultGeneration == resultGeneration
+            else {
+                self.sendNote =
+                    "The reader moved while the passage was prepared; send "
+                    + "again for the current page."
+                return
+            }
             guard self.conversationGeneration == conversationAtCompose,
                 self.transcriptMutationGeneration == transcriptAtCompose,
                 !self.compactionRefreshing, !self.compactionRemoving,
@@ -1672,13 +1723,18 @@ public final class AIPanelModel: ObservableObject {
                     + "prepared; send again."
                 return
             }
-            self.pendingQuestion = text.isEmpty
-                ? requested.displayName : text
-            self.question = ""
-            self.startRequest(
+            // The composer hands its text to the request in `startRequest`,
+            // once every guard there has passed: moving it here showed an
+            // "asked" bubble for requests that were then refused.
+            let started = self.startRequest(
                 action: requested, question: text,
                 scope: effectiveScope, passage: passage,
-                projection: finalProjection)
+                projection: finalProjection, retryScope: requestedScope)
+            if !started, self.failureKind == .answer {
+                // A retry that could not start keeps its failure on screen,
+                // so it can be retried again once its content is back.
+                self.phase = .failed
+            }
         }
         sendPreparationTask = task
     }
@@ -2045,27 +2101,42 @@ public final class AIPanelModel: ObservableObject {
         }
     }
 
+    /// Starts a request. Returns whether it started: Retry needs to know a
+    /// refusal from a send, or the panel would sit idle with no answer and a
+    /// failed request that can no longer be retried.
+    @discardableResult
     private func startRequest(
         action: AIAction, question text: String, scope: CompanionScope,
-        passage: ScopePassage?, projection: ConversationProjection? = nil
-    ) {
+        passage: ScopePassage?, projection: ConversationProjection? = nil,
+        retryScope: CompanionScope? = nil
+    ) -> Bool {
         guard canRun else {
             if !Task.isCancelled {
                 sendNote =
                     "The conversation changed while the message was being "
                     + "prepared; send again."
             }
-            return
+            return false
         }
-        if action == .ask, text.isEmpty { return }
+        if action == .ask, text.isEmpty { return false }
         let settings = app?.settings ?? .defaults
         if scope == .selection, !selectionAvailable {
             sendNote =
                 "Nothing is selected; select text in the reader and retry."
-            return
+            return false
         }
         let selectedPassage: String? =
             scope == .selection ? context.selection : nil
+        // Every guard has passed, so the request will actually be sent. This
+        // is the one place the composer's text becomes the transcript's
+        // pending question.
+        pendingQuestion = text.isEmpty ? action.displayName : text
+        if question.trimmingCharacters(in: .whitespacesAndNewlines) == text {
+            // Cleared only when the draft is still what was sent: text typed
+            // while the request was being prepared belongs to the reader.
+            question = ""
+        }
+        failedAttempt = nil
         let request = makeRequest(
             action: action, question: text, scope: scope, passage: passage,
             projection: projection)
@@ -2134,9 +2205,17 @@ public final class AIPanelModel: ObservableObject {
                 self.failureKind = .answer
                 self.error = AIProviderFailure.message(
                     for: error, provider: settings.provider)
+                // The question stops being pending the moment the request
+                // fails: Retry re-sends it, and a pending bubble plus a
+                // failure view would otherwise both claim the same request.
+                self.pendingQuestion = nil
+                self.failedAttempt = (
+                    action: action, question: text,
+                    scope: retryScope ?? scope)
                 self.phase = .failed
             }
         }
+        return true
     }
 
     /// A quick action sends at once, with the typed text as its question when
@@ -2161,7 +2240,19 @@ public final class AIPanelModel: ObservableObject {
         case .answer:
             // `canRun` rejects a failed phase; clear it before re-asking.
             phase = .idle
-            run()
+            // Re-send the request that failed, not whatever the composer
+            // holds now: the draft was cleared when the request was sent.
+            // The page text is read again, because Retry asks the same
+            // question about the page the reader is on now; a scope whose
+            // content is gone keeps the failure on screen rather than
+            // leaving an idle panel with an unsendable request.
+            guard let attempt = failedAttempt else {
+                run()
+                return
+            }
+            send(
+                action: attempt.action, question: attempt.question,
+                scope: attempt.scope, restoringFailureOnAbort: true)
         case nil:
             if pageText.isEmpty {
                 loadPage()
@@ -2223,6 +2314,16 @@ public final class AIPanelModel: ObservableObject {
         sendPreparationTask = nil
         sendGeneration += 1
         answerGeneration += 1
+        clearPendingRequest()
+    }
+
+    /// The question on screen as "being answered" no longer is, and there is
+    /// nothing to retry. Separate from `cancelAnswerWork` because a book
+    /// change must clear it without cancelling the send that is about to
+    /// report the move.
+    private func clearPendingRequest() {
+        pendingQuestion = nil
+        failedAttempt = nil
     }
 
     /// Stops the answer, not the panel: page following continues, so the next
@@ -3344,7 +3445,9 @@ public struct AIPanelView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    if model.turns.isEmpty, model.pendingQuestion == nil {
+                    if model.turns.isEmpty, model.pendingQuestion == nil,
+                        model.phase != .failed
+                    {
                         emptyState
                     } else {
                         if model.compaction != nil {
@@ -3355,13 +3458,15 @@ public struct AIPanelView: View {
                         }
                     }
                     if let pending = model.pendingQuestion {
-                        PendingQuestionBubble(
-                            text: pending, compact: compact)
+                        QuestionBubble(text: pending, compact: compact)
                     }
                     if model.phase == .loadingAnswer {
                         loadingRow
                     }
-                    if model.phase == .failed, !model.turns.isEmpty {
+                    if model.phase == .failed {
+                        // Rendered once, whether or not anything was asked
+                        // before: a first request that failed used to leave
+                        // the panel with no error and no Retry.
                         failureView
                     }
                 }
@@ -3393,7 +3498,10 @@ public struct AIPanelView: View {
             Text("Asking \(model.provider)…")
                 .foregroundStyle(.secondary)
         case .failed:
-            failureView
+            // The transcript renders the failure view once, for every
+            // transcript state; an empty state that drew it too would show
+            // the same error twice.
+            EmptyView()
         case .ready, .idle:
             // Breathing room between blocks: a wall of paragraphs at 8 pt reads as
         // one block; 12 lets a heading, a paragraph and a list read as three.
@@ -3521,26 +3629,19 @@ public struct AIPanelView: View {
 
     private func turnView(_ turn: AITurn) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Spacer(minLength: compact ? 24 : 48)
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(turn.promptLabel)
-                        .font(compact ? .callout : .body)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(
-                            Color.accentColor.opacity(0.16),
-                            in: RoundedRectangle(
-                                cornerRadius: 14, style: .continuous))
-                    if !turn.context.attachments.isEmpty {
-                        Text(
-                            turn.context.attachments.joined(separator: " · ")
-                        )
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    }
+            // The bubble brings its own leading spacer, so this is the whole
+            // row: a second one here made a finished question narrower than
+            // the same question while it was still pending.
+            VStack(alignment: .trailing, spacing: 4) {
+                QuestionBubble(
+                    text: turn.promptLabel, compact: compact)
+                if !turn.context.attachments.isEmpty {
+                    Text(
+                        turn.context.attachments.joined(separator: " · ")
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 }
             }
             VStack(alignment: .leading, spacing: 6) {
@@ -4495,50 +4596,38 @@ struct MarkdownText: View {
                 options: AttributedString.MarkdownParsingOptions(
                     interpretedSyntax: .inlineOnlyPreservingWhitespace))
         else { return Text(text) }
-        var result = parsed
-        // Chinese words are protected from mid-word breaks before the text is
-        // laid out; see CJKLineBreaker.
-        var pieces: [(Range<AttributedString.Index>, AttributedString)] = []
-        for run in parsed.runs {
-            let characters = String(parsed[run.range].characters)
-            let protected = CJKLineBreaker.protectWords(characters)
-            guard protected != characters else { continue }
-            var replacement = AttributedString(protected)
-            replacement.font = run.font
-            pieces.append((run.range, replacement))
-        }
-        for (range, replacement) in pieces.reversed() {
-            result.replaceSubrange(range, with: replacement)
-        }
         let latin = style?.family.flatMap { Font.custom($0, size: size) }
             ?? Font.system(size: size)
         let chineseFont = style?.chineseFamily.flatMap {
             Font.custom($0, size: size)
         }
         let tracking = style?.chineseTracking ?? 0
+        // The result is rebuilt run by run, not patched in place: protecting
+        // a Chinese word inserts joiners, so an index taken from `parsed` no
+        // longer addresses the same text in the result. A markdown run is a
+        // formatting boundary, not a script boundary, so each run is split
+        // again into script spans before a face is chosen.
+        var result = AttributedString()
         for run in parsed.runs {
-            let characters = String(parsed[run.range].characters)
-            let isChinese = characters.unicodeScalars.contains {
-                Self.isHan($0)
+            let original = String(parsed[run.range].characters)
+            let protected = CJKLineBreaker.protectWords(original)
+            for span in ScriptSpans.split(protected) {
+                var piece = AttributedString(span.text)
+                // A link, a code span or emphasis is part of what the answer
+                // says; rewriting the text must not drop it.
+                piece.mergeAttributes(run.attributes, mergePolicy: .keepCurrent)
+                piece.font = span.isChinese ? (chineseFont ?? latin) : latin
+                if span.isChinese, tracking != 0 { piece.kern = tracking }
+                if bold {
+                    let intent =
+                        piece.inlinePresentationIntent ?? []
+                    piece.inlinePresentationIntent =
+                        intent.union(.stronglyEmphasized)
+                }
+                result.append(piece)
             }
-            var attributes = AttributeContainer()
-            attributes.font = isChinese
-                ? (chineseFont ?? latin) : latin
-            if isChinese, tracking != 0 { attributes.kern = tracking }
-            if bold { attributes.inlinePresentationIntent = .stronglyEmphasized }
-            result[run.range].mergeAttributes(attributes)
         }
         return Text(result)
-    }
-
-    static func isHan(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar.value {
-        case 0x3000...0x303F, 0x3400...0x4DBF, 0x4E00...0x9FFF,
-            0xF900...0xFAFF, 0xFF00...0xFFEF, 0x20000...0x2FA1F:
-            return true
-        default:
-            return false
-        }
     }
 
 }
@@ -4647,7 +4736,10 @@ struct QuickPageCaptureView: View {
 /// The question being answered, shown as the bubble it will become. The
 /// answer replaces it in place, so sending looks like sending rather than
 /// like waiting for a panel that did nothing.
-struct PendingQuestionBubble: View {
+/// One asked question. The bubble that waits for an answer and the bubble a
+/// finished turn keeps are the same bubble, so the type does not change under
+/// the reader when the answer arrives.
+struct QuestionBubble: View {
     let text: String
     let compact: Bool
 
@@ -4655,6 +4747,7 @@ struct PendingQuestionBubble: View {
         HStack {
             Spacer(minLength: compact ? 24 : 48)
             Text(text)
+                .font(compact ? .callout : .body)
                 .textSelection(.enabled)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)

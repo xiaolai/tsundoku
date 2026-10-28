@@ -417,6 +417,106 @@ struct CompanionPageTurnTests {
         #expect(panel.phase != .loadingAnswer)
     }
 
+    @Test("a failed answer is retried against the page the reader is on")
+    func retryUsesCurrentPage() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsundoku-retry-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let reader = SteppingReader(
+            kind: .kindle, pages: [page(1), page(2)])
+        let log = RequestLog()
+        let failsOnce = FailOnce()
+        let panel = panel(
+            reader: reader, model: model,
+            answer: { request, _ in
+                log.append(request)
+                if failsOnce.take() { throw TemporaryFailure() }
+                return AIAnswer(text: "answer", provider: "test")
+            })
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+
+        panel.question = "What does this mean?"
+        panel.send()
+        await panel.sendPreparationTask?.value
+        await panel.awaitAnswer()
+        #expect(panel.phase == .failed)
+        #expect(panel.pendingQuestion == nil)
+
+        // The reader turns the page before retrying. The question stays the
+        // same; the page it is asked about does not.
+        reader.show(1)
+        panel.retry()
+        await panel.sendPreparationTask?.value
+        await panel.awaitAnswer()
+
+        #expect(panel.phase == .ready)
+        let retried = try #require(log.requests.last)
+        #expect(retried.question == "What does this mean?")
+        #expect(retried.pageText.contains("page 2 words"))
+        #expect(!retried.pageText.contains("page 1 words"))
+    }
+
+    @Test("a downgraded chapter retry asks for the chapter, not the page")
+    func retryKeepsTheRequestedScope() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsundoku-retry-scope-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let reader = SteppingReader(kind: .kindle, pages: [page(1)])
+        let log = RequestLog()
+        let failsOnce = FailOnce()
+        // No capture resolves, so a chapter request is downgraded to the page
+        // and says so. Retry must ask for the chapter again; if it remembered
+        // the downgraded scope, the note would disappear.
+        let panel = panel(
+            reader: reader, model: model,
+            answer: { request, _ in
+                log.append(request)
+                if failsOnce.take() { throw TemporaryFailure() }
+                return AIAnswer(text: "answer", provider: "test")
+            })
+        panel.loadPage()
+        await panel.awaitPageLoad()
+        defer { panel.cancel() }
+
+        await sendWhenReady(
+            panel, scope: .currentChapter, question: "Summarize the chapter")
+        await panel.sendPreparationTask?.value
+        await panel.awaitAnswer()
+        #expect(panel.phase == .failed)
+        #expect(panel.sendNote?.contains("sent instead") == true)
+
+        panel.retry()
+        await panel.sendPreparationTask?.value
+        await panel.awaitAnswer()
+
+        #expect(panel.phase == .ready)
+        // A retry that asked for the page would not say the chapter is
+        // missing; only a chapter request is downgraded and reported.
+        #expect(panel.sendNote?.contains("sent instead") == true)
+    }
+
+    private struct TemporaryFailure: Error {}
+
+    private final class FailOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var used = false
+        func take() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if used { return false }
+            used = true
+            return true
+        }
+    }
+
     @Test("an unreadable page is sent with a visible note")
     func unreadablePageSendsWithNote() async throws {
         let directory = FileManager.default.temporaryDirectory
@@ -984,8 +1084,8 @@ struct CompanionPageTurnTests {
 
     private final class CopyOnlyReader: ReaderContext, @unchecked Sendable {
         let kind: ReaderKind = .kindle
-        let pageValue: ReaderPage
-        let selection: String
+        var pageValue: ReaderPage
+        var selection: String
 
         init(page: ReaderPage, selection: String) {
             self.pageValue = page
@@ -1032,6 +1132,136 @@ struct CompanionPageTurnTests {
         // The page around a selection is sent too; the disclosure must say so.
         #expect(panelModel.transmissionLabel.contains("selection and page"))
         #expect(panelModel.transmissionDetail.contains("surrounding page"))
+    }
+
+    @Test("a retry that cannot start keeps the failure on screen")
+    func retryRefusalKeepsTheFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-retry-refusal-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try model(in: directory)
+        let selection = "page words page words"
+        let page = ReaderPage(
+            text: String(repeating: "page words ", count: 20),
+            title: "Kindle", kind: .kindle, source: .accessibility,
+            pageNumber: 1, pageCount: 100)
+        let reader = CopyOnlyReader(page: page, selection: selection)
+        let failsOnce = FailOnce()
+        let panelModel = self.panel(reader: reader, model: model) {
+            request, _ in
+            if failsOnce.take() { throw TemporaryFailure() }
+            return AIAnswer(text: "answer", provider: "test")
+        }
+        panelModel.loadPage()
+        await panelModel.awaitPageLoad()
+        defer { panelModel.cancel() }
+
+        panelModel.chooseScope(.selection)
+        await panelModel.awaitSelectionRefresh()
+        panelModel.question = "Explain the selection"
+        panelModel.send()
+        await panelModel.sendPreparationTask?.value
+        await panelModel.awaitAnswer()
+        #expect(panelModel.phase == .failed)
+
+        // The reader turns the page; Kindle's carried-over selection does
+        // not survive a different page, and the saved request can no longer
+        // be honoured.
+        reader.selection = ""
+        reader.pageValue = ReaderPage(
+            text: String(repeating: "other page words ", count: 20),
+            title: "Kindle", kind: .kindle, source: .accessibility,
+            pageNumber: 2, pageCount: 100)
+
+        // Retry re-reads the selection, finds none and refuses; the failure
+        // must stay on screen with the reason.
+        panelModel.retry()
+        await panelModel.sendPreparationTask?.value
+
+        // Not idle with an unsendable request: the failure and its Retry stay
+        // on screen, with the reason.
+        #expect(panelModel.phase == .failed)
+        #expect(panelModel.sendNote?.contains("Nothing is selected") == true)
+    }
+
+    @Test("a chapter retry sends the chapter the reader is now in")
+    func chapterRetryResolvesTheNewChapter() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "tsundoku-chapter-retry-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let captureDirectory = directory.appendingPathComponent("capture")
+        try FileManager.default.createDirectory(
+            at: captureDirectory, withIntermediateDirectories: true)
+        let capturePages = [
+            (1, "Ch. 1\nChapter one body text."),
+            (2, "Ch. 2\nOther chapter body text."),
+        ]
+        let lines = capturePages.map { page, text in
+            "{\"page\":\(page),\"text\":\"\(text.replacingOccurrences(of: "\n", with: "\\n"))\"}"
+        }
+        try lines.joined(separator: "\n").write(
+            to: captureDirectory.appendingPathComponent("text.jsonl"),
+            atomically: true, encoding: .utf8)
+        try "{\"complete\":{\"wholeBook\":true}}".write(
+            to: captureDirectory.appendingPathComponent("manifest.json"),
+            atomically: true, encoding: .utf8)
+        let record = CaptureRecord(
+            id: 1, asin: "B0ASIN0001", title: "The Book",
+            directory: captureDirectory.path, pageCount: 2, pdfPath: nil,
+            createdAt: Date(), state: "finished", source: "kindle")
+        let model = try model(in: directory)
+        let reader = SteppingReader(kind: .kindle, pages: [page(1), page(2)])
+        let log = RequestLog()
+        let failsOnce = FailOnce()
+        // The resolver follows the page, as the real one does; a fixed result
+        // would pin the chapter and hide the very move under test.
+        let panelModel = AIPanelModel(
+            app: model, context: reader,
+            contextResolver: { page, _, _ in
+                ReadingContextResolver.Result(
+                    chapter: "Ch. \(page.pageNumber ?? 0)",
+                    pageNumber: page.pageNumber, fingerprint: "fp",
+                    capture: record)
+            },
+            answerProvider: { request, _ in
+                log.append(request)
+                if failsOnce.take() { throw TemporaryFailure() }
+                return AIAnswer(text: "answer", provider: "test")
+            })
+        panelModel.followInterval = .seconds(3_600)
+        panelModel.followDebounce = .zero
+        panelModel.loadPage()
+        await panelModel.awaitPageLoad()
+        defer { panelModel.cancel() }
+
+        await sendWhenReady(
+            panelModel, scope: .currentChapter,
+            question: "Summarize the chapter")
+        await panelModel.sendPreparationTask?.value
+        await panelModel.awaitAnswer()
+        #expect(panelModel.phase == .failed)
+        let first = try #require(log.requests.last)
+        #expect(first.pageText.contains("Chapter one body text."))
+
+        // The reader moves into the second chapter before retrying: the
+        // question is the same, the chapter it is asked about is not.
+        reader.show(1)
+        panelModel.retry()
+        await panelModel.sendPreparationTask?.value
+        await panelModel.awaitAnswer()
+
+        #expect(panelModel.phase == .ready)
+        let retried = try #require(log.requests.last)
+        #expect(retried.scope == .currentChapter)
+        #expect(retried.question == "Summarize the chapter")
+        #expect(retried.pageText.contains("Other chapter body text."))
+        #expect(!retried.pageText.contains("Chapter one body text."))
     }
 
     @Test("chapter and whole-book scopes send the matched capture text")
