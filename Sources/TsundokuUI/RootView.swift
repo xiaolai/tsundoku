@@ -148,9 +148,19 @@ struct SidebarView: View {
                     .tag(AppModel.Section.history)
             }
             Group {
-                Label("Exports", systemImage: "doc.richtext")
-                    .badge(model.captures.count)
-                    .tag(AppModel.Section.exports)
+                HStack(spacing: 4) {
+                    Label("Exports", systemImage: "doc.richtext")
+                    // A capture that stopped early is invisible in a count.
+                    if model.captures.contains(where: { $0.termination != nil })
+                    {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.warning)
+                            .accessibilityLabel("Some captures failed")
+                    }
+                }
+                .badge(model.captures.count)
+                .tag(AppModel.Section.exports)
             }
         }
         .listStyle(.sidebar)

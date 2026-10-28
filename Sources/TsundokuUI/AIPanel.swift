@@ -3208,8 +3208,11 @@ public struct AIPanelView: View {
             Menu {
                 Button("Reload Page") { model.loadPage() }
                     .disabled(model.phase == .loadingPage)
-                Button("Capture This Page…") { model.captureCurrentPage() }
-                    .disabled(model.quickCaptureBusy)
+                Button(
+                    model.quickCaptureBusy
+                        ? "Capturing This Page…" : "Capture This Page…"
+                ) { model.captureCurrentPage() }
+                .disabled(model.quickCaptureBusy)
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .frame(
@@ -3819,13 +3822,13 @@ public struct AIPanelView: View {
             if let note = model.sendNote {
                 Text(note)
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let error = model.error, model.phase != .failed {
                 Text(error)
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if model.canRetrySave {
@@ -3833,14 +3836,14 @@ public struct AIPanelView: View {
                     model.saveError
                         ?? "An answer is not saved yet; Retry Save.")
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warning)
                     .fixedSize(horizontal: false, vertical: true)
                 Button("Retry Save") { model.retrySave() }
                     .controlSize(.small)
             } else if let saveError = model.saveError {
                 Text(saveError)
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if model.historyLoadFailed {
@@ -3876,7 +3879,7 @@ public struct AIPanelView: View {
                     model.compactionError
                         ?? "Could not refresh the conversation.")
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warning)
                     .fixedSize(horizontal: false, vertical: true)
                 Button("Retry Summary Refresh") {
                     model.retryCompactionRefresh()
@@ -3894,14 +3897,14 @@ public struct AIPanelView: View {
             if case .failed(let message) = model.compactionState {
                 Text(message)
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let warning = model.contextWarning {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(warning)
                         .font(.caption2)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Theme.warning)
                         .fixedSize(horizontal: false, vertical: true)
                     Button("Compact") { model.compactConversation() }
                         .controlSize(.mini)
@@ -3911,7 +3914,7 @@ public struct AIPanelView: View {
             if let captureError = model.quickCaptureError {
                 Text(captureError)
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 6) {
@@ -4432,7 +4435,7 @@ struct QuickPageCaptureView: View {
             if let saveError {
                 Text(saveError)
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warning)
             }
             HStack(spacing: 8) {
                 Button("Copy Image") { copyImage() }

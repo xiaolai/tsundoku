@@ -316,7 +316,7 @@ struct BookChatsView: View {
                         + "be missing.",
                     systemImage: "exclamationmark.triangle")
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warning)
                     .padding(.horizontal, 10)
                     .padding(.bottom, 6)
             }
@@ -370,7 +370,7 @@ struct BookChatsView: View {
                                         "Not yet linked to this book",
                                         systemImage: "tray")
                                         .font(.caption2)
-                                        .foregroundStyle(.orange)
+                                        .foregroundStyle(Theme.warning)
                                 }
                             }
                             Spacer(minLength: 0)
@@ -540,7 +540,7 @@ struct BookChatsView: View {
                     if let actionError {
                         Text(actionError)
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(Theme.warning)
                             .textSelection(.enabled)
                     }
                     if let compaction, let selectedID {

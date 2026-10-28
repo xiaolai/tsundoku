@@ -256,7 +256,7 @@ private struct ObservedPermissionBanner: View {
         if !problems.isEmpty, !dismissed {
             HStack(spacing: 10) {
                 Image(systemName: "lock.trianglebadge.exclamationmark")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warning)
                 Text("Access is incomplete: \(problems.joined(separator: "; ")).")
                     .font(.callout)
                     .fixedSize(horizontal: false, vertical: true)
@@ -276,7 +276,7 @@ private struct ObservedPermissionBanner: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
-            .background(.orange.opacity(0.12))
+            .background(Theme.warningBackground)
         }
     }
 }

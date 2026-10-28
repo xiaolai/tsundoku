@@ -272,9 +272,12 @@ public struct ExportsView: View {
                                 if let termination = capture.termination,
                                     !termination.isEmpty
                                 {
-                                    Text(termination)
+                                    Label(
+                                        termination,
+                                        systemImage:
+                                            "exclamationmark.triangle.fill")
                                         .font(.caption2)
-                                        .foregroundStyle(.orange)
+                                        .foregroundStyle(Theme.warning)
                                 }
                                 if !capture.warnings.isEmpty {
                                     Label(
