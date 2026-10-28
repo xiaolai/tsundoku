@@ -97,6 +97,9 @@ public struct LibraryView: View {
                 bookList
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            PermissionBanner(model: model)
+        }
         .onReceive(
             NotificationCenter.default.publisher(for: .tsundokuBrowserCommand)
         ) { notification in

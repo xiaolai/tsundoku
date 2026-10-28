@@ -59,13 +59,16 @@ public final class Archive: @unchecked Sendable {
                 .first?.string("value")) == "1"
     }
 
-    public static func standard() throws -> Archive {
-        let support = FileManager.default.urls(
+    /// Where the archive lives when nothing overrides it. Kept separate from
+    /// `standard()` so a window can name the file it failed to open.
+    public static var standardURL: URL {
+        FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
-        )[0]
-        return try Archive(
-            path: support.appendingPathComponent(
-                "Tsundoku/tsundoku.sqlite"))
+        )[0].appendingPathComponent("Tsundoku/tsundoku.sqlite")
+    }
+
+    public static func standard() throws -> Archive {
+        try Archive(path: standardURL)
     }
 
     private static func createSchema(_ database: SQLiteDatabase) throws {

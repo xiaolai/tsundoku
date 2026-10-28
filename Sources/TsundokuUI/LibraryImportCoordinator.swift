@@ -27,6 +27,8 @@ struct LibraryImportCoordinator {
         var failures: [LibraryImportFailure] = []
         var health: [BookSource: String] = [:]
         var lastImportBySource: [BookSource: Date] = [:]
+        /// True when the reader stopped the run before every source was read.
+        var cancelled = false
     }
 
     private struct Imported {
@@ -37,10 +39,18 @@ struct LibraryImportCoordinator {
     }
 
     static func run(
-        _ sources: [Source], archive: Archive
+        _ sources: [Source], archive: Archive, cancel: CancellationFlag? = nil
     ) async -> Outcome {
         var outcome = Outcome()
         for source in sources {
+            // Cancellation is checked between sources: reading a library is
+            // one synchronous pass and the commit is one transaction, so
+            // pretending to interrupt either would report a state that never
+            // existed. A cancelled run keeps what it already committed.
+            guard cancel?.isSet != true else {
+                outcome.cancelled = true
+                break
+            }
             do {
                 let result = try await importOne(source, archive: archive)
                 outcome.health[source.source] = result.health
@@ -75,6 +85,7 @@ struct LibraryImportCoordinator {
             let archive: Archive
             let announce: Bool
             let accessGeneration: Int?
+            let cancel: CancellationFlag?
         }
 
         private var task: Task<Void, Never>?
@@ -83,8 +94,16 @@ struct LibraryImportCoordinator {
             (@MainActor (LibraryImportCoordinator.Outcome, Run) -> Void)?
         private var onFinish: (@MainActor () -> Void)?
         private var requestedAgain = false
+        private var activeCancel: CancellationFlag?
 
         var isRunning: Bool { task != nil }
+
+        /// Stop after the source being read. A queued re-run is dropped too,
+        /// because the reader asked for the import to stop, not to repeat.
+        func cancel() {
+            activeCancel?.set()
+            requestedAgain = false
+        }
 
         func request(
             makeRun: @escaping @MainActor () -> Run?,
@@ -112,12 +131,14 @@ struct LibraryImportCoordinator {
             guard task == nil, let makeRun, let run = makeRun() else {
                 return
             }
+            activeCancel = run.cancel
             task = Task { [weak self] in
                 let outcome = await LibraryImportCoordinator.run(
-                    run.sources, archive: run.archive)
+                    run.sources, archive: run.archive, cancel: run.cancel)
                 guard let self else { return }
                 self.onOutcome?(outcome, run)
                 self.task = nil
+                self.activeCancel = nil
                 let again = self.requestedAgain
                 self.requestedAgain = false
                 self.onFinish?()

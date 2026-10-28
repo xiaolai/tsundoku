@@ -187,6 +187,15 @@ public final class AppModel: ObservableObject {
     @Published public var status = "Starting…"
     @Published public var notice: String?
     @Published public var isImporting = false
+    /// The file the archive was opened from, kept even when opening failed so
+    /// the window can name it and reveal it in Finder.
+    @Published public private(set) var archiveFileURL: URL?
+    /// Why the archive could not be opened. Empty rows and a silent status
+    /// line are not an explanation, so the Library reads this directly.
+    @Published public private(set) var archiveError: String?
+    /// True while the first read of the archive is in flight. Before it
+    /// finishes, an empty library means "not loaded yet", not "no books".
+    @Published public private(set) var isHydrating = false
     /// The archive reload started by an import or a refresh. Completion is
     /// observable so a caller does not see stale books or counts.
     public private(set) var reloadTask: Task<Void, Never>?
@@ -231,8 +240,10 @@ public final class AppModel: ObservableObject {
     @Published public var exportFolder: URL = AppModel.storedExportFolder()
     @Published public var lastImport: Date?
 
-    public let archive: Archive?
-    private let sessionLogger: SessionLogger?
+    /// Set once at launch, and again if the reader retries a failed open.
+    /// Not observed: an archive never changes identity while the app runs.
+    public private(set) var archive: Archive?
+    private var sessionLogger: SessionLogger?
     private let captureSession = CaptureSession()
     private let libraryImportSession = LibraryImportCoordinator.Session()
     private var liveTask: Task<Void, Never>?
@@ -292,13 +303,18 @@ public final class AppModel: ObservableObject {
             ?? .standard()
         do {
             let archive: Archive
+            let archiveFile: URL
             if let archiveURL {
+                archiveFile = archiveURL
                 archive = try Archive(path: archiveURL)
             } else if let index = arguments.firstIndex(of: "--archive-path"), arguments.indices.contains(index + 1) {
-                archive = try Archive(path: URL(fileURLWithPath: arguments[index + 1]))
+                archiveFile = URL(fileURLWithPath: arguments[index + 1])
+                archive = try Archive(path: archiveFile)
             } else {
-                archive = try Archive.standard()
+                archiveFile = Archive.standardURL
+                archive = try Archive(path: archiveFile)
             }
+            self.archiveFileURL = archiveFile
             self.archive = archive
             self.sessionLogger = SessionLogger(archive: archive)
             for source in BookSource.allCases {
@@ -309,6 +325,7 @@ public final class AppModel: ObservableObject {
         } catch {
             self.archive = nil
             self.sessionLogger = nil
+            self.archiveError = "\(error)"
             self.status = "Could not open the archive: \(error)"
             self.notice = "Could not open the archive: \(error)"
         }
@@ -966,6 +983,7 @@ public final class AppModel: ObservableObject {
         guard let archive else { return }
         reloadGeneration += 1
         let generation = reloadGeneration
+        isHydrating = true
         let task = Task {
             do {
                 let books = try await Task.detached {
@@ -984,6 +1002,7 @@ public final class AppModel: ObservableObject {
                     try archive.counts()
                 }.value
                 guard generation == self.reloadGeneration else { return }
+                self.isHydrating = false
                 self.books = books
                 self.bookTitles = Dictionary(
                     books.map { ($0.asin, $0.title) },
@@ -1025,6 +1044,7 @@ public final class AppModel: ObservableObject {
                 }
             } catch {
                 guard generation == self.reloadGeneration else { return }
+                self.isHydrating = false
                 self.status = "Archive read failed: \(error)"
                 self.post("Archive read failed: \(error)", seconds: 10)
             }
@@ -1036,6 +1056,46 @@ public final class AppModel: ObservableObject {
     /// those requests so newly readable sources are not silently skipped.
     public func requestLibraryImport() {
         importLibrary()
+    }
+
+    /// Try the archive again after a failed open, so a missing or repaired
+    /// file does not require a relaunch.
+    public func reopenArchive() {
+        guard archive == nil else { return }
+        let url = archiveFileURL ?? Archive.standardURL
+        do {
+            let reopened = try Archive(path: url)
+            archive = reopened
+            sessionLogger = SessionLogger(archive: reopened)
+            archiveError = nil
+            status = "Opening the library…"
+            reloadFromArchive()
+        } catch {
+            archiveError = "\(error)"
+            post("Could not open the archive: \(error)", seconds: 12)
+        }
+    }
+
+    /// Show the archive file in Finder. When it is missing, the folder is
+    /// shown instead, which is where a reader has to look.
+    public func revealArchiveFile() {
+        let url = archiveFileURL ?? Archive.standardURL
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting(
+                [url.deletingLastPathComponent()])
+        }
+    }
+
+    private var importCancelFlag: CancellationFlag?
+
+    /// Stop the import after the source being read. Already-committed
+    /// sources stay imported, and the status says which those are.
+    public func cancelLibraryImport() {
+        importCancelFlag?.set()
+        libraryImportSession.cancel()
+        status = "Stopping the import after the current source…"
     }
 
     public func importLibrary(announce: Bool = true) {
@@ -1058,6 +1118,8 @@ public final class AppModel: ObservableObject {
                     self.permissions?.librarySetupGeneration
                 let kindlePaths = self.kindleImportPaths
                 let booksPaths = self.booksImportPaths
+                let cancel = CancellationFlag()
+                self.importCancelFlag = cancel
                 return LibraryImportCoordinator.Session.Run(
                     sources: [
                         LibraryImportCoordinator.Source(
@@ -1082,7 +1144,7 @@ public final class AppModel: ObservableObject {
                             }),
                     ],
                     archive: archive, announce: announce,
-                    accessGeneration: accessGeneration)
+                    accessGeneration: accessGeneration, cancel: cancel)
             },
             onOutcome: { [weak self] outcome, run in
                 self?.applyImportOutcome(
@@ -1124,7 +1186,16 @@ public final class AppModel: ObservableObject {
             "access_denied_sources": failures.filter(\.accessDenied)
                 .map { $0.source.rawValue },
         ])
-        if outcome.books > 0 || outcome.annotations > 0 {
+        if outcome.cancelled {
+            // Cancellation is read between sources, so what is committed stays
+            // committed; saying so is the difference between a stop and a lie.
+            let read = outcome.importedSources.isEmpty
+                ? "nothing" : outcome.importedSources.joined(separator: " and ")
+            status = outcome.importedSources.isEmpty
+                ? "Library import cancelled."
+                : "Library import cancelled; kept what \(read) imported."
+            post(status, seconds: 8)
+        } else if outcome.books > 0 || outcome.annotations > 0 {
             status =
                 "\(outcome.books) books · "
                 + "\(outcome.annotations) annotations "

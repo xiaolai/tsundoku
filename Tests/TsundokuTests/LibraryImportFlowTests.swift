@@ -149,6 +149,72 @@ struct LibraryImportFlowTests {
         #expect(model.lastImportResult?.contains("1 books") == true)
     }
 
+    @Test func cancellingAnImportKeepsWhatWasCommitted() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let archive = try Archive(
+            path: root.appendingPathComponent("archive.sqlite"))
+        let cancel = CancellationFlag()
+        let secondSourceRead = Counter()
+
+        // The first source commits one book and asks for cancellation, the
+        // way the Cancel button does while a read is in flight. The second
+        // source must then never be read: a cancelled import that still reads
+        // the next library is not cancelled.
+        let outcome = await LibraryImportCoordinator.run(
+            [
+                LibraryImportCoordinator.Source(
+                    source: .kindle, missingMessage: "absent",
+                    read: {
+                        cancel.set()
+                        return (
+                            books: [
+                                Book(
+                                    asin: "FIRST", title: "First",
+                                    author: "Fixture", bookType: 10,
+                                    readState: 0, source: .kindle)
+                            ], annotations: []
+                        )
+                    }),
+                LibraryImportCoordinator.Source(
+                    source: .appleBooks, missingMessage: "absent",
+                    read: {
+                        secondSourceRead.bump()
+                        return (books: [], annotations: [])
+                    }),
+            ], archive: archive, cancel: cancel)
+
+        #expect(outcome.cancelled)
+        #expect(outcome.books == 1)
+        #expect(outcome.committedSources == [.kindle])
+        #expect(secondSourceRead.value == 0)
+        #expect(try archive.counts().books == 1)
+    }
+
+    @Test func anImportWithoutCancellationReadsEverySource() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let archive = try Archive(
+            path: root.appendingPathComponent("archive.sqlite"))
+        let outcome = await LibraryImportCoordinator.run(
+            [
+                LibraryImportCoordinator.Source(
+                    source: .kindle, missingMessage: "absent",
+                    read: { (books: [], annotations: []) }),
+                LibraryImportCoordinator.Source(
+                    source: .appleBooks, missingMessage: "absent",
+                    read: { (books: [], annotations: []) }),
+            ], archive: archive, cancel: CancellationFlag())
+        #expect(!outcome.cancelled)
+        #expect(outcome.committedSources == [.kindle, .appleBooks])
+    }
+
     @Test func deniedSnapshotDestinationIsNotLibraryAuthorizationFailure() throws {
         let manager = FileManager.default
         let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -167,5 +233,24 @@ struct LibraryImportFlowTests {
         } catch {
             #expect(!LibraryImportFailure(source: .appleBooks, error: error).accessDenied)
         }
+    }
+}
+
+/// Counts how often a source was read. The coordinator hands each read
+/// closure to a detached task, so the counter crosses threads.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func bump() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
     }
 }
