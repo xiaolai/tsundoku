@@ -228,9 +228,7 @@ public final class AppModel: ObservableObject {
     private var manualPreviewImageProbeAt = Date.distantPast
     private var captureAccessDraft: CaptureAccessDraft?
     private let accessDefaults: UserDefaults
-    @Published public var exportFolder: URL = FileManager.default.urls(
-        for: .documentDirectory, in: .userDomainMask
-    )[0].appendingPathComponent("Tsundoku")
+    @Published public var exportFolder: URL = AppModel.storedExportFolder()
     @Published public var lastImport: Date?
 
     public let archive: Archive?
@@ -1787,6 +1785,15 @@ public final class AppModel: ObservableObject {
         manualPreviewBusy = true
         manualPreviewError = nil
         manualFitMessage = nil
+        // Remember where Kindle was before the first fit. Fit A4 changes a
+        // window this app does not own, so the reader must be able to undo it.
+        if restoreKindleFrame == nil,
+            let frame = try? KindleLive.currentPage().windowFrame
+        {
+            restoreKindleFrame = CGRect(
+                x: frame.x, y: frame.y,
+                width: frame.width, height: frame.height)
+        }
         let areas = PageFrame.displayAreas()
         Task {
             let result = await Task.detached {
@@ -1829,6 +1836,26 @@ public final class AppModel: ObservableObject {
             case .failure(let error):
                 self.manualPreviewError = "\(error)"
             }
+        }
+    }
+
+    @Published public private(set) var restoreKindleFrame: CGRect?
+
+    public var canRestoreKindleWindow: Bool { restoreKindleFrame != nil }
+
+    /// Put the Kindle window back where Fit A4 found it. The frame is kept
+    /// only for this session; a relaunch must not move a window the reader
+    /// has since arranged.
+    public func restoreKindleWindow() {
+        guard let frame = restoreKindleFrame else { return }
+        do {
+            _ = try KindleLive.setWindowFrame(frame)
+            restoreKindleFrame = nil
+            manualFitMessage = "Kindle window restored."
+            clearManualPreview()
+            refreshManualPreview()
+        } catch {
+            manualPreviewError = "\(error)"
         }
     }
 
@@ -2195,8 +2222,31 @@ public final class AppModel: ObservableObject {
         panel.directoryURL = exportFolder
         if panel.runModal() == .OK, let url = panel.url {
             exportFolder = url
+            UserDefaults.standard.set(
+                url.path, forKey: Self.exportFolderDefaultsKey)
             refreshAbandonedCaptures()
         }
+    }
+
+    static let exportFolderDefaultsKey = "tsundoku.exportFolder"
+
+    /// The folder the reader last chose, if it still exists; otherwise the
+    /// default. A stored path that vanished must not become an unwritable
+    /// output folder.
+    static func storedExportFolder() -> URL {
+        let fallback = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask
+        )[0].appendingPathComponent("Tsundoku")
+        guard
+            let path = UserDefaults.standard.string(
+                forKey: exportFolderDefaultsKey),
+            !path.isEmpty
+        else { return fallback }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: path, isDirectory: &isDirectory), isDirectory.boolValue
+        else { return fallback }
+        return URL(fileURLWithPath: path, isDirectory: true)
     }
 
     /// A per-book original name. The hash of the full identifier keeps two
