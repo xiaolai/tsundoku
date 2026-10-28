@@ -3,6 +3,14 @@ import Foundation
 
 // MARK: - Metrics
 
+/// The panel edge a drag can move: the one facing the reader.
+public enum PanelResizeEdge: String, Sendable, Equatable {
+    case leading
+    case trailing
+    case top
+    case bottom
+}
+
 /// The panel measurements the spike settled on. They are constants, not
 /// tunables: the automatic placement chooses among them, it does not resize
 /// them.
@@ -13,6 +21,11 @@ public enum CompanionMetrics {
     /// 150 pt of transcript under a header, a context bar and a composer.
     public static let bottomHeights: [CGFloat] = [420, 360, 300]
     public static let bottomHeight: CGFloat = 420
+    /// The sizes a reader can set, by dragging the panel's edge or in
+    /// settings. One range per dimension: two bounds that disagree mean a
+    /// dragged panel can land outside the slider that is meant to show it.
+    public static let sideWidthRange: ClosedRange<CGFloat> = 300...760
+    public static let bottomHeightRange: ClosedRange<CGFloat> = 240...760
     public static let cornerRadius: CGFloat = 28
     public static let triggerSize: CGFloat = 56
     public static let triggerInset: CGFloat = 12
@@ -57,6 +70,27 @@ public struct CompanionLayout: Equatable, Sendable {
 /// Pure frame arithmetic for the companion. The window layer owns no
 /// reader-specific logic; it asks this for frames and positions the window.
 public enum CompanionGeometry {
+    /// Which edge of `panel` a drag may move.
+    ///
+    /// It is decided by where the panel actually ended up, not by the
+    /// placement that was asked for: a bottom drawer normally sits below the
+    /// reader, but geometry moves it above when there is no room, and the edge
+    /// facing the reader is then its bottom. A handle on the wrong edge
+    /// resizes the side that is pinned.
+    public static func resizeEdge(
+        mode: CompanionLayout.Mode, panel: CGRect, reader: CGRect
+    ) -> PanelResizeEdge? {
+        switch mode {
+        case .bottom:
+            // Below the reader, the edge facing it is the panel's top; when
+            // geometry had to put the drawer above the reader, it is the
+            // bottom.
+            return panel.minY >= reader.midY ? .bottom : .top
+        case .side, .sideOverlay, .corner:
+            return panel.minX >= reader.midX ? .leading : .trailing
+        }
+    }
+
     public static func layout(
         reader: CGRect,
         visible: CGRect,

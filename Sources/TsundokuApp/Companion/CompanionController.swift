@@ -26,6 +26,10 @@ final class CompanionController {
     private var lastSurface: CompanionOutput.Presentation = .hidden
     private var lastMode: CompanionLayout.Mode?
     private var hostedModel: AIPanelModel?
+    /// The handle edge the hosted content was built with. A reader move can
+    /// flip the panel to the other side without changing the mode, so this is
+    /// compared separately.
+    private var hostedResizeEdge: PanelResizeEdge?
     private var presentationGeneration = 0
 
     private var localMouseMonitor: Any?
@@ -300,34 +304,34 @@ final class CompanionController {
     /// The panel edge that faces the reader, which is the one that can move.
     static func resizeEdge(
         mode: CompanionLayout.Mode, panel: CGRect, reader: CGRect
-    ) -> CompanionPanelView.ResizeEdge? {
-        switch mode {
-        case .bottom: return .top
-        case .side, .sideOverlay:
-            return panel.minX >= reader.midX ? .leading : .trailing
-        case .corner:
-            return panel.minX >= reader.midX ? .leading : .trailing
-        }
+    ) -> PanelResizeEdge? {
+        CompanionGeometry.resizeEdge(
+            mode: mode, panel: panel, reader: reader)
     }
 
-    /// Dragging the reader-facing edge changes the panel's remembered size.
-    private func resizePanel(by delta: CGFloat, mode: CompanionLayout.Mode) {
+    /// Dragging the reader-facing edge sets the panel's size outright: the
+    /// view reports the size the drag describes, not how far it moved since
+    /// the last event, so a drag cannot compound and a size the drag reached
+    /// is the size that is stored.
+    private func resizePanel(
+        to size: CGFloat, mode: CompanionLayout.Mode
+    ) {
         switch mode {
         case .bottom:
-            settings.settings.panelBottomHeight = min(
-                max(settings.settings.panelBottomHeight + Double(delta), 240), 760)
+            settings.settings.setPanelBottomHeight(Double(size))
         default:
-            settings.settings.panelSideWidth = min(
-                max(settings.settings.panelSideWidth + Double(delta), 300), 760)
+            settings.settings.setPanelSideWidth(Double(size))
         }
-        refreshLayout()
+        relayout()
     }
 
     /// Recomputes the panel's frame from the current settings without waiting
     /// for a reader event; a drag on the panel's edge is the common caller.
-    private func refreshLayout() {
-        let visible = NSScreen.main?.visibleFrame ?? .zero
-        apply(state.output(visible: visible), animated: false)
+    /// It uses the reader's own display, like every other layout pass, and
+    /// stores the output it applied so later comparisons see the truth.
+    private func relayout() {
+        output = state.output(visible: visibleFrame(for: reader))
+        apply(output, animated: false)
     }
 
     private func apply(_ output: CompanionOutput, animated: Bool) {
@@ -365,6 +369,7 @@ final class CompanionController {
                             }),
                         shape: .circle)
                     self.hostedModel = nil
+                    self.hostedResizeEdge = nil
                     self.window.setFrame(
                         layout.triggerFrame, animated: false,
                         reduceMotion: true)
@@ -384,6 +389,7 @@ final class CompanionController {
                             }),
                         shape: .circle)
                     hostedModel = nil
+                    hostedResizeEdge = nil
                 }
                 window.clearDrawerAnchor()
                 window.setFrame(
@@ -400,9 +406,13 @@ final class CompanionController {
                 break
             }
             let compact = layout.mode == .bottom
+            let edge = Self.resizeEdge(
+                mode: layout.mode, panel: layout.panelFrame,
+                reader: layout.readerFrame)
             if previous != .panel || lastMode != layout.mode
-                || hostedModel !== model
+                || hostedModel !== model || hostedResizeEdge != edge
             {
+                let mode = layout.mode
                 window.setContent(
                     AnyView(
                         CompanionPanelView(
@@ -413,15 +423,22 @@ final class CompanionController {
                             onClose: { [weak self] in
                                 self?.closePanel()
                             },
-                            resizeEdge: Self.resizeEdge(
-                                mode: layout.mode, panel: layout.panelFrame,
-                                reader: layout.readerFrame),
-                            onResize: { [weak self] delta in
-                                self?.resizePanel(by: delta, mode: layout.mode)
+                            resizeEdge: edge,
+                            resizeBase: { [weak self] in
+                                guard let self else { return 0 }
+                                return mode == .bottom
+                                    ? CGFloat(
+                                        self.settings.settings.panelBottomHeight)
+                                    : CGFloat(
+                                        self.settings.settings.panelSideWidth)
+                            },
+                            onResize: { [weak self] size in
+                                self?.resizePanel(to: size, mode: mode)
                             })),
                     shape: .roundedRect(
                         radius: CompanionMetrics.cornerRadius))
                 hostedModel = model
+                hostedResizeEdge = edge
             }
             lastMode = layout.mode
             window.setLevel(layout.mode.isOverlay ? .floating : .normal)
@@ -554,7 +571,16 @@ final class CompanionController {
         for reader: ReaderSnapshot, force: Bool = false
     ) {
         let settings = settings.settings
-        guard settings.matchReaderTypography || settings.matchReaderTheme else {
+        let chinese = settings.chineseFontName
+        let tracking = CGFloat(settings.chineseTracking)
+        let hasChinesePreference = !chinese.isEmpty || tracking != 0
+        // The Chinese face and tracking are preferences about the panel, not
+        // facts about the reader: they survive both match toggles being off,
+        // which is why they cannot share the sample's guard.
+        guard
+            settings.matchReaderTypography || settings.matchReaderTheme
+                || hasChinesePreference
+        else {
             styleGeneration += 1
             styleTask?.cancel()
             styleTask = nil
@@ -562,28 +588,38 @@ final class CompanionController {
             panelModel?.theme = nil
             return
         }
+        let wantsSample =
+            settings.matchReaderTypography || settings.matchReaderTheme
         styleGeneration += 1
         let generation = styleGeneration
         styleTask?.cancel()
         styleTask = Task { [weak self] in
             guard let self else { return }
-            let sampled = await self.styleSampler.sample(
-                for: reader, force: force)
+            let sampled =
+                wantsSample
+                ? await self.styleSampler.sample(for: reader, force: force)
+                : nil
             guard !Task.isCancelled, generation == self.styleGeneration
             else { return }
-            let chinese = settings.chineseFontName
-            let tracking = CGFloat(settings.chineseTracking)
-            let style = settings.matchReaderTypography
-                ? sampled?.style.map {
-                    CompanionTypography.style(
-                        from: $0,
+            let style: CompanionTextStyle?
+            if settings.matchReaderTypography {
+                style =
+                    sampled?.style.map {
+                        CompanionTypography.style(
+                            from: $0,
+                            chineseFamily: chinese.isEmpty ? nil : chinese,
+                            chineseTracking: tracking)
+                    } ?? CompanionTypography.defaultStyle(
                         chineseFamily: chinese.isEmpty ? nil : chinese,
                         chineseTracking: tracking)
-                } ?? CompanionTextStyle(
-                    family: nil, size: 14, lineSpacing: 6,
-                    chineseFamily: chinese.isEmpty ? nil : chinese,
+            } else if hasChinesePreference {
+                // The panel keeps its own 13 pt text; only the face changes.
+                style = CompanionTypography.defaultStyle(
+                    size: 13, chineseFamily: chinese.isEmpty ? nil : chinese,
                     chineseTracking: tracking)
-                : nil
+            } else {
+                style = nil
+            }
             let theme = settings.matchReaderTheme
                 ? sampled?.theme.map(CompanionTheme.init)
                 : nil

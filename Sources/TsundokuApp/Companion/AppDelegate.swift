@@ -37,6 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var appliedLaunchAtLogin: Bool?
     private var appliedMatchTypography: Bool?
     private var appliedMatchTheme: Bool?
+    /// The Chinese face and tracking the panel was last built with. They are
+    /// part of the sampled style too, so a change to either has to re-sample —
+    /// the toggles alone do not describe the style.
+    private var appliedChineseFontName: String?
+    private var appliedChineseTracking: Double?
     private var hotKeyTestTimeout: Task<Void, Never>?
     private var feedbackTask: Task<Void, Never>?
     /// Set when this delegate opened Settings with a route; the Settings scene
@@ -374,11 +379,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let styleChanged =
             (appliedMatchTypography != new.matchReaderTypography)
             || (appliedMatchTheme != new.matchReaderTheme)
+            || (appliedChineseFontName != new.chineseFontName)
+            || (appliedChineseTracking != new.chineseTracking)
         if appliedMatchTypography != nil, styleChanged {
             companion?.refreshStyleForCurrentReader()
         }
         appliedMatchTypography = new.matchReaderTypography
         appliedMatchTheme = new.matchReaderTheme
+        appliedChineseFontName = new.chineseFontName
+        appliedChineseTracking = new.chineseTracking
         guard !CommandLine.arguments.contains("--no-system-integrations") else { return }
         if appliedHotKey != new.hotKey {
             let status = hotKey.install(new.hotKey)

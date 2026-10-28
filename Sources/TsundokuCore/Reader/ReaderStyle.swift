@@ -87,14 +87,32 @@ public enum CompanionTypography {
     ) -> CompanionTextStyle {
         let size = clamp((reader.pointSize * scale).rounded(), sizeRange)
         let natural = naturalLineHeight(family: reader.family, size: size)
-        // A reader that publishes no line pitch (Kindle does not) still needs
-        // leading: mixed Chinese and Latin body text reads best near 1.6×,
-        // where Latin alone would sit at 1.4–1.5 and Chinese would crowd.
+        // A measured pitch is the reader's own leading and is scaled with the
+        // type. A style that arrives without one still gets the mixed-script
+        // rule rather than falling to no leading at all.
         let pitch = reader.linePitch > 0
             ? reader.linePitch * scale : size * mixedScriptLineHeight
         let spacing = clamp((pitch - natural).rounded(), spacingRange)
         return CompanionTextStyle(
             family: reader.family, size: size, lineSpacing: spacing,
+            chineseFamily: chineseFamily, chineseTracking: chineseTracking)
+    }
+
+    /// The panel's own style, used when there is no reader style to copy.
+    ///
+    /// It applies the same mixed-script leading as a matched panel, so a
+    /// failed or unavailable sample does not silently tighten the text; the
+    /// Chinese face and tracking the reader chose still apply, because they
+    /// are preferences about the panel rather than facts about the reader.
+    public static func defaultStyle(
+        size: CGFloat = 14, chineseFamily: String? = nil,
+        chineseTracking: CGFloat = 0
+    ) -> CompanionTextStyle {
+        let natural = naturalLineHeight(family: nil, size: size)
+        let spacing = clamp(
+            (size * mixedScriptLineHeight - natural).rounded(), spacingRange)
+        return CompanionTextStyle(
+            family: nil, size: size, lineSpacing: spacing,
             chineseFamily: chineseFamily, chineseTracking: chineseTracking)
     }
 

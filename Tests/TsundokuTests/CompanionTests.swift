@@ -536,3 +536,116 @@ struct AIComposerTests {
         #expect(prompt.contains("French"))
     }
 }
+
+// MARK: - Panel size and faces
+
+@Suite("Panel size and Chinese faces")
+struct PanelSizeTests {
+    @Test("a size from outside the range is clamped where it is written")
+    func clampsOnWrite() {
+        var settings = CompanionSettings()
+        settings.setPanelSideWidth(1e100)
+        #expect(settings.panelSideWidth == 760)
+        settings.setPanelSideWidth(-40)
+        #expect(settings.panelSideWidth == 300)
+        settings.setPanelBottomHeight(.infinity)
+        #expect(settings.panelBottomHeight == 420)
+        settings.setPanelBottomHeight(120)
+        #expect(settings.panelBottomHeight == 240)
+    }
+
+    @Test("a decoded size is clamped instead of trapping a view")
+    func clampsOnDecode() throws {
+        // A hand-edited blob: the value would trap in `Int(...)` if it reached
+        // the settings view unchanged.
+        let json = """
+            {"panelSideWidth": 1e100, "panelBottomHeight": -1e100}
+            """
+        let decoded = try JSONDecoder().decode(
+            CompanionSettings.self, from: Data(json.utf8))
+        #expect(decoded.panelSideWidth == 760)
+        #expect(decoded.panelBottomHeight == 240)
+    }
+
+    @Test("the drag and the slider share one bound")
+    func sharedBounds() {
+        #expect(
+            CompanionMetrics.sideWidthRange == 300...760)
+        #expect(
+            CompanionMetrics.bottomHeightRange == 240...760)
+        var settings = CompanionSettings()
+        settings.setPanelSideWidth(
+            Double(CompanionMetrics.sideWidthRange.upperBound) + 100)
+        #expect(settings.panelSideWidth == 760)
+    }
+
+    @Test("a face the system cannot draw is not offered")
+    func installedFaces() {
+        // PingFang ships with macOS; a family that resolves to a substitute
+        // must not be advertised.
+        #expect(ChineseFace.pingFangSC.isInstalled)
+        for face in ChineseFace.installed {
+            #expect(face.isInstalled)
+        }
+        #expect(!ChineseFace.installed.isEmpty)
+    }
+
+    @Test("an unavailable stored face falls back to an installed one")
+    func unavailableFaceFallsBack() {
+        let fallback = ChineseFace.valid(fontName: "Not A Real Face")
+        #expect(fallback != "Not A Real Face")
+        #expect(ChineseFace.allCases.contains { $0.fontName == fallback })
+    }
+
+    @Test("Follow the reader survives a save and a load")
+    func followTheReaderSurvives() throws {
+        // "" is a choice, not a missing value: normalising it to a face would
+        // silently override the reader's decision on the next launch.
+        #expect(ChineseFace.valid(fontName: "") == "")
+        var settings = CompanionSettings()
+        settings.chineseFontName = ""
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(
+            CompanionSettings.self, from: data)
+        #expect(decoded.chineseFontName.isEmpty)
+    }
+}
+
+// MARK: - Resize edge
+
+@Suite("Panel resize edge")
+struct PanelResizeEdgeTests {
+    private let reader = CGRect(x: 400, y: 200, width: 800, height: 600)
+
+    @Test("a drawer below the reader moves by its top edge")
+    func below() {
+        let panel = CGRect(x: 400, y: 0, width: 800, height: 200)
+        #expect(
+            CompanionGeometry.resizeEdge(
+                mode: .bottom, panel: panel, reader: reader) == .top)
+    }
+
+    @Test("a drawer above the reader moves by its bottom edge")
+    func above() {
+        let panel = CGRect(x: 400, y: 800, width: 800, height: 200)
+        #expect(
+            CompanionGeometry.resizeEdge(
+                mode: .bottom, panel: panel, reader: reader) == .bottom)
+    }
+
+    @Test("a side panel on the right moves by its leading edge")
+    func rightSide() {
+        let panel = CGRect(x: 1200, y: 200, width: 400, height: 600)
+        #expect(
+            CompanionGeometry.resizeEdge(
+                mode: .side, panel: panel, reader: reader) == .leading)
+    }
+
+    @Test("a side panel on the left moves by its trailing edge")
+    func leftSide() {
+        let panel = CGRect(x: 0, y: 200, width: 400, height: 600)
+        #expect(
+            CompanionGeometry.resizeEdge(
+                mode: .side, panel: panel, reader: reader) == .trailing)
+    }
+}

@@ -1,3 +1,4 @@
+import CoreText
 import Foundation
 
 // MARK: - Hot key
@@ -245,10 +246,11 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
     /// The actions offered by the Send button's menu, in this order. Empty
     /// means the menu has nothing but its explanation.
     public var quickActions: [AIAction]
-    /// Width of a side panel, in points. The reader can drag it.
-    public var panelSideWidth: Double
+    /// Width of a side panel, in points. The reader can drag it. Set through
+    /// `setPanelSideWidth(_:)`, which is the one place that clamps it.
+    public private(set) var panelSideWidth: Double
     /// Height of a bottom panel, in points.
-    public var panelBottomHeight: Double
+    public private(set) var panelBottomHeight: Double
     /// The face used for Chinese characters in answers. Latin text keeps the
     /// reader's face; a Chinese face set for Chinese keeps both scripts
     /// idiomatic instead of one being a fallback for the other.
@@ -268,7 +270,7 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
         matchReaderTheme: Bool = true,
         quickActions: [AIAction] = AIAction.quickActionCases,
         panelSideWidth: Double = Double(CompanionMetrics.sideWidth),
-        panelBottomHeight: Double = 420,
+        panelBottomHeight: Double = Double(CompanionMetrics.bottomHeight),
         chineseFontName: String = ChineseFace.pingFangSC.fontName,
         chineseTracking: Double = 0.2
     ) {
@@ -280,10 +282,39 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
         self.matchReaderTypography = matchReaderTypography
         self.matchReaderTheme = matchReaderTheme
         self.quickActions = quickActions
-        self.panelSideWidth = panelSideWidth
-        self.panelBottomHeight = panelBottomHeight
-        self.chineseFontName = chineseFontName
+        self.panelSideWidth = Self.validSideWidth(panelSideWidth)
+        self.panelBottomHeight = Self.validBottomHeight(panelBottomHeight)
+        self.chineseFontName = ChineseFace.valid(fontName: chineseFontName)
         self.chineseTracking = chineseTracking
+    }
+
+    /// A size that a panel can actually take. A settings blob is external
+    /// input: a hand-edited or corrupted value such as `1e100` must not reach
+    /// `Int(...)` in a view, where it traps.
+    static func validSideWidth(_ width: Double) -> Double {
+        guard width.isFinite else { return Double(CompanionMetrics.sideWidth) }
+        return min(
+            max(width, Double(CompanionMetrics.sideWidthRange.lowerBound)),
+            Double(CompanionMetrics.sideWidthRange.upperBound))
+    }
+
+    static func validBottomHeight(_ height: Double) -> Double {
+        guard height.isFinite else {
+            return Double(CompanionMetrics.bottomHeight)
+        }
+        return min(
+            max(height, Double(CompanionMetrics.bottomHeightRange.lowerBound)),
+            Double(CompanionMetrics.bottomHeightRange.upperBound))
+    }
+
+    /// The only way to change a panel's side width: a drag and a slider land
+    /// on the same bounds because they land on the same function.
+    public mutating func setPanelSideWidth(_ width: Double) {
+        panelSideWidth = Self.validSideWidth(width)
+    }
+
+    public mutating func setPanelBottomHeight(_ height: Double) {
+        panelBottomHeight = Self.validBottomHeight(height)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -328,18 +359,18 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
             try container.decodeIfPresent(
                 Bool.self, forKey: .matchReaderTheme)
             ?? defaults.matchReaderTheme
-        panelSideWidth =
+        panelSideWidth = Self.validSideWidth(
             try container.decodeIfPresent(
                 Double.self, forKey: .panelSideWidth)
-            ?? defaults.panelSideWidth
-        panelBottomHeight =
+                ?? defaults.panelSideWidth)
+        panelBottomHeight = Self.validBottomHeight(
             try container.decodeIfPresent(
                 Double.self, forKey: .panelBottomHeight)
-            ?? defaults.panelBottomHeight
-        chineseFontName =
-            try container.decodeIfPresent(
+                ?? defaults.panelBottomHeight)
+        chineseFontName = ChineseFace.valid(
+            fontName: try container.decodeIfPresent(
                 String.self, forKey: .chineseFontName)
-            ?? defaults.chineseFontName
+                ?? defaults.chineseFontName)
         chineseTracking =
             try container.decodeIfPresent(
                 Double.self, forKey: .chineseTracking)
@@ -382,7 +413,7 @@ public enum ChineseFace: String, CaseIterable, Identifiable, Codable, Sendable {
 
     public var id: String { rawValue }
 
-    /// The installed family name. macOS ships all four with the system.
+    /// The family name this face is set in.
     public var fontName: String {
         switch self {
         case .pingFangSC: "PingFang SC"
@@ -399,5 +430,38 @@ public enum ChineseFace: String, CaseIterable, Identifiable, Codable, Sendable {
         case .hiraginoGB: "Hiragino Sans 简体"
         case .hiraginoCNS: "Hiragino Sans 繁體"
         }
+    }
+
+    /// Whether the system can draw this face.
+    ///
+    /// Not every Mac has every family: `Hiragino Sans CNS` is not installed on
+    /// the development machine, where asking for it silently produces
+    /// Helvetica. The question is answered by the font system, which resolves
+    /// an unknown name to a substitute — so the substitute has to be caught by
+    /// comparing the family it actually returned.
+    public var isInstalled: Bool {
+        let font = CTFontCreateWithName(fontName as CFString, 12, nil)
+        let family = CTFontCopyFamilyName(font) as String
+        return family == fontName
+    }
+
+    /// The faces this Mac can actually draw, in menu order.
+    public static var installed: [ChineseFace] {
+        allCases.filter(\.isInstalled)
+    }
+
+    /// A stored name made valid.
+    ///
+    /// An empty name is a choice — "Follow the reader" — and stays empty. A
+    /// name that names no installed family falls back to the default, because
+    /// asking for it would render in whatever the system substituted.
+    public static func valid(fontName: String) -> String {
+        if fontName.isEmpty { return "" }
+        if let face = allCases.first(where: { $0.fontName == fontName }),
+            face.isInstalled
+        {
+            return face.fontName
+        }
+        return (allCases.first(where: \.isInstalled) ?? .pingFangSC).fontName
     }
 }

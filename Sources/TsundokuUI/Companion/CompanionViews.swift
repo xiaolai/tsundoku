@@ -93,18 +93,26 @@ public struct CompanionPanelView: View {
     let compact: Bool
     let onActivate: () -> Void
     let onClose: () -> Void
+    /// Tracks one push on the cursor stack, so the pop always pairs.
+    @State private var cursorPushed = false
     /// Which edge of the window faces the reader. Dragging that edge resizes
     /// the panel; the other three are flush with the screen or the reader.
-    let resizeEdge: ResizeEdge?
+    let resizeEdge: PanelResizeEdge?
+    /// The panel's current size on the resizable axis, read when a drag
+    /// starts. A value captured in the view would be stale after the first
+    /// drag: the panel's content is not rebuilt while its size changes, so
+    /// the second drag would begin from the size the first one started at.
+    let resizeBase: () -> CGFloat
+    /// The size at the start of the current drag. Nil between drags.
+    @State private var dragBase: CGFloat?
     let onResize: (CGFloat) -> Void
-
-    public enum ResizeEdge: Sendable { case leading, trailing, top }
 
     private var alignment: Alignment {
         switch resizeEdge {
         case .leading: .leading
         case .trailing: .trailing
         case .top: .top
+        case .bottom: .bottom
         case nil: .center
         }
     }
@@ -115,7 +123,8 @@ public struct CompanionPanelView: View {
         model: AIPanelModel, compact: Bool,
         onActivate: @escaping () -> Void,
         onClose: @escaping () -> Void,
-        resizeEdge: ResizeEdge? = nil,
+        resizeEdge: PanelResizeEdge? = nil,
+        resizeBase: @escaping () -> CGFloat = { 0 },
         onResize: @escaping (CGFloat) -> Void = { _ in }
     ) {
         self.model = model
@@ -123,6 +132,7 @@ public struct CompanionPanelView: View {
         self.onActivate = onActivate
         self.onClose = onClose
         self.resizeEdge = resizeEdge
+        self.resizeBase = resizeBase
         self.onResize = onResize
     }
 
@@ -131,26 +141,42 @@ public struct CompanionPanelView: View {
     /// cannot fall outside the window.
     @ViewBuilder private var resizeHandle: some View {
         if let resizeEdge {
+            let horizontal = resizeEdge == .top || resizeEdge == .bottom
             Rectangle()
                 .fill(Color.clear)
-                .frame(
-                    width: resizeEdge == .top ? nil : 6,
-                    height: resizeEdge == .top ? 6 : nil)
+                .frame(width: horizontal ? nil : 6, height: horizontal ? 6 : nil)
                 .contentShape(Rectangle())
                 .onHover { inside in
-                    if inside { NSCursor.resizeLeftRight.push() }
-                    else { NSCursor.pop() }
+                    // Paired push and pop: a stack that is pushed on every
+                    // enter and popped on every exit leaks if the panel
+                    // rebuilds under the pointer.
+                    if inside, !cursorPushed {
+                        if horizontal { NSCursor.resizeUpDown.push() }
+                        else { NSCursor.resizeLeftRight.push() }
+                        cursorPushed = true
+                    } else if !inside, cursorPushed {
+                        NSCursor.pop()
+                        cursorPushed = false
+                    }
                 }
                 .gesture(
                     DragGesture(minimumDistance: 1)
                         .onChanged { value in
-                            onResize(
-                                resizeEdge == .top
-                                    ? -value.translation.height
-                                    : (resizeEdge == .leading
-                                        ? -value.translation.width
-                                        : value.translation.width))
-                        })
+                            // `translation` is cumulative since the drag
+                            // began, so it is applied to the size measured
+                            // when it began, once.
+                            let base = dragBase ?? resizeBase()
+                            if dragBase == nil { dragBase = base }
+                            let growth: CGFloat
+                            switch resizeEdge {
+                            case .leading: growth = -value.translation.width
+                            case .trailing: growth = value.translation.width
+                            case .top: growth = -value.translation.height
+                            case .bottom: growth = value.translation.height
+                            }
+                            onResize(base + growth)
+                        }
+                        .onEnded { _ in dragBase = nil })
         }
     }
 
@@ -169,6 +195,14 @@ public struct CompanionPanelView: View {
         )
         .overlay(alignment: alignment) {
             resizeHandle
+        }
+        .onDisappear {
+            // The pointer may still be on the strip when the panel closes;
+            // the exit event never arrives then.
+            if cursorPushed {
+                NSCursor.pop()
+                cursorPushed = false
+            }
         }
         .environment(
             \.colorScheme,
@@ -210,6 +244,31 @@ public struct CompanionSettingsSection: View {
             set: { store.settings.chineseFontName = $0 })
     }
 
+    /// The drag and the slider share one bound, converted once for SwiftUI's
+    /// Double-typed slider.
+    private static let sideWidthRange: ClosedRange<Double> = {
+        let bounds = CompanionMetrics.sideWidthRange
+        return Double(bounds.lowerBound)...Double(bounds.upperBound)
+    }()
+    private static let bottomHeightRange: ClosedRange<Double> = {
+        let bounds = CompanionMetrics.bottomHeightRange
+        return Double(bounds.lowerBound)...Double(bounds.upperBound)
+    }()
+
+    /// Both size controls go through the settings setters, so a slider and a
+    /// dragged panel edge cannot disagree about the range.
+    private var sideWidth: Binding<Double> {
+        Binding(
+            get: { store.settings.panelSideWidth },
+            set: { store.settings.setPanelSideWidth($0) })
+    }
+
+    private var bottomHeight: Binding<Double> {
+        Binding(
+            get: { store.settings.panelBottomHeight },
+            set: { store.settings.setPanelBottomHeight($0) })
+    }
+
     public var body: some View {
         Section("Companion") {
             Picker("Panel placement", selection: $store.settings.panelPlacement)
@@ -242,8 +301,8 @@ public struct CompanionSettingsSection: View {
             LabeledContent("Side panel width") {
                 HStack(spacing: 8) {
                     Slider(
-                        value: $store.settings.panelSideWidth,
-                        in: 300...720, step: 20)
+                        value: sideWidth,
+                        in: Self.sideWidthRange, step: 20)
                         .frame(width: 180)
                     Text("\(Int(store.settings.panelSideWidth)) pt")
                         .monospacedDigit()
@@ -253,8 +312,8 @@ public struct CompanionSettingsSection: View {
             LabeledContent("Bottom panel height") {
                 HStack(spacing: 8) {
                     Slider(
-                        value: $store.settings.panelBottomHeight,
-                        in: 240...720, step: 20)
+                        value: bottomHeight,
+                        in: Self.bottomHeightRange, step: 20)
                         .frame(width: 180)
                     Text("\(Int(store.settings.panelBottomHeight)) pt")
                         .monospacedDigit()
@@ -263,7 +322,9 @@ public struct CompanionSettingsSection: View {
             }
             Picker("Chinese face", selection: chineseFace) {
                 Text("Follow the reader").tag("")
-                ForEach(ChineseFace.allCases) { face in
+                // Only the families this Mac can draw: an entry that resolves
+                // to Helvetica is a control that lies.
+                ForEach(ChineseFace.installed) { face in
                     Text(face.displayName).tag(face.fontName)
                 }
             }
