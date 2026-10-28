@@ -310,6 +310,19 @@ struct BookChatsView: View {
                 }
             }
             .padding(10)
+            if !search.isEmpty, !isLoading {
+                // A search that returns nothing and one that returns three
+                // read the same in a list; the count says which happened.
+                let matches = summaries.count == 1
+                    ? "1 chat matches your search"
+                    : "\(summaries.count) chats match your search"
+                Text(matches)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+            }
             if incompleteCaptures {
                 Label(
                     "Some captures could not be read; text-linked chats may "
