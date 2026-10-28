@@ -484,6 +484,62 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// Delete one saved answer. The same row is the card, when the note was
+    /// carded, so the card disappears with it.
+    public func deleteSavedAINote(_ note: SavedAINote) {
+        guard let archive else { return }
+        aiNotesGeneration += 1
+        Task {
+            do {
+                let deleted = try await Task.detached {
+                    try archive.deleteAINote(id: note.id)
+                }.value
+                post(
+                    deleted ? "Deleted the saved note." : "The note was already gone.",
+                    seconds: 5)
+                refreshAINotes()
+            } catch {
+                post("Could not delete the saved note: \(error)", seconds: 12)
+            }
+        }
+    }
+
+    /// Delete every saved answer, reported by count.
+    public func deleteAllSavedAINotes() {
+        guard let archive else { return }
+        aiNotesGeneration += 1
+        Task {
+            do {
+                let count = try await Task.detached {
+                    try archive.deleteAllAINotes()
+                }.value
+                post(
+                    count == 1
+                        ? "Deleted 1 saved note."
+                        : "Deleted \(count) saved notes.", seconds: 6)
+                refreshAINotes()
+            } catch {
+                post("Could not delete the saved notes: \(error)", seconds: 12)
+            }
+        }
+    }
+
+    /// A review gate before the bulk delete: the count is shown, and nothing
+    /// is removed until the reader confirms.
+    @Published public var reviewingNoteDeletion = false
+
+    public func confirmDeleteAllSavedAINotes() {
+        refreshAINotes()
+        reviewingNoteDeletion = true
+    }
+
+    public func dismissNoteDeletionReview() { reviewingNoteDeletion = false }
+
+    public func performDeleteAllSavedAINotes() {
+        reviewingNoteDeletion = false
+        deleteAllSavedAINotes()
+    }
+
     /// The Messages column's count for a book.
     ///
     /// A book's threads can be filed under its ASIN, or under a weaker title

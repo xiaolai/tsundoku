@@ -385,6 +385,20 @@ public struct SettingsView: View {
                             + "with the chat.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button("Delete All Saved Notes…") {
+                            model.confirmDeleteAllSavedAINotes()
+                        }
+                        .controlSize(.small)
+                        .disabled(model.savedAINotes.isEmpty)
+                        Text(
+                            model.savedAINotes.isEmpty
+                                ? "No saved notes."
+                                : "\(model.savedAINotes.count) saved notes, "
+                                    + "including cards made from them.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
             }
@@ -446,7 +460,26 @@ public struct SettingsView: View {
                 Text(impact.deletionSentence(includeConversations: true))
             }
         }
+        .alert(
+            "Delete All Saved Notes?",
+            isPresented: Binding(
+                get: { model.reviewingNoteDeletion },
+                set: { if !$0 { model.dismissNoteDeletionReview() } })
+        ) {
+            Button("Delete All Notes", role: .destructive) {
+                model.performDeleteAllSavedAINotes()
+            }
+            Button("Cancel", role: .cancel) {
+                model.dismissNoteDeletionReview()
+            }
+        } message: {
+            Text(
+                model.savedAINotes.count == 1
+                    ? "1 saved note and any card made from it will be deleted. This cannot be undone."
+                    : "\(model.savedAINotes.count) saved notes and any cards made from them will be deleted. This cannot be undone.")
+        }
         .task { if pane == .ai && model.settings.provider == .http { providerState.loadKeyIfNeeded(profileID: model.settings.httpProfileID) } }
+        .task { if pane == .ai { model.refreshAINotes() } }
     }
 
     /// The menu's selection, mapped onto the two stored fields.

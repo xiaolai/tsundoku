@@ -1053,8 +1053,36 @@ public final class Archive: @unchecked Sendable {
         }
     }
 
-    // MARK: - Conversations
+    /// Remove one saved answer. A card made from the note is the same row, so
+    /// the card goes with it; nothing else refers to the note.
+    @discardableResult
+    public func deleteAINote(id: Int64) throws -> Bool {
+        try queue.sync {
+            let exists = try database.query(
+                "SELECT id FROM ai_notes WHERE id = ? LIMIT 1", [.integer(id)])
+            guard !exists.isEmpty else { return false }
+            try database.execute(
+                "DELETE FROM ai_notes WHERE id = ?", [.integer(id)])
+            return true
+        }
+    }
 
+    /// Remove every saved answer and every card made from one. Returns how
+    /// many rows went, so the caller can report a number rather than assume.
+    @discardableResult
+    public func deleteAllAINotes() throws -> Int {
+        try queue.sync {
+            let rows = try database.query(
+                "SELECT COUNT(*) AS count FROM ai_notes")
+            let count = Int(rows.first?.int("count") ?? 0)
+            if count > 0 {
+                try database.execute("DELETE FROM ai_notes")
+            }
+            return count
+        }
+    }
+
+    // MARK: - Conversations
     public func conversation(id: Int64) throws -> Conversation? {
         try queue.sync {
             try database.query(

@@ -93,6 +93,49 @@ struct AICardTests {
         #expect(try archive.aiCards().count == 1)
     }
 
+    @Test("deleting a note removes the card made from it")
+    func deleteNote() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let conversation = try conversation(archive)
+        let turn = try addTurn(
+            archive, conversationID: conversation.id,
+            question: "Why?", answer: "Because.")
+        let noteID = try save(archive, turn: turn, card: true)
+        #expect(try archive.aiCards().count == 1)
+
+        #expect(try archive.deleteAINote(id: noteID))
+        #expect(try archive.aiNotes().isEmpty)
+        #expect(try archive.aiCards().isEmpty)
+        // The chat the answer came from is untouched.
+        #expect(
+            try archive.conversationTurns(conversationID: conversation.id)
+                .count == 1)
+        // A second delete reports that there was nothing left.
+        #expect(try archive.deleteAINote(id: noteID) == false)
+    }
+
+    @Test("deleting every note reports the count and empties both lists")
+    func deleteAllNotes() throws {
+        let (archive, directory) = try temporaryArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let conversation = try conversation(archive)
+        let first = try addTurn(
+            archive, conversationID: conversation.id, question: "One",
+            answer: "1")
+        let second = try addTurn(
+            archive, conversationID: conversation.id, question: "Two",
+            answer: "2")
+        _ = try save(archive, turn: first, card: true)
+        _ = try save(archive, turn: second, card: nil)
+        #expect(try archive.aiNotes().count == 2)
+
+        #expect(try archive.deleteAllAINotes() == 2)
+        #expect(try archive.aiNotes().isEmpty)
+        #expect(try archive.aiCards().isEmpty)
+        #expect(try archive.deleteAllAINotes() == 0)
+    }
+
     @Test("two turns with the same answer and timestamp do not collapse")
     func distinctTurns() throws {
         let (archive, directory) = try temporaryArchive()
