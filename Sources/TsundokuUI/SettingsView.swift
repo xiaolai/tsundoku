@@ -159,9 +159,13 @@ public struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     TextField(
-                        "Answer Language", text: $model.settings.language
+                        "Answer Language", text: $model.settings.language,
+                        prompt: Text("Same as the question")
                     )
                     .disabled(providerState.testing)
+                    .help(
+                        "Leave empty to answer in the language of the "
+                            + "reader's question.")
                     Toggle(
                         "Record Pages While Tracking",
                         isOn: $model.settings.sessionLogging
@@ -245,6 +249,13 @@ public struct SettingsView: View {
                     .onChange(of: model.settings.endpoint) { _, _ in
                         providerState.invalidateCatalogue()
                         providerState.invalidateTest()
+                    }
+                    if model.settings.provider == .http,
+                        providerState.hasUnsavedKey
+                    {
+                        Text("Save the key before testing the connection.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -432,10 +443,7 @@ public struct SettingsView: View {
             }
         } message: {
             if let impact = model.retentionImpact {
-                Text(
-                    "\(impact.conversations) chats and \(impact.turns) turns "
-                        + "will be deleted. \(impact.notes) saved notes are "
-                        + "kept; \(impact.cards) cards will leave Cards.")
+                Text(impact.deletionSentence(includeConversations: true))
             }
         }
         .task { if pane == .ai && model.settings.provider == .http { providerState.loadKeyIfNeeded(profileID: model.settings.httpProfileID) } }

@@ -209,22 +209,24 @@ public struct HighlightsView: View {
                 ], alignment: .leading, spacing: 8
             ) {
                 if book == nil {
-                    Picker("Source", selection: $model.annotationSourceFilter) {
+                    labeledPicker(
+                        "Source", selection: $model.annotationSourceFilter
+                    ) {
                         ForEach(AppModel.SourceFilter.allCases) {
                             Text($0.title).tag($0)
                         }
-                    }.labelsHidden()
+                    }
                 }
-                Picker("Kind", selection: $kind) {
+                labeledPicker("Kind", selection: $kind) {
                     ForEach(AnnotationKindScope.allCases) {
                         Text($0.rawValue).tag($0)
                     }
-                }.labelsHidden()
-                Picker("Show", selection: $model.annotationFilter) {
+                }
+                labeledPicker("Show", selection: $model.annotationFilter) {
                     ForEach(AppModel.AnnotationFilter.allCases) {
                         Text($0.title).tag($0)
                     }
-                }.labelsHidden()
+                }
                 Menu {
                     Toggle("Random Border Colors", isOn: $randomBorders)
                     if randomBorders {
@@ -399,7 +401,7 @@ public struct HighlightsView: View {
                 Text(TsundokuFormat.annotationDate(row.annotation.createdAt))
             }.width(min: 90, ideal: 100)
         }
-        .tableStyle(.inset(alternatesRowBackgrounds: true))
+        .tableStyle(.inset(alternatesRowBackgrounds: false))
         .contextMenu(forSelectionType: String.self) { selected in
             Button("Copy") {
                 copy(
@@ -475,16 +477,95 @@ public struct HighlightsView: View {
         }
     }
 
+    /// Three adjacent pickers with hidden labels were indistinguishable;
+    /// each carries its own caption now.
+    private func labeledPicker<Value: Hashable, Content: View>(
+        _ title: String, selection: Binding<Value>,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Picker(title, selection: selection, content: content)
+                .labelsHidden()
+        }
+    }
+
+    private struct ProvenanceCounts {
+        let popular: Int
+        let system: Int
+    }
+
+    /// A Kindle library can contain only Amazon Popular Highlights and
+    /// system rows. The default “Mine” filter then shows nothing, and the
+    /// only offered recovery returns to the same empty view. Count what is
+    /// actually there so the empty state can offer the switch that works.
+    private var provenanceHint: ProvenanceCounts? {
+        guard model.annotationFilter == .mine else { return nil }
+        let bookID = bookID
+        let source = query.source
+        var mine = 0
+        var popular = 0
+        var system = 0
+        for annotation in model.annotations {
+            if let bookID,
+                annotation.asin.caseInsensitiveCompare(bookID)
+                    != .orderedSame
+            {
+                continue
+            }
+            if let source, annotation.bookSource != source { continue }
+            switch annotation.provenance {
+            case .user: mine += 1
+            case .amazon: popular += 1
+            case .system: system += 1
+            }
+        }
+        guard mine == 0, popular + system > 0 else { return nil }
+        return ProvenanceCounts(popular: popular, system: system)
+    }
+
+    @ViewBuilder
     private var emptyState: some View {
-        LibraryEmptyState(
-            model: model, annotations: true,
-            hasImportedRecords: !model.annotations.isEmpty,
-            resetFilters: resetFilters)
+        if let hint = provenanceHint {
+            VStack(spacing: 14) {
+                Image(systemName: "highlighter")
+                    .font(.system(size: 36, weight: .light))
+                    .foregroundStyle(.tertiary)
+                Text("No Highlights of Your Own").font(.headline)
+                Text(
+                    "This library has "
+                        + "\(hint.popular) Amazon Popular Highlight"
+                        + (hint.popular == 1 ? "" : "s")
+                        + (hint.system > 0
+                            ? " and \(hint.system) system entries" : "")
+                        + " but none of your own.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Show All") {
+                        model.annotationFilter = .all
+                    }
+                    Button("Reset Filters", action: resetFilters)
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: 480)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            LibraryEmptyState(
+                model: model, annotations: true,
+                hasImportedRecords: !model.annotations.isEmpty,
+                resetFilters: resetFilters)
+        }
     }
 
     private func resetFilters() {
         model.annotationSearch = ""
-        model.annotationFilter = .mine
+        // Returning to “Mine” when it is empty would recreate the dead end.
+        model.annotationFilter = provenanceHint == nil ? .mine : .all
         model.annotationSourceFilter = .all
         if book == nil { model.annotationBookID = nil }
         kind = .all

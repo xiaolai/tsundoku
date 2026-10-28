@@ -43,7 +43,8 @@ struct SettingsNavigationTests {
     @Test func invalidSavedPaneFallsBack() {
         let store = defaults()
         store.set("removed", forKey: "settings.lastPane")
-        #expect(SettingsNavigation(defaults: store).selectedPane == .companion)
+        // A first opening starts on Access, where setup failures are fixed.
+        #expect(SettingsNavigation(defaults: store).selectedPane == .access)
     }
 
     @Test func readinessIsPerFeatureAndLibraryCheckDoesNotVerifyScreen() async {

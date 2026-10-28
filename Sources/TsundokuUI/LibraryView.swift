@@ -55,12 +55,13 @@ public struct LibraryView: View {
             {
                 VStack(spacing: 0) {
                     HStack {
-                        IconButton(
-                            "Books", systemImage: "chevron.left",
-                            tooltip: "Back to books"
-                        ) {
+                        Button {
                             model.bookWorkspaceID = nil
+                        } label: {
+                            Label("Books", systemImage: "chevron.left")
                         }
+                        .buttonStyle(.borderless)
+                        .help("Back to books")
                         Text(book.author).foregroundStyle(.secondary).lineLimit(
                             1)
                         Spacer()
@@ -170,7 +171,7 @@ public struct LibraryView: View {
                     }
                     .width(85)
                 }
-                .tableStyle(.inset(alternatesRowBackgrounds: true))
+                .tableStyle(.inset(alternatesRowBackgrounds: false))
                 .scrollContentBackground(.hidden)
                 .contextMenu(forSelectionType: String.self) { ids in
                     Button("Open Annotations") {

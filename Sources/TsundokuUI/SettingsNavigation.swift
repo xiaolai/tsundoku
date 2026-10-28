@@ -43,7 +43,9 @@ public struct SettingsRoute {
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        let pane = defaults.string(forKey: "settings.lastPane").flatMap(SettingsPane.init(rawValue:)) ?? .companion
+        // A first-time reader opening Settings is usually fixing setup; the
+        // companion's placement controls are not the place to start.
+        let pane = defaults.string(forKey: "settings.lastPane").flatMap(SettingsPane.init(rawValue:)) ?? .access
         selectedPane = pane; ordinaryPane = pane
     }
     public func open(_ route: SettingsRoute?, wasVisible: Bool) {

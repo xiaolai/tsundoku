@@ -111,13 +111,19 @@ struct AccessSettingsView: View {
                         }
                     }
                     if permissions.libraryStatus == .blocked && !needsInstallation {
-                        Button("Quit and Reopen Tsundoku") { permissions.requestRelaunch() }
-                            .disabled(permissions.relaunchPending || model.isImporting || model.capturePhase == .running)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Button("Quit and Reopen Tsundoku") { permissions.requestRelaunch() }
+                                .disabled(permissions.relaunchPending || model.isImporting || model.capturePhase == .running)
+                            Text(
+                                "macOS applies a new Full Disk Access grant only after a relaunch.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }.id(AccessFocus.library)
 
                 Section {
-                    permissionRow("Accessibility", detail: "Read and turn pages in the reading companion.",
+                    permissionRow("Accessibility", detail: "Read the current page, turn pages for capture, and record reading sessions.",
                         granted: permissions.companionReady, status: permissions.accessibility ? "Available" : "Not enabled",
                         request: permissions.requestAccessibility, manage: permissions.openAccessibilitySettings)
                         .id(AccessFocus.accessibility)
@@ -135,9 +141,15 @@ struct AccessSettingsView: View {
                         }
                     }
                     if permissions.readerAccessRequested, let focus = permissions.relaunchFocus(for: navigation.intent) {
-                        Button("Quit and Reopen Tsundoku") {
-                            permissions.requestRelaunch(focus: focus, intent: navigation.intent)
-                        }.disabled(permissions.relaunchPending || model.isImporting || model.capturePhase == .running)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Button("Quit and Reopen Tsundoku") {
+                                permissions.requestRelaunch(focus: focus, intent: navigation.intent)
+                            }.disabled(permissions.relaunchPending || model.isImporting || model.capturePhase == .running)
+                            Text(
+                                "macOS applies Accessibility and Screen Recording changes on the next launch.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     if let error = permissions.relaunchError, permissions.relaunchErrorFocus != .library {
                         Text(error).font(.caption).foregroundStyle(.secondary)
@@ -152,7 +164,7 @@ struct AccessSettingsView: View {
                         IconButton("Re-check Reader Access", systemImage: "arrow.clockwise", action: { permissions.refresh() })
                     }
                 } footer: {
-                    Text("Optional for library imports.")
+                    Text("Only library imports need Full Disk Access.")
                 }
             }
             .formStyle(.grouped)
