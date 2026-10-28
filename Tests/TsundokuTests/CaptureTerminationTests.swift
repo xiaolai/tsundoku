@@ -5,11 +5,13 @@ import Testing
 
 @Suite("Capture termination wording")
 struct CaptureTerminationTests {
-    @Test("a clean end carries no note and no warning")
+    @Test("a clean end says Finished and raises no warning")
     func cleanEnd() {
-        #expect(CaptureTermination.note("endOfBook") == nil)
+        #expect(CaptureTermination.outcome("endOfBook") == .finished)
+        #expect(CaptureTermination.note("endOfBook") == "Finished.")
         #expect(!CaptureTermination.isProblem("endOfBook"))
         #expect(CaptureTermination.note("") == nil)
+        #expect(CaptureTermination.outcome(nil) == nil)
     }
 
     @Test("a page limit is a choice, not a failure")

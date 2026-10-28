@@ -6,30 +6,46 @@ import Foundation
 /// end carries one too ("endOfBook"). Showing that word with a warning icon
 /// made every successful capture end in amber, which reads as a failure.
 public enum CaptureTermination {
-    /// A one-line note for the capture list, or nil when the run simply
-    /// reached the end of the book and needs no note.
-    public static func note(_ termination: String) -> String? {
+    public enum Outcome: Equatable, Sendable {
+        /// The run reached the end of the book.
+        case finished
+        /// A choice, not a fault: a page limit was reached.
+        case note(String)
+        /// Something went wrong or was stopped early.
+        case problem(String)
+    }
+
+    public static func outcome(_ termination: String?) -> Outcome? {
+        guard let termination else { return nil }
         let value = termination.trimmingCharacters(in: .whitespaces)
         switch value {
-        case "", "endOfBook": return nil
-        case "pageLimit": return "Stopped at the page limit"
-        case "cancelled": return "Cancelled"
-        case "safetyCap": return "Stopped at the safety cap"
+        case "": return nil
+        case "endOfBook": return .finished
+        case "pageLimit": return .note("Stopped at the page limit")
+        case "cancelled": return .problem("Cancelled")
+        case "safetyCap": return .problem("Stopped at the safety cap")
         default:
             if value.hasPrefix("failed:") {
                 let reason = value.dropFirst("failed:".count)
-                return reason.isEmpty ? "Failed" : "Failed: \(reason)"
+                return .problem(reason.isEmpty ? "Failed" : "Failed: \(reason)")
             }
-            return value
+            return .problem(value)
         }
     }
 
-    /// Whether the note describes a problem rather than a choice.
-    public static func isProblem(_ termination: String) -> Bool {
-        let value = termination.trimmingCharacters(in: .whitespaces)
-        switch value {
-        case "", "endOfBook", "pageLimit": return false
-        default: return true
+    /// A one-line note for the capture list, or nil when there is nothing
+    /// worth a line.
+    public static func note(_ termination: String) -> String? {
+        switch outcome(termination) {
+        case .finished: return "Finished."
+        case .note(let text), .problem(let text): return text
+        case nil: return nil
         }
+    }
+
+    /// Whether the run should raise a warning.
+    public static func isProblem(_ termination: String) -> Bool {
+        if case .problem = outcome(termination) { return true }
+        return false
     }
 }

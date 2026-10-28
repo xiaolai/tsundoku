@@ -269,24 +269,31 @@ public struct ExportsView: View {
                                 )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                                if let termination = capture.termination,
-                                    let note = CaptureTermination.note(
-                                        termination)
+                                if let outcome = CaptureTermination.outcome(
+                                    capture.termination)
                                 {
                                     // A normal finish has a termination
                                     // string too; only a problem earns the
                                     // amber and the triangle.
-                                    let problem =
-                                        CaptureTermination.isProblem(termination)
-                                    Label(
-                                        note,
-                                        systemImage: problem
-                                            ? "exclamationmark.triangle.fill"
-                                            : "info.circle")
-                                        .font(.caption2)
-                                        .foregroundStyle(
-                                            problem
-                                                ? Theme.warning : .secondary)
+                                    switch outcome {
+                                    case .finished:
+                                        Label(
+                                            "Finished.",
+                                            systemImage: "checkmark.circle")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    case .note(let note):
+                                        Label(note, systemImage: "info.circle")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    case .problem(let note):
+                                        Label(
+                                            note,
+                                            systemImage:
+                                                "exclamationmark.triangle.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(Theme.warning)
+                                    }
                                 }
                                 if !capture.warnings.isEmpty {
                                     Label(
@@ -713,7 +720,19 @@ public struct ExportsView: View {
             HStack(spacing: 12) {
                 switch model.capturePhase {
                 case .running:
-                    ProgressView().controlSize(.small)
+                    // The bar belongs where the eye already is: the pinned
+                    // action bar, not a section that may be scrolled away.
+                    if model.captureProgress > 0 {
+                        ProgressView(value: model.captureProgress)
+                            .progressViewStyle(.linear)
+                            .frame(width: 170)
+                    } else {
+                        // Before the first page is known the bar has no
+                        // denominator; a determinate bar frozen at zero
+                        // would look stuck.
+                        ProgressView().progressViewStyle(.linear)
+                            .frame(width: 170)
+                    }
                     Text(model.captureMessage).font(.callout)
                     Spacer()
                     Button("Cancel Capture") { model.cancelCapture() }
