@@ -4168,6 +4168,7 @@ public struct ActivatingTextView: NSViewRepresentable {
         textView.onActivate = onActivate
         textView.onSubmit = onSubmit
         textView.onEscape = onEscape
+        textView.onFocus = onFocus
         textView.delegate = context.coordinator
         scrollView.documentView = textView
         context.coordinator.textView = textView
@@ -4182,6 +4183,7 @@ public struct ActivatingTextView: NSViewRepresentable {
         textView.onActivate = onActivate
         textView.onSubmit = onSubmit
         textView.onEscape = onEscape
+        textView.onFocus = onFocus
         // An input-method composition (Chinese, Japanese, Korean) owns the
         // text until it commits; assigning the string here cancels it, which
         // is why the second character of a Chinese word could not be typed.
@@ -4290,6 +4292,8 @@ final class ComposerTextView: NSTextView {
     var onActivate: (() -> Void)?
     var onSubmit: (() -> Void)?
     var onEscape: (() -> Void)?
+    var onFocus: ((Bool) -> Void)?
+
 
     /// The panel is a borderless `.nonactivatingPanel` with
     /// `becomesKeyOnlyIfNeeded`; without this, the first click that should
@@ -4307,11 +4311,24 @@ final class ComposerTextView: NSTextView {
         window?.makeFirstResponder(self)
     }
 
+    /// Focus is reported from the responder chain, not from the text
+    /// system's editing notifications: the panel is nonactivating, and a
+    /// click can make the view first responder without the field editor ever
+    /// posting a begin-editing notification — which is why the placeholder
+    /// outlived the caret.
     override func becomeFirstResponder() -> Bool {
         if !NSApp.isActive {
             onActivate?()
         }
-        return super.becomeFirstResponder()
+        let accepted = super.becomeFirstResponder()
+        if accepted { onFocus?(true) }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted { onFocus?(false) }
+        return accepted
     }
 
     override func keyDown(with event: NSEvent) {
