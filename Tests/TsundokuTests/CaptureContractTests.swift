@@ -737,10 +737,11 @@ struct CaptureContractTests {
             page("A Book", "one"), page("A Book", "one"),
             page("B Book", "two"), page("B Book", "two"),
         ]
+        let lastRead = reads[reads.count - 1]
         let session = try KindleCaptureSession(
             subject: CaptureSubject(book: nil, kind: .kindle),
             cancellation: CancellationFlag(),
-            readPage: { reads.removeFirst() },
+            readPage: { reads.isEmpty ? lastRead : reads.removeFirst() },
             capture: { _ in try testImage() },
             turnForward: {},
             turnBackward: {},
@@ -774,7 +775,7 @@ struct CaptureContractTests {
         let session = try KindleCaptureSession(
             subject: CaptureSubject(book: nil, kind: .kindle),
             cancellation: CancellationFlag(),
-            readPage: { reads.removeFirst() },
+            readPage: { reads.isEmpty ? page("one") : reads.removeFirst() },
             capture: { _ in try testImage() },
             turnForward: {},
             turnBackward: {},
@@ -889,7 +890,8 @@ struct CaptureContractTests {
         let session = try KindleCaptureSession(
             subject: CaptureSubject(book: nil, kind: .kindle),
             cancellation: CancellationFlag(),
-            readPage: { reads.isEmpty ? reading : reads.removeFirst() },
+            // Escape is a no-op here, so the sheet is what stays on screen.
+            readPage: { reads.isEmpty ? end : reads.removeFirst() },
             capture: { _ in try testImage() },
             turnForward: {},
             turnBackward: {},

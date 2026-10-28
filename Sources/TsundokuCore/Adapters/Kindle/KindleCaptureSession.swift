@@ -72,7 +72,19 @@ public final class KindleCaptureSession: ReaderCaptureSession {
             throw ReaderCaptureError.notRunning(.kindle)
         }
         try activate()
-        guard let first = try? readPage() else {
+        var first = try? readPage()
+        if first?.isReading == false, first?.endOfBook == true {
+            // Left at the end of the book: the sheet is not a failed start.
+            try? escape()
+            sleep(0.45)
+            first = try? readPage()
+            if first?.isReading == false, first?.endOfBook == true {
+                try? escape()
+                sleep(0.45)
+                first = try? readPage()
+            }
+        }
+        guard let first else {
             throw ReaderCaptureError.noWindow(.kindle)
         }
         guard first.isReading else {
@@ -179,7 +191,15 @@ public final class KindleCaptureSession: ReaderCaptureSession {
 
     public func snapshot() throws -> PageSnapshot {
         try checkCancelled()
-        let live = try readCurrent()
+        var live = try readCurrent()
+        if !live.isReading, live.endOfBook {
+            // The sheet can already be up when a capture starts, e.g. when
+            // the reader is left at the end of the book. Dismiss it once; the
+            // book is not the sheet.
+            try? escape()
+            sleep(0.30)
+            live = try readCurrent()
+        }
         guard live.isReading else {
             throw ReaderCaptureError.notReading(
                 .kindle, state: live.state)
@@ -223,6 +243,47 @@ public final class KindleCaptureSession: ReaderCaptureSession {
         // Kept for the no-turn report: a frontmost refusal otherwise looks
         // like an ordinary slow page.
         var lastCaptureError: Error?
+        // Kindle raises its end-of-book sheet before the last pages, not after
+        // them: a turn that crosses into them is answered with a sheet that
+        // covers the pages still to come. Treating the first sheet as the end
+        // truncated the book by two pages. The sheet is dismissed, the reader
+        // is given a moment to settle, and one further turn is tried before
+        // the end is believed.
+        var endSheetDismissals = 0
+        var dismissedAt: Date?
+        var sentTestTurn = false
+        /// Kindle's end sheet takes two Escapes before the reader accepts a
+        /// page turn again: the first closes the sheet, the second closes the
+        /// panel it leaves behind. Measured on the reader; one Escape only
+        /// reopens the sheet on the next arrow.
+        func dismissEndSheet() -> Bool {
+            guard endSheetDismissals < 2 else { return false }
+            for _ in 0..<2 {
+                try? escape()
+                endSheetDismissals += 1
+                dismissedAt = now()
+                sleep(0.45)
+                if let page = try? readCurrent(), !page.endOfBook { break }
+            }
+            return true
+        }
+
+        /// Whether the reader's own location says the sheet came early. A page
+        /// number below the total is proof: the sheet is hiding pages that
+        /// exist, whatever the sheet says.
+        func sheetIsBeforeTheEnd() -> Bool {
+            guard let number = before.pageNumber,
+                let total = before.pageCount, total > 0
+            else { return false }
+            return number < total
+        }
+        func recordEndOfBook() -> PageTransition {
+            let terminal = TurnRecord(
+                attempted: true, posted: true, observed: true,
+                terminal: true, unresolved: false)
+            records.append(terminal)
+            return .endOfBook(terminal)
+        }
         do {
             while now() < deadline {
                 try checkCancelled()
@@ -231,11 +292,16 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 continue
             }
             if live.endOfBook {
-                let terminal = TurnRecord(
-                    attempted: true, posted: true, observed: true,
-                    terminal: true, unresolved: false)
-                records.append(terminal)
-                return .endOfBook(terminal)
+                // A sheet after the test turn is the end, not another layer:
+                // the turn was the one thing that could have shown a page.
+                if sentTestTurn { return recordEndOfBook() }
+                if dismissEndSheet() { continue }
+                return recordEndOfBook()
+            }
+            if sheetIsBeforeTheEnd(), !sentTestTurn, dismissedAt == nil {
+                // The location proves the sheet is early even if Kindle keeps
+                // showing it; dismiss rather than believe it.
+                if dismissEndSheet() { continue }
             }
             guard live.isReading else {
                 sleep(0.05)
@@ -254,7 +320,19 @@ public final class KindleCaptureSession: ReaderCaptureSession {
             let textChanged = live.text != before.text
             let hashChanged = hash != mark.imageHash
             guard textChanged || hashChanged else {
-                sleep(0.05)
+                // The sheet was dismissed and the page has not moved. One
+                // further turn distinguishes "the sheet covered the page that
+                // was about to arrive" from "this is the last page": at the
+                // true end the turn brings the sheet back.
+                if let dismissedAt, !sentTestTurn,
+                    now().timeIntervalSince(dismissedAt) >= 0.45
+                {
+                    sentTestTurn = true
+                    try? turnForward()
+                    sleep(settleMinimum)
+                } else {
+                    sleep(0.05)
+                }
                 continue
             }
 
@@ -266,11 +344,8 @@ public final class KindleCaptureSession: ReaderCaptureSession {
                 continue
             }
             if settled.endOfBook {
-                let terminal = TurnRecord(
-                    attempted: true, posted: true, observed: true,
-                    terminal: true, unresolved: false)
-                records.append(terminal)
-                return .endOfBook(terminal)
+                if dismissEndSheet() { continue }
+                return recordEndOfBook()
             }
             let settledRaw: CGImage
             do {
@@ -317,6 +392,9 @@ public final class KindleCaptureSession: ReaderCaptureSession {
             throw error
         }
 
+        // A sheet was dismissed and no page ever arrived: the reader is at the
+        // end, and that is a finished book rather than a failed turn.
+        if endSheetDismissals > 0 { return recordEndOfBook() }
         let unresolved = TurnRecord(
             attempted: true, posted: true, observed: false,
             terminal: false, unresolved: true)
