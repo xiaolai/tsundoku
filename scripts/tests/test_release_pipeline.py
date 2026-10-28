@@ -1,7 +1,10 @@
+import contextlib
+import io
 import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import release_pipeline as release
@@ -16,6 +19,21 @@ class ReleasePipelineTests(unittest.TestCase):
         self.assertEqual(release.compiler_warnings(output),
                          ['/src/A.swift:1:2: warning: unused variable', 'warning: coloured dependency note'])
         self.assertEqual(release.compiler_warnings('Build complete!\n'), [])
+
+    def test_warnings_phase_runs_the_release_gate(self):
+        with mock.patch.object(release, 'check_warnings') as gate, \
+                mock.patch.object(sys, 'argv', ['release_pipeline.py', 'warnings']), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(release.main(), 0)
+        gate.assert_called_once_with()
+
+    def test_warnings_phase_fails_closed_on_a_warning(self):
+        completed = mock.Mock(
+            returncode=0,
+            stdout='/src/A.swift:1:2: warning: unused variable\n', stderr='')
+        with mock.patch.object(release.subprocess, 'run', return_value=completed):
+            with self.assertRaises(release.ReleaseError):
+                release.check_warnings()
 
     def test_manifest_requires_exact_public_asset_allowlist(self):
         with tempfile.TemporaryDirectory() as directory:

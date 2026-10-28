@@ -418,7 +418,7 @@ def cask(directory, manifest, tap):
 def main():
     global PRIVATE_LOG
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('phase', choices=['plan', 'build', 'verify', 'draft', 'publish', 'cask'])
+    parser.add_argument('phase', choices=['plan', 'build', 'verify', 'draft', 'publish', 'cask', 'warnings'])
     parser.add_argument('--profile', help='Existing Keychain profile; credentials are never read from files.')
     parser.add_argument('--build', default='1')
     parser.add_argument('--host', help='Privately configured test-Mac SSH alias (verify only).')
@@ -432,6 +432,10 @@ def main():
             print(json.dumps({'version': version, 'phases': ['build', 'verify', 'draft', 'publish', 'cask'],
                               'public_assets': asset_names(version), 'credentials': 'existing Keychain profile only',
                               'source_push': 'explicit, audited origin/main push before draft', 'automatic_gui': False}, indent=2)); return 0
+        # The same gate the build runs, callable on its own so a warning is
+        # found while editing rather than at release time.
+        if args.phase == 'warnings':
+            check_warnings(); print('No compiler warnings.'); return 0
         state = source_state()
         directory = ROOT / 'build/release' / (state['version'] + '-' + args.build + '-' + state['commit'][:12])
         directory.mkdir(parents=True, exist_ok=True)
