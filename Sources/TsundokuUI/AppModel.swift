@@ -1233,6 +1233,16 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// The page observations stored for one session, newest first. The sheet
+    /// asks once, so the read happens here rather than in the view's body.
+    public func sessionObservations(
+        _ session: ReadingSession
+    ) -> [PageObservation] {
+        guard let archive else { return [] }
+        return ((try? archive.observations(asin: session.asin)) ?? [])
+            .filter { $0.sessionID == session.id }
+    }
+
     /// Awaits the archive hydration started at launch. The companion opens
     /// eagerly (`AppModel` is created on first use) and its first page can be
     /// read before the imported book rows arrive; identity must not race them.
@@ -1575,37 +1585,16 @@ public final class AppModel: ObservableObject {
             sessionLogger?.stop()
             return
         }
-        if let selectedBook, selectedBook.source == .appleBooks {
+        // Tracking follows one named book. Picking "the most recent Kindle
+        // book" on the reader's behalf recorded sessions against a title they
+        // never chose, and History never said which one it had chosen.
+        guard let selectedBook else {
             post(
-                "Reading sessions follow the live Kindle page. Select a "
-                    + "Kindle book first.")
+                "Select a Kindle book to track. Sessions follow the live "
+                    + "Kindle page.")
             return
         }
-        if sourceFilter == .appleBooks {
-            post(
-                "Reading sessions follow the live Kindle page. Select a "
-                    + "Kindle book first.")
-            return
-        }
-        let asin: String?
-        if let selectedBook {
-            asin = selectedBook.asin
-        } else if let recent = books.first(where: {
-            $0.isEbook && $0.source == .kindle && $0.lastView != nil
-        }) {
-            asin = recent.asin
-        } else if let kindle = books.first(where: {
-            $0.isEbook && $0.source == .kindle
-        }) {
-            asin = kindle.asin
-        } else {
-            asin = selectedBookID
-        }
-        guard let asin else { return }
-        trackedBookID = asin
-        settings.sessionLogging = true
-        sessionLogger?.setBook(asin)
-        sessionLogger?.start()
+        startTracking(selectedBook)
     }
 
     /// Start tracking one chosen book, replacing any other tracked title.
@@ -1675,6 +1664,28 @@ public final class AppModel: ObservableObject {
                 && ConversationKey.normalize($0.title) == title
         }
         return matches.count == 1 ? matches[0] : nil
+    }
+
+    /// Whether the page in front of the reader belongs to this book. The
+    /// companion answers about the live page, so asking from a library row
+    /// must not silently switch to another book.
+    public func readerPageMatches(_ book: Book) -> Bool {
+        guard livePage != nil else { return false }
+        switch book.source {
+        case .kindle:
+            return liveKindleBook.map {
+                $0.asin.caseInsensitiveCompare(book.asin) == .orderedSame
+            } ?? false
+        case .appleBooks:
+            // Apple Books pages do not expose an asset id here, so identity is
+            // the title, and only when it matches this book alone.
+            guard let page = livePage else { return false }
+            let live = ConversationKey.normalize(page.title)
+            guard !live.isEmpty,
+                !ReadingIdentityResolver.isPlaceholder(page.title)
+            else { return false }
+            return ConversationKey.normalize(book.title) == live
+        }
     }
 
     /// The book a capture will use. The open reader is the target: a Kindle

@@ -500,6 +500,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             // titlebar an opaque backing. The library's edge-to-edge layout
             // needs the old transparent titlebar and clear window behind it.
             window.titlebarAppearsTransparent = true
+            // A transparent bar can still carry a title, and the Window menu
+            // lists windows by it; an untitled window is "untitled" everywhere.
+            window.title = "Library"
             window.isOpaque = false
             window.backgroundColor = .clear
             TsundokuDiagnostics.shared.event(

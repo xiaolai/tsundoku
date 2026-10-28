@@ -115,6 +115,22 @@ public struct HighlightsView: View {
                         maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else if presentation == "list" && !snapshot.isEmpty {
+                if !ai.isEmpty {
+                    HStack(spacing: 8) {
+                        Label(
+                            ai.count == 1
+                                ? "1 AI card is shown in Cards"
+                                : "\(ai.count) AI cards are shown in Cards",
+                            systemImage: "sparkles")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Show Cards") { presentation = "cards" }
+                            .controlSize(.small)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                }
                 annotationTable(snapshot)
             } else {
                 cardPage(snapshot, ai: ai)
@@ -458,14 +474,14 @@ public struct HighlightsView: View {
                     items: model.annotations)
             } label: {
                 Label("Copy or Export", systemImage: "square.and.arrow.up")
-            }.help("Copy or export annotations").labelStyle(.iconOnly)
+            }.help("Copy or export annotations")
         }
         ToolbarItem {
             Button {
                 showAINotes = true
             } label: {
                 Label("Saved AI Notes", systemImage: "sparkles.rectangle.stack")
-            }.help("Saved AI notes").labelStyle(.iconOnly)
+            }.help("Saved AI notes")
         }
         ToolbarItem(placement: .primaryAction) {
             Button {
@@ -940,8 +956,19 @@ struct AnnotationCard: View {
                 selected ? Color.accentColor : borderColor,
                 lineWidth: selected ? 2 : (randomBorders ? 1 : 0.5))
         )
-        .contentShape(RoundedRectangle(cornerRadius: 12))
-        .onTapGesture(perform: select)
+        // Selection lives on the card's own surface, not on its text: a
+        // drag across a passage must select the words, not the card.
+        .background(
+            Color.clear
+                .contentShape(RoundedRectangle(cornerRadius: 12))
+                .onTapGesture(perform: select)
+                .onTapGesture(count: 2, perform: inspect)
+        )
+        .focusable()
+        .onKeyPress(.return) {
+            inspect()
+            return .handled
+        }
     }
 }
 

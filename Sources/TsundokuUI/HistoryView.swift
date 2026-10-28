@@ -3,6 +3,8 @@ import TsundokuCore
 
 public struct HistoryView: View {
     @ObservedObject var model: AppModel
+    @State private var showAllRecent = false
+    @State private var detailSession: ReadingSession?
 
     public init(model: AppModel) {
         self.model = model
@@ -25,8 +27,20 @@ public struct HistoryView: View {
                 return left.title.localizedStandardCompare(right.title)
                     == .orderedAscending
             }
-            .prefix(10)
             .map { $0 }
+    }
+
+    /// The first screenful, with the rest one click away. Silently showing ten
+    /// of a few hundred made the library look smaller than it is.
+    private var shownRecentBooks: [Book] {
+        showAllRecent ? recentBooks : Array(recentBooks.prefix(10))
+    }
+
+    private func trackedTitle() -> String? {
+        guard let id = model.trackedBookID else { return nil }
+        return model.books.first {
+            $0.asin.caseInsensitiveCompare(id) == .orderedSame
+        }?.title ?? id
     }
 
     private var sessionDays: [(day: Date, sessions: [ReadingSession])] {
@@ -69,7 +83,7 @@ public struct HistoryView: View {
                     Text("No last-read dates were found.")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(recentBooks) { book in
+                    ForEach(shownRecentBooks) { book in
                         Button {
                             model.sourceFilter =
                                 book.source == .appleBooks
@@ -99,6 +113,12 @@ public struct HistoryView: View {
                         }
                         .buttonStyle(.plain)
                     }
+                    if recentBooks.count > shownRecentBooks.count {
+                        Button(
+                            "Show All \(recentBooks.count) Recently Opened"
+                        ) { showAllRecent = true }
+                            .controlSize(.small)
+                    }
                     if recentBooks.allSatisfy({ $0.lastView == nil }) {
                         Text(
                             "Kindle did not record last-read dates for "
@@ -111,17 +131,32 @@ public struct HistoryView: View {
             }
 
             Section {
-                Text("Sessions are recorded only while tracking is on.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text(
+                    "Sessions are recorded only while tracking is on, and "
+                        + "only from the Kindle reader. Apple Books pages are "
+                        + "not tracked."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+                if let title = trackedTitle() {
+                    HStack(spacing: 6) {
+                        Label(
+                            "Tracking \(title)",
+                            systemImage: "record.circle.fill")
+                            .foregroundStyle(.secondary)
+                        Button("Stop") { model.toggleTracking() }
+                            .controlSize(.small)
+                    }
+                    .font(.caption)
+                }
             }
             if sessionDays.isEmpty {
                 Section("Sessions") {
                     Text("No sessions yet.")
                         .foregroundStyle(.secondary)
-                    IconButton("Turn Tracking On", systemImage: "record.circle")
-                    {
-                        model.toggleTracking()
-                    }
+                    Button("Turn Tracking On") { model.toggleTracking() }
+                        .help(
+                            "Select a Kindle book first: sessions follow the "
+                                + "book you are reading there.")
                 }
             } else {
                 ForEach(sessionDays, id: \.day) { group in
@@ -130,14 +165,9 @@ public struct HistoryView: View {
                             date: .complete, time: .omitted)
                     ) {
                         ForEach(group.sessions) { session in
-                            Button {
-                                model.selectedBookID = session.asin
-                                model.bookWorkspaceID = session.asin
-                                model.annotationSearch = ""
-                                model.section = .library
-                            } label: {
-                                SessionListRow(session: session)
-                            }.buttonStyle(.plain)
+                            SessionListRow(session: session)
+                                .contentShape(Rectangle())
+                                .onTapGesture { detailSession = session }
                         }
                     }
                 }
@@ -152,14 +182,19 @@ public struct HistoryView: View {
                 } label: {
                     Label(
                         model.trackedBookID == nil
-                            ? "Track Reading" : "Stop Tracking",
+                            ? "Track Reading"
+                            : "Tracking \(trackedTitle() ?? "")",
                         systemImage: model.trackedBookID == nil
                             ? "record.circle" : "stop.circle")
-                }.labelStyle(.iconOnly)
+                }
                     .help(
                         model.trackedBookID == nil
-                            ? "Track reading" : "Stop tracking")
+                            ? "Track reading for the selected Kindle book"
+                            : "Stop tracking")
             }
+        }
+        .sheet(item: $detailSession) { session in
+            SessionDetailView(model: model, session: session)
         }
         .onAppear { model.refreshActivity() }
     }
@@ -195,4 +230,74 @@ struct SessionListRow: View {
         .padding(.vertical, 2)
     }
 
+}
+
+/// One session, with the pages it observed. The rows store observations but
+/// never showed them; this is where they belong.
+struct SessionDetailView: View {
+    @ObservedObject var model: AppModel
+    let session: ReadingSession
+    @Environment(\.dismiss) private var dismiss
+    @State private var observations: [PageObservation] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(
+                        session.bookTitle.isEmpty
+                            ? session.asin : session.bookTitle
+                    ).font(.title3.bold())
+                    Text(
+                        session.startedAt.formatted(
+                            date: .abbreviated, time: .shortened)
+                            + " – "
+                            + session.endedAt.formatted(
+                                date: .omitted, time: .shortened)
+                            + " · " + session.durationLabel
+                            + " · \(session.pageCount) pages observed"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            if observations.isEmpty {
+                Text("No page text was recorded for this session.")
+                    .foregroundStyle(.secondary)
+            } else {
+                List(observations) { observation in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(
+                            observation.observedAt.formatted(
+                                date: .omitted, time: .shortened)
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        Text(observation.text)
+                            .lineLimit(4)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 2)
+                }
+                .listStyle(.inset)
+            }
+            HStack {
+                Button("Open Book in Library") {
+                    model.selectedBookID = session.asin
+                    model.bookWorkspaceID = session.asin
+                    model.section = .library
+                    dismiss()
+                }
+                Spacer()
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 480, idealWidth: 560, minHeight: 360, idealHeight: 520)
+        .task {
+            observations = model.sessionObservations(session)
+        }
+    }
 }

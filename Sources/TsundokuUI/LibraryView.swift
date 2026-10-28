@@ -76,13 +76,19 @@ public struct LibraryView: View {
                         .pickerStyle(.segmented)
                         .labelsHidden()
                         .fixedSize()
-                        IconButton(
-                            "Open in Annotations",
-                            systemImage: "arrow.up.right.square"
-                        ) {
-                            model.bookWorkspaceID = nil
-                            model.showAnnotations(for: book)
+                        Menu {
+                            Button("Show in Annotations Library") {
+                                model.bookWorkspaceID = nil
+                                model.showAnnotations(for: book)
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
                         }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .help("More for this book")
+                        .accessibilityLabel("More for this book")
                     }.padding(.horizontal, 16).padding(.vertical, 8)
                     switch model.bookWorkspaceSection {
                     case .annotations:
@@ -119,6 +125,15 @@ public struct LibraryView: View {
         }
     }
 
+    /// The footer's count line. Built here rather than inline because the
+    /// whole table body is already at the type checker's limit.
+    private func bookCountLine(_ count: Int) -> String {
+        var parts = ["\(count.formatted()) books"]
+        if model.sourceFilter != .all { parts.append(model.sourceFilter.title) }
+        if scope != .all { parts.append(scope.title) }
+        return parts.joined(separator: " · ")
+    }
+
     private var bookList: some View {
         // One filtered, sorted snapshot per evaluation: the empty check, the
         // table and the footer all read the same rows.
@@ -134,86 +149,10 @@ public struct LibraryView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             } else {
-                Table(
-                    rows, selection: $model.selectedBookID,
-                    sortOrder: $sortOrder
-                ) {
-                    TableColumn("Title", value: \.title) { book in
-                        Text(book.title)
-                    }
-                    .width(min: 180, ideal: 260)
-
-                    TableColumn("Author", value: \.author) { book in
-                        Text(book.author)
-                    }
-                    .width(min: 90, ideal: 140)
-
-                    TableColumn(
-                        "Annotations", value: \.userAnnotationCount
-                    ) { book in
-                        Text("\(book.userAnnotationCount)")
-                    }
-                    .width(min: 70, ideal: 85)
-
-                    TableColumn("Source", value: \.source.rawValue) {
-                        book in
-                        Text(book.source.displayName)
-                    }
-                    .width(85)
-
-                    TableColumn("Messages") { book in
-                        let count = model.conversationCount(for: book)
-                        Text(count == 0 ? "—" : "\(count)")
-                            .foregroundStyle(
-                                count == 0 ? .secondary : .primary)
-                    }
-                    .width(70)
-
-                    TableColumn("Last Read", value: \.lastReadSort) { book in
-                        Text(TsundokuFormat.date(book.lastView))
-                    }
-                    .width(85)
-                }
-                .tableStyle(.inset(alternatesRowBackgrounds: false))
-                .scrollContentBackground(.hidden)
-                .contextMenu(forSelectionType: String.self) { ids in
-                    Button("Open Annotations") {
-                        model.bookWorkspaceSection = .annotations
-                        model.bookWorkspaceID = ids.first
-                    }
-                    .disabled(ids.count != 1)
-                    Button("Open Chats") {
-                        model.bookWorkspaceSection = .chats
-                        model.bookWorkspaceID = ids.first
-                    }
-                    .disabled(ids.count != 1)
-                } primaryAction: { ids in
-                    model.bookWorkspaceSection = .annotations
-                    model.bookWorkspaceID = ids.first
-                }
-                .safeAreaInset(edge: .bottom) {
-                    HStack {
-                        Text(
-                            "\(rows.count.formatted()) books"
-                                + (model.sourceFilter == .all
-                                    ? "" : " · \(model.sourceFilter.title)")
-                                + (scope == .all ? "" : " · \(scope.title)")
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        IconButton(
-                            "Open Annotations", systemImage: "book.pages"
-                        ) {
-                            model.bookWorkspaceSection = .annotations
-                            model.bookWorkspaceID = model.selectedBookID
-                        }
-                        .disabled(model.selectedBookID == nil)
-                        IconButton(
-                            "Reset Filters",
-                            systemImage: "line.3.horizontal.decrease.circle"
-                        ) { resetFilters() }
-                    }.padding(10)
-                }
+                BookTable(
+                    model: model, rows: rows, sortOrder: $sortOrder,
+                    countLine: bookCountLine(rows.count),
+                    resetFilters: resetFilters)
             }
         }
         .background {
@@ -282,6 +221,21 @@ public struct LibraryView: View {
 // MARK: - Detail
 
 struct BookDetailView: View {
+    /// The menu item names the page it will ask about when that page is not
+    /// this book, and is unavailable when no reader page is open.
+    private func askLabel(for book: Book) -> String {
+        if model.readerPageMatches(book) {
+            return "Ask About This Book's Page…"
+        }
+        if let live = model.livePage?.title, !live.isEmpty,
+            ConversationKey.normalize(live)
+                != ConversationKey.normalize(book.title)
+        {
+            return "Open \u{201C}\(book.title)\u{201D} in the Reader to Ask"
+        }
+        return "Open This Book in the Reader to Ask"
+    }
+
     @ObservedObject var model: AppModel
 
     var body: some View {
@@ -352,48 +306,49 @@ struct BookDetailView: View {
                     }
 
                     Section("Actions") {
-                        HStack(spacing: 12) {
-                            IconButton(
-                                "Read Annotations", systemImage: "book.pages"
-                            ) {
+                        HStack(spacing: 8) {
+                            Button("Read Annotations") {
                                 model.bookWorkspaceSection = .annotations
                                 model.bookWorkspaceID = book.asin
                             }
-                            IconButton(
-                                "Open Chats",
-                                systemImage: "bubble.left.and.bubble.right"
-                            ) {
+                            Button("Open Chats") {
                                 model.openChats(for: book)
                             }
-                            IconButton(
-                                "Ask About the Current Reader Page",
-                                systemImage: "sparkles",
-                                tooltip:
-                                    "Ask about the current reader page, which may differ from this book"
-                            ) {
-                                model.showAIPanel()
-                            }
-                            if book.source == .kindle {
-                                let isTracking =
-                                    model.trackedBookID == book.asin
-                                IconButton(
-                                    isTracking
-                                        ? "Stop Tracking" : "Track Reading",
-                                    systemImage: isTracking
-                                        ? "stop.circle" : "record.circle"
-                                ) {
-                                    if isTracking {
-                                        model.toggleTracking()
-                                    } else {
-                                        model.startTracking(book)
+                            Spacer(minLength: 0)
+                            Menu {
+                                // The companion answers about the live page,
+                                // which may be a different book; the item
+                                // says which one it will ask about.
+                                Button(askLabel(for: book)) {
+                                    model.section = .library
+                                    model.showAIPanel()
+                                }
+                                .disabled(!model.readerPageMatches(book))
+                                if book.source == .kindle {
+                                    let isTracking =
+                                        model.trackedBookID == book.asin
+                                    Button(
+                                        isTracking
+                                            ? "Stop Tracking" : "Track Reading"
+                                    ) {
+                                        if isTracking {
+                                            model.toggleTracking()
+                                        } else {
+                                            model.startTracking(book)
+                                        }
                                     }
                                 }
+                                Button("Capture as PDF…") {
+                                    model.section = .exports
+                                }
+                            } label: {
+                                Label("More", systemImage: "ellipsis.circle")
                             }
-                            IconButton(
-                                "Capture as PDF…", systemImage: "doc.richtext"
-                            ) { model.section = .exports }
-                            Spacer(minLength: 0)
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("Companion, tracking and capture for this book")
                         }
+                        .controlSize(.small)
                     }
                 }
                 .listStyle(.inset)
@@ -412,4 +367,109 @@ struct BookDetailView: View {
 
 extension Book {
     fileprivate var lastReadSort: Date { lastView ?? .distantPast }
+}
+
+/// The books table on its own. The containing view's body is already at the
+/// type checker's limit, and a table with six columns plus a footer is where
+/// it gives up.
+private struct BookTable: View {
+    @ObservedObject var model: AppModel
+    let rows: [Book]
+    @Binding var sortOrder: [KeyPathComparator<Book>]
+    let countLine: String
+    let resetFilters: () -> Void
+
+    var body: some View {
+        Table(
+            rows, selection: $model.selectedBookID,
+            sortOrder: $sortOrder
+        ) {
+            TableColumn("Title", value: \.title) { book in
+                HStack(spacing: 6) {
+                    // Read state was filterable but invisible; the title
+                    // carries it, so a filter result explains itself.
+                    Image(
+                        systemName: book.isRead
+                            ? "checkmark.circle.fill" : "circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(
+                        book.isRead ? AnyShapeStyle(.tint)
+                            : AnyShapeStyle(.tertiary))
+                    .accessibilityLabel(book.isRead ? "Read" : "Unread")
+                    Text(book.title)
+                }
+            }
+            .width(min: 160, ideal: 250)
+
+            TableColumn("Author", value: \.author) { book in
+                Text(book.author.isEmpty ? "Unknown author" : book.author)
+                    .foregroundStyle(
+                        book.author.isEmpty ? .secondary : .primary)
+            }
+            .width(min: 80, ideal: 140)
+
+            TableColumn(
+                "Annotations", value: \.userAnnotationCount
+            ) { book in
+                Text("\(book.userAnnotationCount)")
+                    .monospacedDigit()
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .width(min: 66, ideal: 84)
+
+            TableColumn("Source", value: \.source.rawValue) { book in
+                Text(book.source.displayName)
+            }
+            .width(80)
+
+            TableColumn("Messages") { book in
+                let count = model.conversationCount(for: book)
+                Text(count == 0 ? "—" : "\(count)")
+                    .monospacedDigit()
+                    .foregroundStyle(count == 0 ? .secondary : .primary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .width(66)
+
+            TableColumn("Last Read", value: \.lastReadSort) { book in
+                Text(TsundokuFormat.date(book.lastView))
+                    .monospacedDigit()
+            }
+            .width(82)
+        }
+        .tableStyle(.inset(alternatesRowBackgrounds: false))
+        .scrollContentBackground(.hidden)
+        .contextMenu(forSelectionType: String.self) { ids in
+            Button("Open Annotations") {
+                model.bookWorkspaceSection = .annotations
+                model.bookWorkspaceID = ids.first
+            }
+            .disabled(ids.count != 1)
+            Button("Open Chats") {
+                model.bookWorkspaceSection = .chats
+                model.bookWorkspaceID = ids.first
+            }
+            .disabled(ids.count != 1)
+        } primaryAction: { ids in
+            model.bookWorkspaceSection = .annotations
+            model.bookWorkspaceID = ids.first
+        }
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                Text(countLine)
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                IconButton("Open Annotations", systemImage: "book.pages") {
+                    model.bookWorkspaceSection = .annotations
+                    model.bookWorkspaceID = model.selectedBookID
+                }
+                .disabled(model.selectedBookID == nil)
+                IconButton(
+                    "Reset Filters",
+                    systemImage: "line.3.horizontal.decrease.circle"
+                ) { resetFilters() }
+            }.padding(10)
+        }
+    }
 }

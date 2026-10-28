@@ -22,7 +22,9 @@ public struct RootView: View {
                     .navigationTitle(model.section.title)
                     .toolbar { toolbarContent }
             }
-            .frame(minWidth: 760, minHeight: 540)
+            // Wide enough for the sidebar plus the books table's minimum
+            // columns; at 760 the table had to hide its own content.
+            .frame(minWidth: 880, minHeight: 560)
         }
         .sheet(isPresented: $model.showImportReport) {
             LibraryImportReportView(model: model)
@@ -98,6 +100,9 @@ public struct RootView: View {
             }
         }
         ToolbarItem {
+            // In sections other than Books a bare "Import" read as importing
+            // something into what is on screen; the action always re-reads the
+            // whole local library.
             Button {
                 model.refreshAll()
             } label: {
@@ -105,12 +110,15 @@ public struct RootView: View {
                     ProgressView().controlSize(.small)
                 } else {
                     Label(
-                        "Import",
+                        model.section == .library
+                            ? "Import Library" : "Refresh Library",
                         systemImage: "arrow.triangle.2.circlepath")
                 }
             }
             .disabled(model.isImporting)
-            .help("Re-read the local Kindle and Apple Books stores")
+            .help(
+                "Re-read the Kindle and Apple Books stores on this Mac. "
+                    + "Nothing is downloaded.")
         }
     }
 }
