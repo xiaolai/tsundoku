@@ -270,14 +270,23 @@ public struct ExportsView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 if let termination = capture.termination,
-                                    !termination.isEmpty
+                                    let note = CaptureTermination.note(
+                                        termination)
                                 {
+                                    // A normal finish has a termination
+                                    // string too; only a problem earns the
+                                    // amber and the triangle.
+                                    let problem =
+                                        CaptureTermination.isProblem(termination)
                                     Label(
-                                        termination,
-                                        systemImage:
-                                            "exclamationmark.triangle.fill")
+                                        note,
+                                        systemImage: problem
+                                            ? "exclamationmark.triangle.fill"
+                                            : "info.circle")
                                         .font(.caption2)
-                                        .foregroundStyle(Theme.warning)
+                                        .foregroundStyle(
+                                            problem
+                                                ? Theme.warning : .secondary)
                                 }
                                 if !capture.warnings.isEmpty {
                                     Label(

@@ -151,7 +151,9 @@ struct SidebarView: View {
                 HStack(spacing: 4) {
                     Label("Exports", systemImage: "doc.richtext")
                     // A capture that stopped early is invisible in a count.
-                    if model.captures.contains(where: { $0.termination != nil })
+                    if model.captures.contains(where: {
+                        $0.termination.map(CaptureTermination.isProblem) ?? false
+                    })
                     {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.caption2)
