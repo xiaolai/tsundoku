@@ -318,16 +318,24 @@ struct BookChatsView: View {
                     .padding(.bottom, 6)
             }
             if summaries.isEmpty, !isLoading {
-                ContentUnavailableView(
-                    search.isEmpty ? "No Chats Yet" : "No Matching Chats",
-                    systemImage: search.isEmpty
-                        ? "bubble.left.and.bubble.right" : "magnifyingglass",
-                    description: Text(
+                ContentUnavailableView {
+                    Label(
+                        search.isEmpty ? "No Chats Yet" : "No Matching Chats",
+                        systemImage: search.isEmpty
+                            ? "bubble.left.and.bubble.right" : "magnifyingglass")
+                } description: {
+                    Text(
                         search.isEmpty
                             ? "Ask about this book in the reading companion; "
                                 + "its conversation appears here."
                             : "No chat for this book matches “\(search)”.")
-                )
+                } actions: {
+                    if search.isEmpty {
+                        Button("Ask About This Book…") { startChat() }
+                    } else {
+                        Button("Clear Search") { search = "" }
+                    }
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(selection: $selectedID) {
@@ -401,11 +409,7 @@ struct BookChatsView: View {
 
     @ViewBuilder private var detail: some View {
         if let error {
-            ContentUnavailableView(
-                "Could Not Read Chats",
-                systemImage: "exclamationmark.triangle",
-                description: Text(error)
-            )
+            archiveFailure(error)
         } else if loadingTurns {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if turns.isEmpty {
@@ -420,6 +424,33 @@ struct BookChatsView: View {
         } else {
             transcript
         }
+    }
+
+    /// A read failure is the archive's, not the reader's, so it says what
+    /// happened, keeps the raw text behind a disclosure, and offers the one
+    /// action that can help: read it again.
+    private func archiveFailure(_ detail: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 32, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("Could Not Read Chats").font(.headline)
+            Text(
+                "The archive could not be read. Nothing was deleted."
+            )
+            .foregroundStyle(.secondary)
+            DisclosureGroup("Technical Detail") {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: 460, alignment: .leading)
+            }
+            .frame(maxWidth: 460, alignment: .leading)
+            Button("Try Again") { retryReading() }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var transcript: some View {
@@ -449,26 +480,26 @@ struct BookChatsView: View {
                         .controlSize(.small)
                     }
                     if selectedIsFiled {
-                        IconButton(
-                            "Continue in Companion",
-                            systemImage: "arrow.up.forward.app",
-                            tooltip: companionAvailable
-                                ? "Open this chat in the reading companion"
-                                : "The reading companion is not available yet."
-                        ) { continueSelected() }
-                        .disabled(!companionAvailable)
-                        .controlSize(.small)
+                        Button("Continue") { continueSelected() }
+                            .buttonStyle(.bordered)
+                            .help(
+                                companionAvailable
+                                    ? "Open this chat in the reading companion"
+                                    : "The reading companion is not available yet.")
+                            .disabled(!companionAvailable)
+                            .controlSize(.small)
                     }
-                    IconButton(
-                        "Compact", systemImage: "text.append",
-                        tooltip: canCompact
-                            ? "Summarize older turns for the model; every "
-                                + "message stays in this transcript"
-                            : "A chat needs at least four saved turns to "
-                                + "compact."
-                    ) { compactSelected() }
-                    .disabled(!canCompact)
-                    .controlSize(.small)
+                    Button("Compact") { compactSelected() }
+                        .buttonStyle(.bordered)
+                        .help(
+                            canCompact
+                                ? "Summarize older turns for the model; every "
+                                    + "message stays in this transcript"
+                                : "A chat needs more than "
+                                    + "\(ConversationCompactor.keepRecentTurns) "
+                                    + "turns newer than its last summary to compact.")
+                        .disabled(!canCompact)
+                        .controlSize(.small)
                     Menu {
                         Button("Export Markdown…") {
                             if let selectedSummary {
@@ -508,6 +539,9 @@ struct BookChatsView: View {
                             compaction, conversationID: selectedID)
                     }
                     ForEach(turns) { turn in
+                        if startsNewDay(turn) {
+                            dayDivider(turn.createdAt)
+                        }
                         turnView(turn)
                     }
                 }
@@ -572,6 +606,27 @@ struct BookChatsView: View {
         .accessibilityLabel("Earlier messages summarized for the model")
     }
 
+    /// A chat can span weeks; a divider before the first turn of a day keeps
+    /// the transcript readable without repeating the date on every message.
+    private func startsNewDay(_ turn: ConversationTurn) -> Bool {
+        guard let index = turns.firstIndex(where: { $0.id == turn.id })
+        else { return false }
+        if index == 0 { return true }
+        return !Calendar.current.isDate(
+            turns[index - 1].createdAt, inSameDayAs: turn.createdAt)
+    }
+
+    private func dayDivider(_ date: Date) -> some View {
+        HStack(spacing: 8) {
+            Rectangle().fill(.quaternary).frame(height: 1)
+            Text(TsundokuFormat.annotationDate(date))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize()
+            Rectangle().fill(.quaternary).frame(height: 1)
+        }
+    }
+
     private func turnView(_ turn: ConversationTurn) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -603,6 +658,14 @@ struct BookChatsView: View {
                     Text("Companion · \(turn.provider)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                    Text(turn.createdAt.formatted(date: .omitted, time: .shortened))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .help(
+                            TsundokuFormat.annotationDate(turn.createdAt)
+                                + " at "
+                                + turn.createdAt.formatted(
+                                    date: .omitted, time: .shortened))
                     Spacer()
                     IconButton(
                         "Copy Answer", systemImage: "doc.on.doc",
@@ -792,6 +855,26 @@ struct BookChatsView: View {
             } catch {
                 actionError = "Could not remove the summary: \(error)"
             }
+        }
+    }
+
+    /// Ask about this book from an empty Chats tab. The companion still needs
+    /// the book open in a reader and says so when it is not.
+    private func startChat() {
+        guard model.openCompanionChat != nil else {
+            actionError = "The reading companion is not available yet."
+            return
+        }
+        model.startChat(book: book)
+    }
+
+    /// Read again whatever failed. A route failure comes from opening a
+    /// card's chat, so it re-runs that route through the summary load.
+    private func retryReading() {
+        Task {
+            routeError = nil
+            if summariesError != nil { _ = await loadSummaries() }
+            if let id = selectedID, turnsError != nil { await loadTurns(id) }
         }
     }
 

@@ -3283,15 +3283,31 @@ public struct AIPanelView: View {
                 .font(.headline)
                 if !model.pageText.isEmpty {
                     Text(
-                        "Explain, translate or summarize the page from the "
-                            + "buttons below, or type your own question."
+                        "Explain, translate or summarize the page with a "
+                            + "button below, or type your own question."
                     )
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                    quickActionsRow
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// The quick actions were behind a chevron inside the Send capsule, so the
+    /// empty state pointed at buttons the reader could not see. They are on
+    /// the empty state itself now, under their own names.
+    @ViewBuilder private var quickActionsRow: some View {
+        if let store = model.companionSettings {
+            ObservedQuickActionsRow(store: store, canRun: model.canRun) {
+                model.perform($0)
+            }
+        } else {
+            QuickActionsRow(
+                actions: AIAction.quickActionCases, canRun: model.canRun
+            ) { model.perform($0) }
         }
     }
 
@@ -3885,6 +3901,42 @@ private struct QuickActionsMenu: View {
         .disabled(!canRun)
         .help("Quick actions")
         .accessibilityLabel("Quick actions")
+    }
+}
+
+/// The same actions as labelled buttons, for the empty state where a menu
+/// would hide them again.
+private struct QuickActionsRow: View {
+    let actions: [AIAction]
+    let canRun: Bool
+    let perform: (AIAction) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(actions.prefix(4), id: \.self) { action in
+                Button {
+                    perform(action)
+                } label: {
+                    Label(action.displayName, systemImage: action.symbolName)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!canRun)
+            }
+        }
+        .padding(.top, 2)
+    }
+}
+
+private struct ObservedQuickActionsRow: View {
+    @ObservedObject var store: CompanionSettingsStore
+    let canRun: Bool
+    let perform: (AIAction) -> Void
+
+    var body: some View {
+        QuickActionsRow(
+            actions: store.settings.quickActions, canRun: canRun,
+            perform: perform)
     }
 }
 

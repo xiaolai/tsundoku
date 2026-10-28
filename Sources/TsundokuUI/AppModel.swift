@@ -803,7 +803,9 @@ public final class AppModel: ObservableObject {
         /// Apple Books can share an identifier, so the ID alone cannot tell
         /// which reader window should continue the chat.
         public let bookSource: BookSource?
-        public let conversationID: Int64
+        /// The chat to resume. Nil asks the companion for a new chat about
+        /// the same book, which is what the empty Chats tab offers.
+        public let conversationID: Int64?
     }
 
     @Published public private(set) var pendingChat: PendingChat?
@@ -816,6 +818,15 @@ public final class AppModel: ObservableObject {
         let pending = PendingCompanionChat(
             bookID: book.asin, bookSource: book.source,
             conversationID: conversationID)
+        openCompanionChat?(pending)
+    }
+
+    /// Start a new chat about a library book. The companion still needs that
+    /// book open in a reader; it says so when it is not.
+    public func startChat(book: Book) {
+        let pending = PendingCompanionChat(
+            bookID: book.asin, bookSource: book.source,
+            conversationID: nil)
         openCompanionChat?(pending)
     }
 

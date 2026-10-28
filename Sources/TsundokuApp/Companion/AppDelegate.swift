@@ -292,13 +292,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             }
             guard self.companion.canShowPanel else {
                 model.post(
-                    "Open \(pending.bookID) in the reader first, then continue "
-                        + "the chat.")
+                    "Open the book in the reader first, then ask from Chats.")
                 return
             }
-            self.companion.showConversation(
-                bookID: pending.bookID, source: pending.bookSource,
-                conversationID: pending.conversationID)
+            if let conversationID = pending.conversationID {
+                self.companion.showConversation(
+                    bookID: pending.bookID, source: pending.bookSource,
+                    conversationID: conversationID)
+            } else {
+                self.companion.showNewChat(
+                    bookID: pending.bookID, source: pending.bookSource)
+            }
         }
         companion.messageSink = { [weak model] message in
             model?.post(message)

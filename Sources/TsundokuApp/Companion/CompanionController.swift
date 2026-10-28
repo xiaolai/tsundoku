@@ -169,37 +169,71 @@ final class CompanionController {
             await model.awaitPageLoad()
             guard let self, generation == self.conversationRouteGeneration
             else { return }
-            guard let key = model.bookKey else {
-                model.sendNote =
-                    "This page could not be identified, so the saved chat "
-                    + "cannot be continued."
-                return
-            }
             guard
-                ConversationFiling.canonical(key)
-                    == ConversationFiling.canonical(pending.bookID)
-            else {
-                model.sendNote =
-                    "Open the chat's book in the reader, then continue from "
-                    + "Chats."
-                return
-            }
-            if let source = pending.source,
-                let live = model.readerKind.map({
-                    $0 == .kindle ? BookSource.kindle : .appleBooks
-                }),
-                live != source
-            {
-                model.sendNote =
-                    "This chat belongs to the copy in "
-                    + (source == .kindle ? "Kindle" : "Apple Books")
-                    + ". Open that reader and continue from Chats."
-                return
-            }
+                await self.livePageIs(
+                    pending.bookID, source: pending.source, model: model)
+            else { return }
             model.openConversation(
                 pending.conversationID, expectedBookKey: pending.bookID,
                 expectedBookSource: pending.source)
         }
+    }
+
+    /// Start a new chat about a library book. The panel only ever talks to
+    /// the live reader page, so the book must be the one open there; the
+    /// note explains which book to open otherwise.
+    func showNewChat(bookID: String, source: BookSource?) {
+        showPanel()
+        guard output.presentation == .panel else {
+            messageSink?(
+                "Open the book's reader in Kindle or Apple Books, then ask "
+                    + "from Chats.")
+            return
+        }
+        guard let model = panelModel else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            guard
+                await self.livePageIs(
+                    bookID, source: source, model: model)
+            else { return }
+            model.newChat()
+        }
+    }
+
+    /// Whether the live page belongs to the routed book. A mismatch leaves a
+    /// note in the panel instead of silently answering about another book.
+    @MainActor
+    private func livePageIs(
+        _ bookID: String, source: BookSource?, model: AIPanelModel
+    ) async -> Bool {
+        guard let key = model.bookKey else {
+            model.sendNote =
+                "This page could not be identified, so the chat cannot start."
+            return false
+        }
+        guard
+            ConversationFiling.canonical(key)
+                == ConversationFiling.canonical(bookID)
+        else {
+            model.sendNote =
+                "Open this book in the reader first: the companion reads the "
+                + "page in front of you, not a library row."
+            return false
+        }
+        if let source,
+            let live = model.readerKind.map({
+                $0 == .kindle ? BookSource.kindle : .appleBooks
+            }),
+            live != source
+        {
+            model.sendNote =
+                "This book belongs to the copy in "
+                + (source == .kindle ? "Kindle" : "Apple Books")
+                + ". Open that reader first."
+            return false
+        }
+        return true
     }
 
     func closePanel() {
