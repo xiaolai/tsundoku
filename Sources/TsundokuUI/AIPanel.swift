@@ -284,6 +284,9 @@ public final class AIPanelModel: ObservableObject {
     /// The resolver result for the current page, kept so chapter and book
     /// scopes can read the same local index without re-matching the page.
     private var localResult: ReadingContextResolver.Result?
+    /// The page the local result belongs to; a scope question re-resolves it
+    /// rather than silently sending the page instead.
+    private var localContextPage: ReaderPage?
     /// Changes whenever a page's local lookup starts, so a send can prove the
     /// passage it awaited still belongs to the page it confirmed.
     private var localResultGeneration = 0
@@ -777,6 +780,7 @@ public final class AIPanelModel: ObservableObject {
         // the lookup so a failed resolution cannot leave the previous page's
         // chapter or book text in place.
         localResult = nil
+        localContextPage = page
         localResultGeneration += 1
         localContextGeneration += 1
         let generation = localContextGeneration
@@ -1482,6 +1486,19 @@ public final class AIPanelModel: ObservableObject {
             return nil
         }
         await localContextTask?.value
+        if localResult == nil, let page = localContextPage, let app {
+            // A refresh can be superseded between the send and this read, so
+            // the resolved text is briefly absent. Asking for a chapter or the
+            // whole book and silently getting the page instead is the one
+            // outcome the reader cannot see coming; resolve once more first.
+            let resolver = contextResolver
+            let archive = app.archive
+            let captures = (try? archive?.captures()) ?? []
+            let result = await Task.detached {
+                resolver(page, captures, archive)
+            }.value
+            if let result { localResult = result }
+        }
         guard let result = localResult, captureMatchesBook(result.capture)
         else { return nil }
         let page = context.pageNumber

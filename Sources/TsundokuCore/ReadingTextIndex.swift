@@ -1013,14 +1013,34 @@ private final class CaptureIndexCache: @unchecked Sendable {
     private let cache = BoundedIndexCache<BookTextIndex>(capacity: 32)
 
     func index(directory: String) -> BookTextIndex? {
-        cache.value(for: directory) {
+        // The key carries the text file's size and modification time: a
+        // capture that is still being written (or one that grew since the
+        // index was built) must not be served from a cached, shorter book —
+        // a whole-book passage that silently lacks its last chapters is the
+        // failure that looks like a scope bug.
+        let key = Self.key(directory)
+        return cache.value(for: key) {
             try? BookTextIndex.load(
                 directory: URL(fileURLWithPath: directory))
         }
     }
 
     func remove(directory: String) {
-        cache.remove(directory)
+        cache.remove(Self.key(directory))
+    }
+
+    private static func key(_ directory: String) -> String {
+        let url = URL(fileURLWithPath: directory)
+            .appendingPathComponent("text.jsonl")
+        guard
+            let attributes = try? FileManager.default.attributesOfItem(
+                atPath: url.path)
+        else { return "\(directory)|missing" }
+        let size = (attributes[.size] as? NSNumber)?.intValue ?? -1
+        let modified =
+            (attributes[.modificationDate] as? Date)?
+            .timeIntervalSince1970 ?? 0
+        return "\(directory)|\(size)|\(Int(modified))"
     }
 }
 
