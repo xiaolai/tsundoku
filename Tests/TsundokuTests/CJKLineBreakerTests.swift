@@ -23,4 +23,27 @@ struct CJKLineBreakerTests {
             CJKLineBreaker.protectWords("plain English words")
                 == "plain English words")
     }
+
+    @Test("a word that mixes scripts is protected too")
+    func protectsMixedScriptWords() {
+        // `T恤衫` tokenises as one word; rejecting it because of the Latin T
+        // left the break between 恤 and 衫 open.
+        let protected = CJKLineBreaker.protectWords("一件T恤衫")
+        let visible = protected.replacingOccurrences(
+            of: "\u{2060}", with: "")
+        #expect(visible == "一件T恤衫")
+        #expect(protected.contains("T\u{2060}恤\u{2060}衫"))
+    }
+
+    @Test("Han characters outside the basic planes count as Han")
+    func recognisesSupplementaryHan() {
+        // CJK Extensions G and H sit above U+2FA1F, where the old hand-written
+        // ranges stopped.
+        #expect(CJKLineBreaker.isHan("\u{30000}"))
+        #expect(CJKLineBreaker.isHan("\u{31350}"))
+        #expect(CJKLineBreaker.isHan("\u{4E00}"))
+        #expect(CJKLineBreaker.isHan("\u{3007}"))
+        #expect(!CJKLineBreaker.isHan("T"))
+        #expect(!CJKLineBreaker.isHan("7"))
+    }
 }
