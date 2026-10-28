@@ -245,6 +245,18 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
     /// The actions offered by the Send button's menu, in this order. Empty
     /// means the menu has nothing but its explanation.
     public var quickActions: [AIAction]
+    /// Width of a side panel, in points. The reader can drag it.
+    public var panelSideWidth: Double
+    /// Height of a bottom panel, in points.
+    public var panelBottomHeight: Double
+    /// The face used for Chinese characters in answers. Latin text keeps the
+    /// reader's face; a Chinese face set for Chinese keeps both scripts
+    /// idiomatic instead of one being a fallback for the other.
+    public var chineseFontName: String
+    /// Extra spacing between Chinese characters, in points. Chinese glyphs are
+    /// full-width and set solid look crowded beside Latin word spacing; about
+    /// 0.2 pt at reading sizes is the usual correction.
+    public var chineseTracking: Double
 
     public init(
         panelPlacement: PanelPlacement = .auto,
@@ -254,7 +266,11 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
         panelAnimation: PanelAnimation = .outward,
         matchReaderTypography: Bool = true,
         matchReaderTheme: Bool = true,
-        quickActions: [AIAction] = AIAction.quickActionCases
+        quickActions: [AIAction] = AIAction.quickActionCases,
+        panelSideWidth: Double = Double(CompanionMetrics.sideWidth),
+        panelBottomHeight: Double = 420,
+        chineseFontName: String = ChineseFace.pingFangSC.fontName,
+        chineseTracking: Double = 0.2
     ) {
         self.panelPlacement = panelPlacement
         self.triggerPlacement = triggerPlacement
@@ -264,6 +280,10 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
         self.matchReaderTypography = matchReaderTypography
         self.matchReaderTheme = matchReaderTheme
         self.quickActions = quickActions
+        self.panelSideWidth = panelSideWidth
+        self.panelBottomHeight = panelBottomHeight
+        self.chineseFontName = chineseFontName
+        self.chineseTracking = chineseTracking
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -272,6 +292,8 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
         case matchReaderTypography
         case matchReaderTheme
         case quickActions
+        case panelSideWidth, panelBottomHeight
+        case chineseFontName, chineseTracking
     }
 
     /// Decodes every missing field to its default, so a blob written before a
@@ -306,6 +328,22 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
             try container.decodeIfPresent(
                 Bool.self, forKey: .matchReaderTheme)
             ?? defaults.matchReaderTheme
+        panelSideWidth =
+            try container.decodeIfPresent(
+                Double.self, forKey: .panelSideWidth)
+            ?? defaults.panelSideWidth
+        panelBottomHeight =
+            try container.decodeIfPresent(
+                Double.self, forKey: .panelBottomHeight)
+            ?? defaults.panelBottomHeight
+        chineseFontName =
+            try container.decodeIfPresent(
+                String.self, forKey: .chineseFontName)
+            ?? defaults.chineseFontName
+        chineseTracking =
+            try container.decodeIfPresent(
+                Double.self, forKey: .chineseTracking)
+            ?? defaults.chineseTracking
         quickActions =
             try container.decodeIfPresent(
                 [AIAction].self, forKey: .quickActions)
@@ -330,5 +368,36 @@ public struct CompanionSettings: Codable, Equatable, Sendable {
     public func save(to defaults: UserDefaults = .standard) {
         guard let data = try? JSONEncoder().encode(self) else { return }
         defaults.set(data, forKey: Self.storageKey)
+    }
+}
+
+/// The Chinese faces the panel can be set in. Each is offered in its简体 and
+/// 繁體 cut, because the same face serves both scripts with different glyph
+/// shapes, and a Traditional reader should not be given Simplified forms.
+public enum ChineseFace: String, CaseIterable, Identifiable, Codable, Sendable {
+    case pingFangSC
+    case pingFangTC
+    case hiraginoGB
+    case hiraginoCNS
+
+    public var id: String { rawValue }
+
+    /// The installed family name. macOS ships all four with the system.
+    public var fontName: String {
+        switch self {
+        case .pingFangSC: "PingFang SC"
+        case .pingFangTC: "PingFang TC"
+        case .hiraginoGB: "Hiragino Sans GB"
+        case .hiraginoCNS: "Hiragino Sans CNS"
+        }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .pingFangSC: "PingFang 简体"
+        case .pingFangTC: "PingFang 繁體"
+        case .hiraginoGB: "Hiragino Sans 简体"
+        case .hiraginoCNS: "Hiragino Sans 繁體"
+        }
     }
 }

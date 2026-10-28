@@ -61,10 +61,13 @@ public enum CompanionGeometry {
         reader: CGRect,
         visible: CGRect,
         panelPlacement: CompanionSettings.PanelPlacement,
-        triggerPlacement: CompanionSettings.TriggerPlacement
+        triggerPlacement: CompanionSettings.TriggerPlacement,
+        sideWidth: CGFloat = CompanionMetrics.sideWidth,
+        bottomHeight: CGFloat = CompanionMetrics.bottomHeight
     ) -> CompanionLayout {
         let placement = resolvePanel(
-            reader: reader, visible: visible, preference: panelPlacement)
+            reader: reader, visible: visible, preference: panelPlacement,
+            sideWidth: sideWidth, bottomHeight: bottomHeight)
         let mode: CompanionLayout.Mode
         let panel: CGRect
         switch placement {
@@ -98,7 +101,8 @@ public enum CompanionGeometry {
 
     private static func resolvePanel(
         reader: CGRect, visible: CGRect,
-        preference: CompanionSettings.PanelPlacement
+        preference: CompanionSettings.PanelPlacement,
+        sideWidth: CGFloat, bottomHeight: CGFloat
     ) -> ResolvedPlacement {
         // A manual choice is a preference, not a promise: a side drawer with
         // no room still has to fall back, or it would land off-screen.
@@ -111,8 +115,10 @@ public enum CompanionGeometry {
         case .bottom:
             preferSide = false
         }
-        let side = sideOutside(reader: reader, visible: visible)
-        let bottom = bottomOutside(reader: reader, visible: visible)
+        let side = sideOutside(
+            reader: reader, visible: visible, width: sideWidth)
+        let bottom = bottomOutside(
+            reader: reader, visible: visible, preferred: bottomHeight)
 
         switch (preferSide, side, bottom) {
         case (true, .some(let rect), _):
@@ -124,19 +130,23 @@ public enum CompanionGeometry {
         case (false, .some(let rect), nil):
             return .side(rect)
         case (true, nil, nil), (false, nil, nil):
-            if let rect = sideOverlay(reader: reader, visible: visible) {
+            if let rect = sideOverlay(
+                reader: reader, visible: visible, width: sideWidth)
+            {
                 return .sideOverlay(rect)
             }
             return .corner(
-                cornerOverlay(reader: reader, visible: visible))
+                cornerOverlay(
+                    reader: reader, visible: visible, width: sideWidth,
+                    height: bottomHeight))
         }
     }
 
     private static func sideOutside(
-        reader: CGRect, visible: CGRect
+        reader: CGRect, visible: CGRect, width preferred: CGFloat
     ) -> CGRect? {
         let width = min(
-            CompanionMetrics.sideWidth,
+            max(preferred, CompanionMetrics.minimumPanelWidth),
             max(CompanionMetrics.minimumPanelWidth, visible.width))
         let height = min(reader.height, visible.height)
         guard height >= CompanionMetrics.minimumPanelHeight else {
@@ -161,7 +171,7 @@ public enum CompanionGeometry {
     }
 
     private static func bottomOutside(
-        reader: CGRect, visible: CGRect
+        reader: CGRect, visible: CGRect, preferred: CGFloat
     ) -> CGRect? {
         let width = min(reader.width, visible.width)
         guard width >= CompanionMetrics.minimumPanelWidth else {
@@ -172,7 +182,9 @@ public enum CompanionGeometry {
         guard let x else { return nil }
         // The tallest drawer the screen allows, so a bottom panel earns its
         // space instead of squeezing the transcript to a few lines.
-        for preferred in CompanionMetrics.bottomHeights {
+        let heights = [preferred]
+            + CompanionMetrics.bottomHeights.filter { $0 < preferred }
+        for preferred in heights {
             let height = min(preferred, visible.height)
             guard height >= CompanionMetrics.minimumPanelHeight else {
                 continue
@@ -194,10 +206,10 @@ public enum CompanionGeometry {
     }
 
     private static func sideOverlay(
-        reader: CGRect, visible: CGRect
+        reader: CGRect, visible: CGRect, width preferred: CGFloat
     ) -> CGRect? {
         let width = min(
-            CompanionMetrics.sideWidth,
+            max(preferred, CompanionMetrics.minimumPanelWidth),
             min(reader.width, visible.width))
         let height = min(reader.height, visible.height)
         guard
@@ -213,21 +225,20 @@ public enum CompanionGeometry {
         return CGRect(x: x, y: y, width: width, height: height)
     }
 
-    private static func cornerOverlay(reader: CGRect, visible: CGRect)
-        -> CGRect
-    {
+    private static func cornerOverlay(
+        reader: CGRect, visible: CGRect, width preferredWidth: CGFloat,
+        height preferredHeight: CGFloat
+    ) -> CGRect {
         // A reader that shrank — or a stale frame read while another window is
         // being dragged — must not produce a panel smaller than the panel.
         // The minimum is the last resort, clamped into the visible frame.
         let width = max(
             min(CompanionMetrics.minimumPanelWidth, visible.width),
-            min(
-                CompanionMetrics.sideWidth,
-                min(max(reader.width, 0), visible.width)))
+            min(preferredWidth, min(max(reader.width, 0), visible.width)))
         let height = max(
             min(CompanionMetrics.minimumPanelHeight, visible.height),
             min(
-                CompanionMetrics.bottomHeight,
+                preferredHeight,
                 min(max(reader.height, 0), visible.height)))
         let x = min(reader.maxX - width, visible.maxX - width)
         let y = min(reader.maxY - height, visible.maxY - height)

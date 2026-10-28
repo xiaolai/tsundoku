@@ -51,11 +51,21 @@ public struct CompanionTextStyle: Equatable, Sendable {
     public let family: String?
     public let size: CGFloat
     public let lineSpacing: CGFloat
+    /// The face for Chinese characters. Latin keeps `family`, so neither
+    /// script is drawn in the other's fallback.
+    public let chineseFamily: String?
+    /// Extra spacing between Chinese characters, in points.
+    public let chineseTracking: CGFloat
 
-    public init(family: String?, size: CGFloat, lineSpacing: CGFloat) {
+    public init(
+        family: String?, size: CGFloat, lineSpacing: CGFloat,
+        chineseFamily: String? = nil, chineseTracking: CGFloat = 0
+    ) {
         self.family = family
         self.size = size
         self.lineSpacing = lineSpacing
+        self.chineseFamily = chineseFamily
+        self.chineseTracking = chineseTracking
     }
 }
 
@@ -72,7 +82,8 @@ public enum CompanionTypography {
     public static let mixedScriptLineHeight: CGFloat = 1.6
 
     public static func style(
-        from reader: ReaderStyle, scale: CGFloat = scale
+        from reader: ReaderStyle, scale: CGFloat = scale,
+        chineseFamily: String? = nil, chineseTracking: CGFloat = 0
     ) -> CompanionTextStyle {
         let size = clamp((reader.pointSize * scale).rounded(), sizeRange)
         let natural = naturalLineHeight(family: reader.family, size: size)
@@ -83,7 +94,8 @@ public enum CompanionTypography {
             ? reader.linePitch * scale : size * mixedScriptLineHeight
         let spacing = clamp((pitch - natural).rounded(), spacingRange)
         return CompanionTextStyle(
-            family: reader.family, size: size, lineSpacing: spacing)
+            family: reader.family, size: size, lineSpacing: spacing,
+            chineseFamily: chineseFamily, chineseTracking: chineseTracking)
     }
 
     /// The line height the chosen face draws at a size, before any extra

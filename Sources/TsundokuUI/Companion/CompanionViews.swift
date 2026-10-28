@@ -154,6 +154,12 @@ public struct CompanionSettingsSection: View {
         self.store = store
     }
 
+    private var chineseFace: Binding<String> {
+        Binding(
+            get: { store.settings.chineseFontName },
+            set: { store.settings.chineseFontName = $0 })
+    }
+
     public var body: some View {
         Section("Companion") {
             Picker("Panel placement", selection: $store.settings.panelPlacement)
@@ -180,6 +186,58 @@ public struct CompanionSettingsSection: View {
             .help(
                 "A drawer opens from the edge of the reader beside the panel; "
                     + "the direction follows the panel's placement.")
+            // The two sizes a reader actually adjusts: how wide a side panel
+            // is, and how tall a bottom one is. The other placement keeps its
+            // own dimension from the reader's window.
+            LabeledContent("Side panel width") {
+                HStack(spacing: 8) {
+                    Slider(
+                        value: $store.settings.panelSideWidth,
+                        in: 300...720, step: 20)
+                        .frame(width: 180)
+                    Text("\(Int(store.settings.panelSideWidth)) pt")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
+            LabeledContent("Bottom panel height") {
+                HStack(spacing: 8) {
+                    Slider(
+                        value: $store.settings.panelBottomHeight,
+                        in: 240...720, step: 20)
+                        .frame(width: 180)
+                    Text("\(Int(store.settings.panelBottomHeight)) pt")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Picker("Chinese face", selection: chineseFace) {
+                Text("Follow the reader").tag("")
+                ForEach(ChineseFace.allCases) { face in
+                    Text(face.displayName).tag(face.fontName)
+                }
+            }
+            .help(
+                "Chinese characters use this face; Latin keeps the reader's. "
+                    + "PingFang and Hiragino each ship in Simplified and "
+                    + "Traditional cuts.")
+            LabeledContent("Chinese tracking") {
+                HStack(spacing: 8) {
+                    Slider(
+                        value: $store.settings.chineseTracking,
+                        in: 0...0.6, step: 0.05)
+                        .frame(width: 180)
+                    Text(
+                        String(format: "%.2f pt", store.settings.chineseTracking)
+                    )
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .help(
+                "Extra space between Chinese characters, in points. Chinese "
+                    + "glyphs are full-width and set solid look crowded beside "
+                    + "Latin word spacing.")
             Toggle("Start at login", isOn: $store.settings.launchAtLogin)
             if !store.loginItemStatus.isEmpty
                 && !["Not registered", "Enabled"].contains(

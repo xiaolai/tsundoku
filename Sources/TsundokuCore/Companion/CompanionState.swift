@@ -155,7 +155,9 @@ public struct CompanionStateMachine: Sendable {
         let layout = CompanionGeometry.layout(
             reader: reader.frame, visible: visible,
             panelPlacement: settings.panelPlacement,
-            triggerPlacement: settings.triggerPlacement)
+            triggerPlacement: settings.triggerPlacement,
+            sideWidth: CGFloat(settings.panelSideWidth),
+            bottomHeight: CGFloat(settings.panelBottomHeight))
         return CompanionOutput(
             presentation: panelOpen ? .panel : .trigger,
             layout: layout)

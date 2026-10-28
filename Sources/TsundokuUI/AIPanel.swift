@@ -70,6 +70,19 @@ public final class AIPanelModel: ObservableObject {
     /// The reader's typography, when it could be sampled; nil keeps the
     /// panel's own body style.
     @Published public var textStyle: CompanionTextStyle?
+
+    /// The answer's own size: a little smaller than the panel's other text,
+    /// which follows the reader. Reading a long answer under a heading of the
+    /// same size flattens the hierarchy and tires the eye.
+    public var answerStyle: CompanionTextStyle? {
+        guard let style = textStyle else { return nil }
+        return CompanionTextStyle(
+            family: style.family,
+            size: max(12, (style.size * 0.92).rounded()),
+            lineSpacing: style.lineSpacing,
+            chineseFamily: style.chineseFamily,
+            chineseTracking: style.chineseTracking)
+    }
     /// The reading page's colours, when a capture established them; nil keeps
     /// the system window styling.
     @Published public var theme: CompanionTheme?
@@ -3573,9 +3586,18 @@ public struct AIPanelView: View {
                         .disabled(!model.canSave)
                     }
                 }
-                MarkdownText(text: turn.answer, style: model.textStyle)
+                // The answer sits in its own container: text flush to the
+                // panel edge reads as a wall, and a paragraph needs air on
+                // all four sides, not just a gap above it.
+                MarkdownText(text: turn.answer, style: model.answerStyle)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(
+                        Color.primary.opacity(0.035),
+                        in: RoundedRectangle(
+                            cornerRadius: 10, style: .continuous))
             }
         }
         .id(turn.id)

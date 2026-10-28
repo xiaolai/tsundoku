@@ -338,7 +338,12 @@ final class CompanionController {
                     self.window.fadeIn()
                 }
             } else {
-                if previous != .trigger {
+                // The content must match the frame every time, not only when
+                // the presentation changes. A collapse animation that is
+                // interrupted by the next tick leaves the panel's content
+                // hosted while the window is already trigger-sized — the
+                // stamp of clipped panel text.
+                if previous != .trigger || hostedModel != nil {
                     window.setContent(
                         AnyView(
                             CompanionTriggerView { [weak self] in
@@ -527,8 +532,18 @@ final class CompanionController {
                 for: reader, force: force)
             guard !Task.isCancelled, generation == self.styleGeneration
             else { return }
+            let chinese = settings.chineseFontName
+            let tracking = CGFloat(settings.chineseTracking)
             let style = settings.matchReaderTypography
-                ? sampled?.style.map { CompanionTypography.style(from: $0) }
+                ? sampled?.style.map {
+                    CompanionTypography.style(
+                        from: $0,
+                        chineseFamily: chinese.isEmpty ? nil : chinese,
+                        chineseTracking: tracking)
+                } ?? CompanionTextStyle(
+                    family: nil, size: 14, lineSpacing: 6,
+                    chineseFamily: chinese.isEmpty ? nil : chinese,
+                    chineseTracking: tracking)
                 : nil
             let theme = settings.matchReaderTheme
                 ? sampled?.theme.map(CompanionTheme.init)
