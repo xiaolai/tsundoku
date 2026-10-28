@@ -297,6 +297,39 @@ final class CompanionController {
 
     // MARK: - Presentation
 
+    /// The panel edge that faces the reader, which is the one that can move.
+    static func resizeEdge(
+        mode: CompanionLayout.Mode, panel: CGRect, reader: CGRect
+    ) -> CompanionPanelView.ResizeEdge? {
+        switch mode {
+        case .bottom: return .top
+        case .side, .sideOverlay:
+            return panel.minX >= reader.midX ? .leading : .trailing
+        case .corner:
+            return panel.minX >= reader.midX ? .leading : .trailing
+        }
+    }
+
+    /// Dragging the reader-facing edge changes the panel's remembered size.
+    private func resizePanel(by delta: CGFloat, mode: CompanionLayout.Mode) {
+        switch mode {
+        case .bottom:
+            settings.settings.panelBottomHeight = min(
+                max(settings.settings.panelBottomHeight + Double(delta), 240), 760)
+        default:
+            settings.settings.panelSideWidth = min(
+                max(settings.settings.panelSideWidth + Double(delta), 300), 760)
+        }
+        refreshLayout()
+    }
+
+    /// Recomputes the panel's frame from the current settings without waiting
+    /// for a reader event; a drag on the panel's edge is the common caller.
+    private func refreshLayout() {
+        let visible = NSScreen.main?.visibleFrame ?? .zero
+        apply(state.output(visible: visible), animated: false)
+    }
+
     private func apply(_ output: CompanionOutput, animated: Bool) {
         lastAppliedOutput = output
         presentationGeneration += 1
@@ -379,6 +412,12 @@ final class CompanionController {
                             },
                             onClose: { [weak self] in
                                 self?.closePanel()
+                            },
+                            resizeEdge: Self.resizeEdge(
+                                mode: layout.mode, panel: layout.panelFrame,
+                                reader: layout.readerFrame),
+                            onResize: { [weak self] delta in
+                                self?.resizePanel(by: delta, mode: layout.mode)
                             })),
                     shape: .roundedRect(
                         radius: CompanionMetrics.cornerRadius))

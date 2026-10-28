@@ -93,18 +93,65 @@ public struct CompanionPanelView: View {
     let compact: Bool
     let onActivate: () -> Void
     let onClose: () -> Void
+    /// Which edge of the window faces the reader. Dragging that edge resizes
+    /// the panel; the other three are flush with the screen or the reader.
+    let resizeEdge: ResizeEdge?
+    let onResize: (CGFloat) -> Void
+
+    public enum ResizeEdge: Sendable { case leading, trailing, top }
+
+    private var alignment: Alignment {
+        switch resizeEdge {
+        case .leading: .leading
+        case .trailing: .trailing
+        case .top: .top
+        case nil: .center
+        }
+    }
     /// The appearance this view inherited; a nil theme keeps it unchanged.
     @Environment(\.colorScheme) private var inheritedColorScheme
 
     public init(
         model: AIPanelModel, compact: Bool,
         onActivate: @escaping () -> Void,
-        onClose: @escaping () -> Void
+        onClose: @escaping () -> Void,
+        resizeEdge: ResizeEdge? = nil,
+        onResize: @escaping (CGFloat) -> Void = { _ in }
     ) {
         self.model = model
         self.compact = compact
         self.onActivate = onActivate
         self.onClose = onClose
+        self.resizeEdge = resizeEdge
+        self.onResize = onResize
+    }
+
+    /// A dragging strip on the reader-facing edge. Six points is the width a
+    /// pointer needs to hit without aiming; it sits inside the panel so it
+    /// cannot fall outside the window.
+    @ViewBuilder private var resizeHandle: some View {
+        if let resizeEdge {
+            Rectangle()
+                .fill(Color.clear)
+                .frame(
+                    width: resizeEdge == .top ? nil : 6,
+                    height: resizeEdge == .top ? 6 : nil)
+                .contentShape(Rectangle())
+                .onHover { inside in
+                    if inside { NSCursor.resizeLeftRight.push() }
+                    else { NSCursor.pop() }
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 1)
+                        .onChanged { value in
+                            onResize(
+                                resizeEdge == .top
+                                    ? -value.translation.height
+                                    : (resizeEdge == .leading
+                                        ? -value.translation.width
+                                        : value.translation.width))
+                        })
+        }
     }
 
     public var body: some View {
@@ -120,6 +167,9 @@ public struct CompanionPanelView: View {
             model: model, compact: compact, onActivate: onActivate,
             onClose: onClose
         )
+        .overlay(alignment: alignment) {
+            resizeHandle
+        }
         .environment(
             \.colorScheme,
             model.theme.map { $0.isDark ? .dark : .light }

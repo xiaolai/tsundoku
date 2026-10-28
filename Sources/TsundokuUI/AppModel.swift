@@ -457,6 +457,16 @@ public final class AppModel: ObservableObject {
         annotationSearch = ""
         annotationFilter = .mine
         section = .highlights
+        revealLibrary()
+    }
+
+    /// Every route into the library ends here. The caller is often the
+    /// nonactivating companion panel, which can set state that no visible
+    /// window renders; bringing the library forward is what turns a route
+    /// into something the reader can see. One helper, so a new route cannot
+    /// silently forget it.
+    private func revealLibrary() {
+        openLibraryWindow?()
     }
 
     /// Loads every AI card. The Cards view filters by book; loading all keeps
@@ -901,10 +911,7 @@ public final class AppModel: ObservableObject {
         section = .library
         bookWorkspaceID = book.asin
         bookWorkspaceSection = .chats
-        // The caller is usually the nonactivating companion panel, which can
-        // set state no visible window renders. Bringing the library forward
-        // is what makes "Manage Chats" do something the reader can see.
-        openLibraryWindow?()
+        revealLibrary()
         pendingChat = conversationID.map {
             PendingChat(
                 bookID: book.asin, conversationID: $0, turnID: turnID)
