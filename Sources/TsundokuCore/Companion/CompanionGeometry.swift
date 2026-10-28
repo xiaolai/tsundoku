@@ -216,12 +216,19 @@ public enum CompanionGeometry {
     private static func cornerOverlay(reader: CGRect, visible: CGRect)
         -> CGRect
     {
-        let width = min(
-            CompanionMetrics.sideWidth,
-            min(max(reader.width, 0), visible.width))
-        let height = min(
-            CompanionMetrics.bottomHeight,
-            min(max(reader.height, 0), visible.height))
+        // A reader that shrank — or a stale frame read while another window is
+        // being dragged — must not produce a panel smaller than the panel.
+        // The minimum is the last resort, clamped into the visible frame.
+        let width = max(
+            min(CompanionMetrics.minimumPanelWidth, visible.width),
+            min(
+                CompanionMetrics.sideWidth,
+                min(max(reader.width, 0), visible.width)))
+        let height = max(
+            min(CompanionMetrics.minimumPanelHeight, visible.height),
+            min(
+                CompanionMetrics.bottomHeight,
+                min(max(reader.height, 0), visible.height)))
         let x = min(reader.maxX - width, visible.maxX - width)
         let y = min(reader.maxY - height, visible.maxY - height)
         return CGRect(

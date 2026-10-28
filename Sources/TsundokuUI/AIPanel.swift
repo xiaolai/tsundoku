@@ -149,6 +149,10 @@ public final class AIPanelModel: ObservableObject {
             }
         }
     }
+    /// The question that is being answered right now. It leaves the composer
+    /// when the request starts, so the transcript shows what was asked
+    /// instead of the panel looking as if nothing happened.
+    @Published public private(set) var pendingQuestion: String?
     @Published public var question = "" {
         didSet {
             guard question.count != oldValue.count else { return }
@@ -1638,6 +1642,9 @@ public final class AIPanelModel: ObservableObject {
                     + "prepared; send again."
                 return
             }
+            self.pendingQuestion = text.isEmpty
+                ? requested.displayName : text
+            self.question = ""
             self.startRequest(
                 action: requested, question: text,
                 scope: effectiveScope, passage: passage,
@@ -2079,12 +2086,8 @@ public final class AIPanelModel: ObservableObject {
                     prompt: prompt, context: turnContext)
                 self.turns.append(turn)
                 self.transcriptMutationGeneration += 1
-                if self.question.trimmingCharacters(in: .whitespacesAndNewlines)
-                    == turn.question
-                {
-                    self.question = ""
-                }
                 self.provider = result.provider
+                self.pendingQuestion = nil
                 self.phase = .ready
                 self.persist(
                     turn, conversationAtSend: conversationAtSend,
@@ -2094,6 +2097,7 @@ public final class AIPanelModel: ObservableObject {
                     let self, generation == self.answerGeneration
                 else { return }
                 if AIProviderFailure.isCancelled(error) {
+                    self.pendingQuestion = nil
                     self.phase = .idle
                     return
                 }
@@ -3056,7 +3060,7 @@ public final class AIPanelModel: ObservableObject {
 
 public struct AIPanelView: View {
     @ObservedObject var model: AIPanelModel
-    @State private var composerHeight: CGFloat = 80
+    @State private var composerHeight: CGFloat = 66
     @State private var showCompactionSummary = false
     @State private var confirmRemoveCompaction = false
     @State private var confirmNewChat = false
@@ -3308,7 +3312,7 @@ public struct AIPanelView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    if model.turns.isEmpty {
+                    if model.turns.isEmpty, model.pendingQuestion == nil {
                         emptyState
                     } else {
                         if model.compaction != nil {
@@ -3317,6 +3321,10 @@ public struct AIPanelView: View {
                         ForEach(model.turns) { turn in
                             turnView(turn)
                         }
+                    }
+                    if let pending = model.pendingQuestion {
+                        PendingQuestionBubble(
+                            text: pending, compact: compact)
                     }
                     if model.phase == .loadingAnswer {
                         loadingRow
@@ -3659,7 +3667,7 @@ public struct AIPanelView: View {
                         model.scope == .selection
                             ? "Ask about the selection…"
                             : "Ask about this page…")
-                        .font(.system(size: 13))
+                        .font(.body)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 6)
@@ -4129,6 +4137,10 @@ public struct ActivatingTextView: NSViewRepresentable {
         textView.onActivate = onActivate
         textView.onSubmit = onSubmit
         textView.onEscape = onEscape
+        // An input-method composition (Chinese, Japanese, Korean) owns the
+        // text until it commits; assigning the string here cancels it, which
+        // is why the second character of a Chinese word could not be typed.
+        guard !textView.hasMarkedText() else { return }
         if textView.string != text {
             // Keep the caret: this update usually comes from sending a
             // message, not from typing, and a reset caret would jump.
@@ -4179,8 +4191,8 @@ public struct ActivatingTextView: NSViewRepresentable {
                 layout.ensureLayout(for: container)
                 let used = layout.usedRect(for: container).height
                 let desired = min(
-                    max(used + textView.textContainerInset.height * 2, 80),
-                    160)
+                    max(used + textView.textContainerInset.height * 2, 66),
+                    200)
                 self.heightUpdatePending = false
                 if abs(self.parent.height - desired) > 0.5 {
                     self.parent.height = desired
@@ -4286,7 +4298,12 @@ struct MarkdownText: View {
         return .system(size: pointSize)
     }
 
-    private var lineSpacing: CGFloat { style?.lineSpacing ?? 3 }
+    /// Mixed Chinese and Latin body text: 1.6× the type size in total,
+    /// SwiftUI's own leading being roughly 1.2×. A style from the reader
+    /// carries its own leading.
+    private var lineSpacing: CGFloat {
+        style?.lineSpacing ?? max(3, (size * 0.4).rounded())
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -4484,6 +4501,28 @@ struct QuickPageCaptureView: View {
             try data.write(to: url, options: .atomic)
         } catch {
             saveError = "Could not save the image: \(error)"
+        }
+    }
+}
+
+/// The question being answered, shown as the bubble it will become. The
+/// answer replaces it in place, so sending looks like sending rather than
+/// like waiting for a panel that did nothing.
+struct PendingQuestionBubble: View {
+    let text: String
+    let compact: Bool
+
+    var body: some View {
+        HStack {
+            Spacer(minLength: compact ? 24 : 48)
+            Text(text)
+                .textSelection(.enabled)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    Color.accentColor.opacity(0.16),
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .accessibilityLabel("Asked: \(text)")
         }
     }
 }

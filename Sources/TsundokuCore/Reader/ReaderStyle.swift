@@ -66,14 +66,22 @@ public enum CompanionTypography {
     public static let scale: CGFloat = 0.8
     public static let sizeRange: ClosedRange<CGFloat> = 13...20
     public static let spacingRange: ClosedRange<CGFloat> = 0...12
+    /// Line height for text that mixes Chinese with Latin. Chinese glyphs are
+    /// full-width and need more air than Latin; 1.6 satisfies both without
+    /// looking loose for English.
+    public static let mixedScriptLineHeight: CGFloat = 1.6
 
     public static func style(
         from reader: ReaderStyle, scale: CGFloat = scale
     ) -> CompanionTextStyle {
         let size = clamp((reader.pointSize * scale).rounded(), sizeRange)
         let natural = naturalLineHeight(family: reader.family, size: size)
-        let spacing = clamp(
-            (reader.linePitch * scale - natural).rounded(), spacingRange)
+        // A reader that publishes no line pitch (Kindle does not) still needs
+        // leading: mixed Chinese and Latin body text reads best near 1.6×,
+        // where Latin alone would sit at 1.4–1.5 and Chinese would crowd.
+        let pitch = reader.linePitch > 0
+            ? reader.linePitch * scale : size * mixedScriptLineHeight
+        let spacing = clamp((pitch - natural).rounded(), spacingRange)
         return CompanionTextStyle(
             family: reader.family, size: size, lineSpacing: spacing)
     }
