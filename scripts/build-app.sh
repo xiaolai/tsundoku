@@ -114,7 +114,6 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleIconName</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>${MIN_VERSION}</string>
-<key>LSUIElement</key><true/>
 <key>LSApplicationCategoryType</key><string>public.app-category.reference</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

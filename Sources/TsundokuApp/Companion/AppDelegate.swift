@@ -541,6 +541,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // unchanged value here would re-render, report again, and spin.
         guard visible != libraryVisible else { return }
         libraryVisible = visible
+        updateActivationPolicy()
         menuRevision += 1
         guard visible, let model = appModel else { return }
         TsundokuDiagnostics.shared.event(
@@ -559,6 +560,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         libraryVisible = false
         libraryWindow = nil
         appModel?.stopLivePolling()
+        updateActivationPolicy()
         menuRevision += 1
         TsundokuDiagnostics.shared.event("artifacts_window_closed")
     }
@@ -619,6 +621,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         guard visible != settingsVisible else { return }
         settingsVisible = visible
         if !visible { forgetSettingsWindow() }
+        updateActivationPolicy()
+        menuRevision += 1
+    }
+
+    /// A windowed app must be regular to have a menu bar; the status item and
+    /// companion panel keep working either way. Without this switch every
+    /// command in `TsundokuCommands` stays unreachable and the app never
+    /// appears in the Dock or ⌘-Tab.
+    private func updateActivationPolicy() {
+        let windowed = libraryVisible || settingsVisible
+        let policy: NSApplication.ActivationPolicy =
+            windowed ? .regular : .accessory
+        guard NSApp.activationPolicy() != policy else { return }
+        NSApp.setActivationPolicy(policy)
+        if windowed { NSApp.activate(ignoringOtherApps: true) }
         menuRevision += 1
     }
 
@@ -638,6 +655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         settingsWindow = nil
         windowBridge.setDismissSettings(nil)
+        updateActivationPolicy()
         menuRevision += 1
     }
 

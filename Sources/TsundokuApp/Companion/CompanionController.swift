@@ -133,6 +133,10 @@ final class CompanionController {
         guard state.panelOpen else { return }
         preparePanelModelIfNeeded()
         apply(output, animated: !wasPanel)
+        // The panel is nonactivating; without this the reader's keystrokes
+        // still go to Kindle after ⌥⌘K, where letters can trigger search or
+        // page navigation. Route the first keystroke into the composer.
+        activateForTyping()
     }
 
     /// Opens the companion and loads a stored conversation after the panel
