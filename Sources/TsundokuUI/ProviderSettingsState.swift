@@ -27,6 +27,7 @@ import TsundokuCore
     private var loadedProfileID: String?
     private let loadKey: (String) -> String
     private let writeKey: (String, String) -> OSStatus
+    private let removeKey: (String) -> Void
     private let forgetLegacyKey: () -> Void
     private let connectionTest: (AISettings) async throws -> String
     private let modelFetch:
@@ -45,6 +46,9 @@ import TsundokuCore
         saveKey: @escaping (String, String) -> OSStatus = {
             Keychain.set($0, account: AIService.keyAccount(for: $1))
         },
+        deleteKey: @escaping (String) -> Void = { profile in
+            Keychain.remove(account: AIService.keyAccount(for: profile))
+        },
         forgetLegacyKey: @escaping () -> Void = {
             Keychain.remove(account: AIService.legacyKeyAccount)
         },
@@ -60,6 +64,7 @@ import TsundokuCore
     ) {
         self.loadKey = loadKey
         self.writeKey = saveKey
+        self.removeKey = deleteKey
         self.forgetLegacyKey = forgetLegacyKey
         self.connectionTest = connectionTest
         self.modelFetch = modelFetch
@@ -67,6 +72,23 @@ import TsundokuCore
 
     public var hasUnsavedKey: Bool {
         loadedProfileID != nil && draftKey != savedKey
+    }
+
+    /// Whether the keychain holds a key for the loaded profile. An empty
+    /// draft is not the same thing: the reader may have typed and not saved.
+    public var hasStoredKey: Bool { !savedKey.isEmpty }
+
+    /// Remove the stored key for the loaded profile. The draft is cleared with
+    /// it, so the field cannot keep showing a secret the keychain no longer
+    /// has.
+    public func forgetKey() {
+        guard let profile = loadedProfileID else { return }
+        removeKey(profile)
+        savedKey = ""
+        draftKey = ""
+        keyStatus = "No key stored."
+        invalidateTest()
+        invalidateCatalogue()
     }
 
     public func loadKeyIfNeeded(profileID: String) {

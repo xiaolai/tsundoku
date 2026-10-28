@@ -2,10 +2,12 @@ import Foundation
 import SwiftUI
 
 public enum SettingsPane: String, CaseIterable, Identifiable {
-    case companion = "Companion", access = "Access", ai = "AI Provider", data = "Library Data", about = "About"
+    case general = "General", companion = "Companion", access = "Access",
+         ai = "AI Provider", data = "Library & Storage", about = "About"
     public var id: String { rawValue }
     public var symbol: String {
         switch self {
+        case .general: "gearshape"
         case .companion: "eyeglasses"
         case .access: "lock.shield"
         case .ai: "sparkles"

@@ -18,6 +18,7 @@ public struct SettingsView: View {
     @ObservedObject var navigation: SettingsNavigation
     @ObservedObject var providerState: ProviderSettingsState
     @ObservedObject var updateChecker: UpdateController
+    @State private var confirmRemoveKey = false
 
     public init(model: AppModel, pane: SettingsPane, navigation: SettingsNavigation,
         providerState: ProviderSettingsState,
@@ -119,6 +120,14 @@ public struct SettingsView: View {
                                     profileID: model.settings.httpProfileID)
                             }
                             .disabled(!providerState.hasUnsavedKey || providerState.testing)
+                            Button("Remove Key…") { confirmRemoveKey = true }
+                                .disabled(
+                                    !providerState.hasStoredKey
+                                        || providerState.testing)
+                                .help(
+                                    providerState.hasStoredKey
+                                        ? "Delete this service's key from the Keychain"
+                                        : "No key is stored for this service")
                         }
                     }
 
@@ -166,12 +175,6 @@ public struct SettingsView: View {
                     .help(
                         "Leave empty to answer in the language of the "
                             + "reader's question.")
-                    Toggle(
-                        "Record Pages While Tracking",
-                        isOn: $model.settings.sessionLogging
-                    )
-                    .disabled(providerState.testing)
-
                     if model.settings.provider == .http {
                         DisclosureGroup("Advanced") {
                             TextField(
@@ -259,91 +262,6 @@ public struct SettingsView: View {
                     }
                 }
 
-                Section("Conversation Context") {
-                    Toggle(
-                        "Compact automatically when context is large",
-                        isOn: $model.settings.autoCompact
-                    )
-                    TextField(
-                        "Compact at characters",
-                        value: $model.settings.compactThresholdCharacters,
-                        format: .number
-                    )
-                    .disabled(!model.settings.autoCompact)
-                    .help(
-                        "An approximate character count, not a model token "
-                            + "count. Manual Compact is always available.")
-                    Text(
-                        "Compaction summarizes older turns for the model. "
-                            + "Every original message stays in the transcript; "
-                            + "the current page, chapter or book is never "
-                            + "shortened.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-            }
-            if pane == .data {
-                Section("Library Data") {
-                    LabeledContent("Access") {
-                        IconButton("Review Library Access", systemImage: "lock.shield") {
-                            model.openAccess(focus: .library)
-                        }
-                    }
-                    LabeledContent("Archive") {
-                        Text(archiveSummary)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(BookSource.allCases, id: \.self) { source in
-                        LabeledContent(source.displayName) {
-                            VStack(alignment: .trailing, spacing: 4) {
-                                Text(
-                                    model.sourceHealth[source]
-                                        ?? "Not checked this session")
-                                Text(
-                                    "Last successful import: \(model.sourceLastImport[source]?.formatted(date: .abbreviated, time: .shortened) ?? "Unavailable")"
-                                ).font(.caption)
-                            }.foregroundStyle(.secondary).textSelection(
-                                .enabled)
-                        }
-                    }
-                    Text(
-                        "Local caches may not contain every cloud annotation."
-                    )
-                    .font(.caption).foregroundStyle(.secondary)
-                    LabeledContent("Last Import") {
-                        Text(TsundokuFormat.relative(model.lastImport))
-                            .foregroundStyle(.secondary)
-                    }
-                    LabeledContent("Export Folder") {
-                        HStack(spacing: 8) {
-                            Text(model.exportFolder.path)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            IconButton(
-                                "Choose…", systemImage: "folder.badge.plus",
-                                tooltip: "Choose export folder"
-                            ) {
-                                model.chooseExportFolder()
-                            }
-                        }
-                    }
-                    IconButton(
-                        "Import Now", systemImage: "arrow.triangle.2.circlepath"
-                    ) {
-                        model.importLibrary()
-                    }
-                    .controlSize(.small)
-                    .disabled(model.isImporting)
-                    if let importError = model.importError {
-                        Text(importError)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                }
-
                 Section("Chat History") {
                     if let storage = model.conversationStorage {
                         LabeledContent("Stored") {
@@ -401,6 +319,122 @@ public struct SettingsView: View {
                     }
                 }
 
+                Section("Conversation Context") {
+                    Toggle(
+                        "Compact automatically when context is large",
+                        isOn: $model.settings.autoCompact
+                    )
+                    TextField(
+                        "Compact at characters",
+                        value: $model.settings.compactThresholdCharacters,
+                        format: .number
+                    )
+                    .disabled(!model.settings.autoCompact)
+                    .help(
+                        "An approximate character count, not a model token "
+                            + "count. Manual Compact is always available.")
+                    Text(
+                        "Compaction summarizes older turns for the model. "
+                            + "Every original message stays in the transcript; "
+                            + "the current page, chapter or book is never "
+                            + "shortened.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    // The threshold is a guess until it is compared with what
+                    // the chosen model actually holds. When the catalogue
+                    // knows, the pane says so and offers the number.
+                    if let capacity = modelCharacterCapacity {
+                        HStack(spacing: 8) {
+                            Text(
+                                "This model holds about "
+                                    + "\(capacity.formatted()) characters; "
+                                    + "the threshold is "
+                                    + "\(model.settings.compactThresholdCharacters.formatted())."
+                            )
+                            .font(.caption)
+                            .foregroundStyle(
+                                model.settings.compactThresholdCharacters
+                                    > capacity
+                                    ? .orange : .secondary)
+                            Button("Match This Model") {
+                                model.settings.compactThresholdCharacters =
+                                    capacity
+                            }
+                            .controlSize(.small)
+                            .disabled(
+                                model.settings.compactThresholdCharacters
+                                    == capacity)
+                        }
+                    }
+                }
+
+            }
+            if pane == .general {
+                Section("General") {
+                    LabeledContent("Export Folder") {
+                        HStack(spacing: 8) {
+                            Text(model.exportFolder.path)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Button("Choose…") { model.chooseExportFolder() }
+                        }
+                    }
+                    Toggle(
+                        "Record Pages While Tracking",
+                        isOn: $model.settings.sessionLogging
+                    )
+                    Text(
+                        "Reading sessions follow the Kindle reader and are "
+                            + "stored in this Mac's archive."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            if pane == .data {
+                Section("Library & Storage") {
+                    LabeledContent("Access") {
+                        Button("Review Library Access") {
+                            model.openAccess(focus: .library)
+                        }
+                    }
+                    LabeledContent("Archive") {
+                        Text(archiveSummary)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(BookSource.allCases, id: \.self) { source in
+                        LabeledContent(source.displayName) {
+                            VStack(alignment: .trailing, spacing: 4) {
+                                Text(
+                                    model.sourceHealth[source]
+                                        ?? "Not checked this session")
+                                Text(
+                                    "Last successful import: \(model.sourceLastImport[source]?.formatted(date: .abbreviated, time: .shortened) ?? "Unavailable")"
+                                ).font(.caption)
+                            }.foregroundStyle(.secondary).textSelection(
+                                .enabled)
+                        }
+                    }
+                    Text(
+                        "Local caches may not contain every cloud annotation."
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
+                    LabeledContent("Last Import") {
+                        Text(TsundokuFormat.relative(model.lastImport))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let importError = model.importError {
+                        Text(importError)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    Button("Import Now") { model.importLibrary() }
+                        .controlSize(.small)
+                        .disabled(model.isImporting)
+                }
             }
             if pane == .about {
                 Section("About") {
@@ -461,6 +495,19 @@ public struct SettingsView: View {
             }
         }
         .alert(
+            "Remove the Stored Key?",
+            isPresented: $confirmRemoveKey
+        ) {
+            Button("Remove Key", role: .destructive) {
+                providerState.forgetKey()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "The key for this service is deleted from the Keychain. The "
+                    + "field is cleared; nothing else changes.")
+        }
+        .alert(
             "Delete All Saved Notes?",
             isPresented: Binding(
                 get: { model.reviewingNoteDeletion },
@@ -480,6 +527,16 @@ public struct SettingsView: View {
         }
         .task { if pane == .ai && model.settings.provider == .http { providerState.loadKeyIfNeeded(profileID: model.settings.httpProfileID) } }
         .task { if pane == .ai { model.refreshAINotes() } }
+    }
+
+    /// Roughly how many characters the chosen model can hold, from the
+    /// catalogue's context length. Three characters per token leaves room for
+    /// the answer; it is an estimate and the pane says so.
+    private var modelCharacterCapacity: Int? {
+        guard let context = providerState.models.first(where: {
+            $0.id == model.settings.model
+        })?.contextLength, context > 0 else { return nil }
+        return context * 3
     }
 
     /// The menu's selection, mapped onto the two stored fields.

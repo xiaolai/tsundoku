@@ -49,14 +49,14 @@ struct AccessSettingsView: View {
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("library-access-status")
                         Spacer()
-                        IconButton("Re-check Library Access", systemImage: "arrow.clockwise") {
+                        Button("Re-check Library Access") {
                             Task { await permissions.verifyLibraryAccess() }
                         }.disabled(permissions.libraryChecking || permissions.libraryRegistrationInProgress)
                         if permissions.libraryReady && !blocked {
-                            IconButton("Manage Full Disk Access", systemImage: "gearshape", action: permissions.openLibrarySettings)
+                            Button("Manage Full Disk Access…", action: permissions.openLibrarySettings)
                         }
                         if permissions.libraryReady {
-                            IconButton("Import Library", systemImage: "square.and.arrow.down") { model.requestLibraryImport() }
+                            Button("Import Library", action: model.requestLibraryImport)
                                 .disabled(model.isImporting || permissions.libraryRegistrationInProgress)
                         }
                     }
@@ -85,7 +85,7 @@ struct AccessSettingsView: View {
                                 Text("Drag Tsundoku into the Full Disk Access list.").font(.caption)
                             }
                             .draggable(appURL)
-                            IconButton("Show Tsundoku in Finder", systemImage: "folder") {
+                            Button("Show Tsundoku in Finder") {
                                 NSWorkspace.shared.activateFileViewerSelecting([appURL])
                             }
                         }
@@ -135,7 +135,7 @@ struct AccessSettingsView: View {
                         HStack {
                             Text(permissions.isChecking ? "Verifying…" : "Verify screen access").font(.caption).foregroundStyle(.secondary)
                             Spacer()
-                            IconButton("Verify Screen Recording", systemImage: "checkmark.shield", tooltip: "Verify screen access. macOS may ask for authorization.") {
+                            Button("Verify Screen Recording") {
                                 Task { await permissions.verifyAccess() }
                             }.disabled(permissions.isChecking)
                         }
@@ -161,7 +161,7 @@ struct AccessSettingsView: View {
                     HStack {
                         Text("Live Reader and Capture")
                         Spacer()
-                        IconButton("Re-check Reader Access", systemImage: "arrow.clockwise", action: { permissions.refresh() })
+                        Button("Re-check Reader Access") { permissions.refresh() }
                     }
                 } footer: {
                     Text("Only library imports need Full Disk Access.")
@@ -226,7 +226,7 @@ struct AccessSettingsView: View {
                 Text(title)
                 Spacer()
                 Text(status).font(.caption).foregroundStyle(.secondary)
-                if granted { IconButton("Manage \(title)", systemImage: "gearshape", action: manage) }
+                if granted { Button("Manage \(title)…", action: manage) }
                 else { Button("Request \(title)…", action: request).controlSize(.small) }
             }
             Text(detail).font(.caption).foregroundStyle(.secondary)

@@ -121,15 +121,9 @@ struct SettingsSceneView: View {
     /// The old controller sized each pane explicitly. A Settings scene opened
     /// before the model exists first lays out a spinner; without a fixed
     /// height the window stays at that height after the content arrives.
-    private func paneHeight(_ pane: SettingsPane) -> CGFloat {
-        switch pane {
-        case .companion: 330
-        case .access: 620
-        case .ai: 460
-        case .data: 480
-        case .about: 360
-        }
-    }
+    /// One height for every pane. Per-pane heights made the window jump on
+    /// every tab change, and the panes scroll anyway.
+    private func paneHeight(_ pane: SettingsPane) -> CGFloat { 620 }
 
     var body: some View {
         Group {
