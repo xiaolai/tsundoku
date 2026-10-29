@@ -96,6 +96,10 @@ struct BookCoverTile: View {
                     Image(nsImage: artwork)
                         .resizable()
                         .scaledToFill()
+                        // Constrained before clipping: a wide cover filled
+                        // beyond the tile, and the clip followed the filled
+                        // bounds rather than the tile's.
+                        .frame(width: width, height: height)
                         .clipShape(
                             RoundedRectangle(cornerRadius: 2.5,
                                 style: .continuous))
@@ -106,12 +110,16 @@ struct BookCoverTile: View {
                 radius: 1.2, x: 0, y: 0.8)
             .frame(width: width, height: height)
             .accessibilityHidden(true)
-            .task(id: book.asin) {
+            .task(id: BookCoverService.cacheKey(
+                for: book.asin, source: book.source)
+            ) {
                 // The row draws its spine first; the artwork replaces it when
                 // the store answers, and the store answers from memory for a
-                // row that scrolls back into view.
-                guard image == nil, loaded == nil, !book.asin.isEmpty
-                else { return }
+                // row that scrolls back into view. A view reused for another
+                // book must drop the previous artwork, or the inspector would
+                // show the wrong cover.
+                loaded = nil
+                guard image == nil, !book.asin.isEmpty else { return }
                 let resolved = await BookCoverStore.shared.thumbnail(
                     for: book)
                 guard !Task.isCancelled, let resolved else { return }
@@ -256,6 +264,15 @@ enum BookSort: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The direction a reader most often wants for this column: titles read
+    /// A→Z, and the point of sorting by last read is the most recent book.
+    var prefersDescending: Bool {
+        switch self {
+        case .title, .author: false
+        case .lastRead, .annotations: true
+        }
+    }
+
     func sorted(_ books: [Book], ascending: Bool) -> [Book] {
         let ordered: [Book]
         switch self {
@@ -280,15 +297,10 @@ enum BookSort: String, CaseIterable, Identifiable {
                 $0.userAnnotationCount < $1.userAnnotationCount
             }
         }
-        // Newest and most annotated first is the useful default; titles read
-        // A→Z. So "ascending" means what the chosen column means.
-        let natural: Bool = {
-            switch self {
-            case .title, .author: true
-            case .lastRead, .annotations: false
-            }
-        }()
-        return ascending == natural ? ordered : ordered.reversed()
+        // Ascending means ascending: A→Z, oldest first, fewest first. The
+        // useful default per column is `prefersDescending`, applied when the
+        // sort changes, not silently inside the comparison.
+        return ascending ? ordered : ordered.reversed()
     }
 }
 
@@ -424,29 +436,5 @@ struct BookHero: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 6)
-    }
-}
-
-/// A small capsule of state. Lowercase words in a bordered box read as
-/// labels; uppercase and a tint make them badges.
-struct Badge: View {
-    let text: String
-    var tint: Color?
-
-    var body: some View {
-        Text(text)
-            .font(.system(size: 8, weight: .semibold))
-            .tracking(0.4)
-            .foregroundStyle(
-                tint.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.tertiary))
-            .padding(.horizontal, 4)
-            .padding(.vertical, 1)
-            .overlay {
-                RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-                    .strokeBorder(
-                        tint.map { AnyShapeStyle($0.opacity(0.45)) }
-                            ?? AnyShapeStyle(.quaternary),
-                        lineWidth: 0.5)
-            }
     }
 }

@@ -115,7 +115,7 @@ public struct BookCoverService: Sendable {
         switch metadata.cover ?? .generated {
         case .kindlePhysicalId(let physicalID):
             if let result = download(
-                kindleURLs(physicalID: physicalID, asin: identifier),
+                Self.kindleURLs(physicalID: physicalID, asin: identifier),
                 cacheKey: key, into: directory,
                 warnings: &warnings)
             {
@@ -123,7 +123,7 @@ public struct BookCoverService: Sendable {
             }
         case .kindleASIN(let asin):
             if let result = download(
-                kindleURLs(physicalID: nil, asin: asin),
+                Self.kindleURLs(physicalID: nil, asin: asin),
                 cacheKey: key, into: directory,
                 warnings: &warnings)
             {
@@ -327,7 +327,12 @@ public struct BookCoverService: Sendable {
 
     // MARK: - URLs and cache
 
-    private func kindleURLs(physicalID: String?, asin: String?) -> [URL] {
+    /// The Kindle image endpoints for a book, in preference order. Public so
+    /// the library's cover store asks the same CDN the export does instead of
+    /// building its own copy of these rules.
+    public static func kindleURLs(
+        physicalID: String?, asin: String?
+    ) -> [URL] {
         var urls: [URL] = []
         if let physicalID, !physicalID.isEmpty,
             let encoded = physicalID.addingPercentEncoding(

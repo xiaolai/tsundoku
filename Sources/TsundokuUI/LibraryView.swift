@@ -244,6 +244,11 @@ public struct LibraryView: View {
                             Text(option.title).tag(option)
                         }
                     }
+                    .onChange(of: sort) { _, chosen in
+                        // A column's useful direction is a property of the
+                        // column, not a flip of whichever one was showing.
+                        ascending = !chosen.prefersDescending
+                    }
                     Divider()
                     Picker("Direction", selection: $ascending) {
                         Text("Ascending").tag(true)

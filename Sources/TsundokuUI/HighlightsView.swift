@@ -826,7 +826,6 @@ struct AnnotationCard: View {
     let row: AnnotationTableRow
     let selected: Bool
     let showBookMetadata: Bool
-    @Environment(\.colorScheme) private var colorScheme
     let readingSize: CGFloat
     let excerptLines: Int
     let select: () -> Void

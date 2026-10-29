@@ -96,7 +96,7 @@ struct LibraryLookTests {
 
     @Test("the source badge appears only when both readers are present")
     func sourceBadge() {
-        var model = AppModel(
+        let model = AppModel(
             archiveURL: FileManager.default.temporaryDirectory
                 .appendingPathComponent("look-\(UUID().uuidString).sqlite"),
             recoverReaderSettings: false)
@@ -131,5 +131,46 @@ struct LibraryLookTests {
                 to: "/tmp/hero-\(dark).png")
             #expect(png.count > 2_000)
         }
+    }
+}
+
+/// The sort menu says "Ascending" or "Descending", so the list has to mean
+/// it; the column's preferred direction is applied when the column is chosen.
+@Suite("Book order")
+struct BookSortTests {
+    private func book(_ title: String, _ author: String, annotations: Int,
+                      daysAgo: Double) -> Book {
+        Book(
+            asin: "B-\(title)", title: title, author: author, bookType: 10,
+            readState: 0,
+            lastView: Date().addingTimeInterval(-daysAgo * 86_400),
+            userAnnotationCount: annotations)
+    }
+
+    @Test("ascending is ascending for every column")
+    func ascendingMeansAscending() {
+        let books = [
+            book("B", "Zed", annotations: 5, daysAgo: 1),
+            book("A", "Amy", annotations: 1, daysAgo: 9),
+        ]
+        #expect(BookSort.title.sorted(books, ascending: true).map(\.title) == ["A", "B"])
+        #expect(BookSort.title.sorted(books, ascending: false).map(\.title) == ["B", "A"])
+        #expect(
+            BookSort.annotations.sorted(books, ascending: true)
+                .map(\.userAnnotationCount) == [1, 5])
+        #expect(
+            BookSort.annotations.sorted(books, ascending: false)
+                .map(\.userAnnotationCount) == [5, 1])
+        #expect(
+            BookSort.lastRead.sorted(books, ascending: true).map(\.title)
+                == ["A", "B"], "oldest first when ascending")
+    }
+
+    @Test("each column names the direction it is most often read in")
+    func preferredDirections() {
+        #expect(!BookSort.title.prefersDescending)
+        #expect(!BookSort.author.prefersDescending)
+        #expect(BookSort.lastRead.prefersDescending)
+        #expect(BookSort.annotations.prefersDescending)
     }
 }
