@@ -78,11 +78,26 @@ public final class AIPanelModel: ObservableObject {
         guard let style = textStyle else { return nil }
         return CompanionTextStyle(
             family: style.family,
-            size: max(12, (style.size * 0.92).rounded()),
+            size: max(12, (style.size * Type.answerScale).rounded()),
             lineSpacing: style.lineSpacing,
             chineseFamily: style.chineseFamily,
             chineseTracking: style.chineseTracking)
     }
+    /// A question's own size: under the answer, over the panel's chrome.
+    /// Without a reader style the panel falls back to body text.
+    public var questionStyle: CompanionTextStyle? {
+        guard let style = textStyle else {
+            return CompanionTextStyle(
+                family: nil, size: CGFloat(Type.bodySize), lineSpacing: 0)
+        }
+        return CompanionTextStyle(
+            family: style.family,
+            size: max(13, (style.size * Type.questionScale).rounded()),
+            lineSpacing: style.lineSpacing,
+            chineseFamily: style.chineseFamily,
+            chineseTracking: style.chineseTracking)
+    }
+
     /// The reading page's colours, when a capture established them; nil keeps
     /// the system window styling.
     @Published public var theme: CompanionTheme?
@@ -3460,7 +3475,10 @@ public struct AIPanelView: View {
                         }
                     }
                     if let pending = model.pendingQuestion {
-                        QuestionBubble(text: pending, compact: compact)
+                        QuestionBubble(
+                            text: pending, compact: compact,
+                            style: model.questionStyle)
+                            .id(Self.pendingBubbleID)
                     }
                     if model.phase == .loadingAnswer {
                         loadingRow
@@ -3481,8 +3499,20 @@ public struct AIPanelView: View {
             .onChange(of: model.phase) { _, phase in
                 if phase == .loadingAnswer { scrollToLatest(proxy) }
             }
+            // The question leaves the composer the moment it is sent, and the
+            // bubble that replaces it is appended below the transcript. With
+            // nothing scrolling to it, the composer covered it and the
+            // question appeared to vanish.
+            .onChange(of: model.pendingQuestion) { _, pending in
+                guard pending != nil else { return }
+                withAnimation(.easeOut(duration: Motion.quick)) {
+                    proxy.scrollTo(Self.pendingBubbleID, anchor: .bottom)
+                }
+            }
         }
     }
+
+    static let pendingBubbleID = "pending-question"
 
     private func scrollToLatest(_ proxy: ScrollViewProxy) {
         guard let last = model.turns.last else { return }
@@ -3636,7 +3666,8 @@ public struct AIPanelView: View {
             // the same question while it was still pending.
             VStack(alignment: .trailing, spacing: Space.p4) {
                 QuestionBubble(
-                    text: turn.promptLabel, compact: compact)
+                    text: turn.promptLabel, compact: compact,
+                    style: model.questionStyle)
                 if !turn.context.attachments.isEmpty {
                     Text(
                         turn.context.attachments.joined(separator: " · ")
@@ -3824,13 +3855,17 @@ public struct AIPanelView: View {
                     },
                     onEscape: { onClose?() },
                     onFocus: { composerFocused = $0 },
-                    scopeName: model.scope.shortName.lowercased())
+                    scopeName: model.scope.shortName.lowercased(),
+                    style: model.questionStyle)
                 if model.question.isEmpty, !composerFocused {
                     Text(
                         model.scope == .selection
                             ? "Ask about the selection…"
                             : "Ask about this page…")
-                        .font(.body)
+                        .font(
+                            .system(
+                                size: model.questionStyle?.size
+                                    ?? Type.bodySize))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, Space.p6)
                         .padding(.vertical, Space.p6)
@@ -4236,6 +4271,9 @@ public struct ActivatingTextView: NSViewRepresentable {
     /// VoiceOver says whether the question is about a page, a chapter or the
     /// whole book before anything is typed.
     var scopeName: String = "page"
+    /// The reader's face and the question's size, so what is typed and what
+    /// is shown as the asked bubble are the same text.
+    var style: CompanionTextStyle?
 
     public init(
         text: Binding<String>, height: Binding<CGFloat>,
@@ -4243,7 +4281,8 @@ public struct ActivatingTextView: NSViewRepresentable {
         onActivate: @escaping () -> Void,
         onEscape: @escaping () -> Void,
         onFocus: @escaping (Bool) -> Void = { _ in },
-        scopeName: String = "page"
+        scopeName: String = "page",
+        style: CompanionTextStyle? = nil
     ) {
         self._text = text
         self._height = height
@@ -4268,9 +4307,7 @@ public struct ActivatingTextView: NSViewRepresentable {
         textView.importsGraphics = false
         textView.isEditable = true
         textView.isSelectable = true
-        // A body font follows the system text size; 13 pt did not.
-        textView.font =
-            NSFont.preferredFont(forTextStyle: .body)
+        textView.font = Self.font(for: style)
         textView.setAccessibilityLabel(
             "Question about the \(scopeName)")
         textView.setAccessibilityHelp(
@@ -4291,11 +4328,27 @@ public struct ActivatingTextView: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onEscape = onEscape
         textView.onFocus = onFocus
+        // The panel's typography follows the reader; the composer had kept
+        // the system body font, so it was smaller than the answers beside it.
+        let font = Self.font(for: style)
+        if textView.font != font { textView.font = font }
         textView.delegate = context.coordinator
         scrollView.documentView = textView
         context.coordinator.textView = textView
         context.coordinator.updateHeight()
         return scrollView
+    }
+
+    /// The reader's face at the question's size; the system body when there
+    /// is no reader style to copy.
+    static func font(for style: CompanionTextStyle?) -> NSFont {
+        let size = style?.size ?? Type.bodySize
+        if let family = style?.family,
+            let font = NSFont(name: family, size: size)
+        {
+            return font
+        }
+        return NSFont.systemFont(ofSize: size)
     }
 
     public func updateNSView(_ scrollView: NSScrollView, context: Context) {
@@ -4306,6 +4359,10 @@ public struct ActivatingTextView: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onEscape = onEscape
         textView.onFocus = onFocus
+        // The panel's typography follows the reader; the composer had kept
+        // the system body font, so it was smaller than the answers beside it.
+        let font = Self.font(for: style)
+        if textView.font != font { textView.font = font }
         // An input-method composition (Chinese, Japanese, Korean) owns the
         // text until it commits; assigning the string here cancels it, which
         // is why the second character of a Chinese word could not be typed.
@@ -4744,12 +4801,24 @@ struct QuickPageCaptureView: View {
 struct QuestionBubble: View {
     let text: String
     let compact: Bool
+    /// The panel's question style: the reader's face at a size just under
+    /// the answer's, so the reader's own words are not the smallest thing on
+    /// screen.
+    var style: CompanionTextStyle?
+
+    private var font: Font {
+        let size = style?.size ?? Type.bodySize
+        guard let family = style?.family else {
+            return .system(size: size)
+        }
+        return .custom(family, size: size)
+    }
 
     var body: some View {
         HStack {
             Spacer(minLength: compact ? 24 : 48)
             Text(text)
-                .font(compact ? .callout : .body)
+                .font(font)
                 .textSelection(.enabled)
                 .padding(.horizontal, Space.p12)
                 .padding(.vertical, Space.p8)

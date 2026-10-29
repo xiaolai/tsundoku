@@ -75,6 +75,8 @@ public enum Radius {
 /// The type ramp. Sizes are the ones the app shipped with; the names are the
 /// roles, so a call site says what the text is for.
 public enum Type {
+    /// The body size, for code that needs the number rather than a `Font`.
+    public static let bodySize: CGFloat = 13
     private static func font(
         _ size: CGFloat, _ weight: Font.Weight
     ) -> Font {
@@ -112,6 +114,15 @@ public enum Type {
     public static func digits(_ size: CGFloat) -> Font {
         .system(size: size, weight: .regular).monospacedDigit()
     }
+
+    /// An answer sits this far below the panel's own text: a long answer at
+    /// the same size as its heading flattens the hierarchy.
+    public static let answerScale: CGFloat = 0.92
+    /// A question sits between the answer and the panel's chrome. The
+    /// reader's own words were the smallest thing in the panel — the default
+    /// body size, unchanged by the reader's typography — which made the
+    /// question look like a caption on the answer.
+    public static let questionScale: CGFloat = 0.88
 
     /// The reading size, which the reader sets, clamped to the ramp's range.
     public static func reading(_ size: CGFloat) -> Font {
