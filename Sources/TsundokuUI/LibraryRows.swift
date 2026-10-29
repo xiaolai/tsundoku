@@ -16,6 +16,8 @@ struct BookCoverTile: View {
     var width: CGFloat = 28
     var height: CGFloat = 40
     @Environment(\.colorScheme) private var scheme
+    /// Artwork, once it has been resolved. Until then the spine stands in.
+    @State private var loaded: NSImage?
 
     private var initials: String {
         let letters = book.title
@@ -60,6 +62,8 @@ struct BookCoverTile: View {
             brightness: scheme == .dark ? 0.30 : 0.50)
     }
 
+    private var artwork: NSImage? { image ?? loaded }
+
     var body: some View {
         RoundedRectangle(cornerRadius: 2.5, style: .continuous)
             .fill(
@@ -74,7 +78,7 @@ struct BookCoverTile: View {
                     .padding(.leading, 3.5)
             }
             .overlay(alignment: .bottomLeading) {
-                if image == nil {
+                if artwork == nil {
                     Text(initials)
                         .font(.system(size: height * 0.21, weight: .bold))
                         .foregroundStyle(.white.opacity(0.88))
@@ -88,8 +92,8 @@ struct BookCoverTile: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 2.5, style: .continuous))
             .overlay {
-                if let image {
-                    Image(nsImage: image)
+                if let artwork {
+                    Image(nsImage: artwork)
                         .resizable()
                         .scaledToFill()
                         .clipShape(
@@ -102,6 +106,20 @@ struct BookCoverTile: View {
                 radius: 1.2, x: 0, y: 0.8)
             .frame(width: width, height: height)
             .accessibilityHidden(true)
+            .task(id: book.asin) {
+                // The row draws its spine first; the artwork replaces it when
+                // the store answers, and the store answers from memory for a
+                // row that scrolls back into view.
+                guard image == nil, loaded == nil, !book.asin.isEmpty
+                else { return }
+                let resolved = await BookCoverStore.shared.thumbnail(
+                    for: book)
+                guard !Task.isCancelled, let resolved else { return }
+                loaded = NSImage(
+                    cgImage: resolved,
+                    size: NSSize(
+                        width: resolved.width, height: resolved.height))
+            }
     }
 }
 
