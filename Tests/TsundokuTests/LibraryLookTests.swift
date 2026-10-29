@@ -46,7 +46,9 @@ struct LibraryLookTests {
         return data
     }
 
-    private func card(_ title: String, _ identity: String) -> some View {
+    private func card(
+        _ title: String, _ identity: String, sheets: Int = 0
+    ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).font(.system(size: 13, weight: .semibold))
             Text("A passage from the book, set at the reading size.")
@@ -55,7 +57,7 @@ struct LibraryLookTests {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .cardSurface(identity: identity)
+        .cardSurface(identity: identity, sheets: sheets)
     }
 
     @Test("cards in a grid")
@@ -65,10 +67,12 @@ struct LibraryLookTests {
                 GridItem(.adaptive(minimum: 200, maximum: 260), spacing: 16)
             ], spacing: 16
         ) {
+            // A book with one card: no stack, because there is nothing behind
+            // it. The next three are one book with three cards.
             card("Explain", "card-1")
-            card("Translate", "card-2")
-            card("Summarize", "card-3")
-            card("Key terms", "card-4")
+            card("Translate", "card-2", sheets: 2)
+            card("Summarize", "card-3", sheets: 2)
+            card("Key terms", "card-4", sheets: 2)
         }
         _ = try render(
             grid, size: CGSize(width: 600, height: 320),
@@ -172,5 +176,37 @@ struct BookSortTests {
         #expect(!BookSort.author.prefersDescending)
         #expect(BookSort.lastRead.prefersDescending)
         #expect(BookSort.annotations.prefersDescending)
+    }
+}
+
+/// A stack is a statement about what is behind the card. A card with nothing
+/// behind it must not claim otherwise.
+@Suite("Card stacks")
+struct CardStackTests {
+    private func row(_ id: String, asin: String) -> AnnotationTableRow {
+        AnnotationTableRow(
+            annotation: Annotation(
+                id: id, asin: asin, bookTitle: "T", kind: .highlight,
+                provenance: .user, text: "a passage long enough to show"),
+            bookTitle: "T", author: "A")
+    }
+
+    @Test("sheets count the siblings, not the card itself")
+    func sheetsCountSiblings() {
+        let rows = [
+            row("a", asin: "BOOK1"), row("b", asin: "BOOK1"),
+            row("c", asin: "BOOK1"), row("d", asin: "BOOK2"),
+        ]
+        let sheets = AnnotationTableRow.sheetsByRow(rows)
+        #expect(sheets["a"] == 2)
+        #expect(sheets["b"] == 2)
+        #expect(sheets["c"] == 2)
+        #expect(sheets["d"] == nil, "a lone card has nothing behind it")
+    }
+
+    @Test("a card on its own has no sheets")
+    func loneCard() {
+        let sheets = AnnotationTableRow.sheetsByRow([row("solo", asin: "B")])
+        #expect(sheets.isEmpty)
     }
 }

@@ -38,6 +38,10 @@ enum CardPaper {
 private struct CardSurface: ViewModifier {
     let identity: String
     let selected: Bool
+    /// How many sheets belong under this card: the cards behind it. A card
+    /// with no siblings has none — a stack under a single card promises
+    /// something that is not there.
+    let sheets: Int
     @Environment(\.colorScheme) private var scheme
 
     private var rule: Color {
@@ -85,8 +89,12 @@ private struct CardSurface: ViewModifier {
                 // down, and edged — without the edge they vanish into a
                 // window the same colour as the paper.
                 ZStack {
-                    sheet(shape, inset: 12, drop: 12, shade: 0.045)
-                    sheet(shape, inset: 6, drop: 6, shade: 0.075)
+                    if sheets >= 2 {
+                        sheet(shape, inset: 12, drop: 12, shade: 0.045)
+                    }
+                    if sheets >= 1 {
+                        sheet(shape, inset: 6, drop: 6, shade: 0.075)
+                    }
                 }
             }
             .overlay {
@@ -106,9 +114,18 @@ private struct CardSurface: ViewModifier {
 }
 
 extension View {
-    /// One card's paper: a coloured rule, a soft shadow and a small stack
-    /// underneath. `identity` is stable per card, so its colour is too.
-    func cardSurface(identity: String, selected: Bool = false) -> some View {
-        modifier(CardSurface(identity: identity, selected: selected))
+    /// One card's paper: a coloured rule, a soft shadow, and as many sheets
+    /// underneath as there are cards behind it.
+    ///
+    /// `identity` is stable per card, so its colour is too. `sheets` is 0 for
+    /// a card on its own: a stack is a statement about what is behind the
+    /// card, and a lone card has nothing there.
+    func cardSurface(
+        identity: String, selected: Bool = false, sheets: Int = 0
+    ) -> some View {
+        modifier(
+            CardSurface(
+                identity: identity, selected: selected,
+                sheets: min(2, max(0, sheets))))
     }
 }

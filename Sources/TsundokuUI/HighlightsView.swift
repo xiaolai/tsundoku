@@ -284,7 +284,8 @@ public struct HighlightsView: View {
     private func cardPage(
         _ rows: [AnnotationTableRow], ai: [AICard]
     ) -> some View {
-        ScrollViewReader { proxy in
+        let sheets = AnnotationTableRow.sheetsByRow(rows)
+        return ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     if !ai.isEmpty {
@@ -302,6 +303,7 @@ public struct HighlightsView: View {
                             ForEach(rows) { row in
                                 AnnotationCard(
                                     row: row,
+                                    sheets: sheets[row.id] ?? 0,
                                     selected: selection.contains(row.id),
                                     showBookMetadata: bookID == nil,
                                     readingSize: CGFloat(
@@ -364,7 +366,11 @@ public struct HighlightsView: View {
     }
 
     private func aiCardSection(_ cards: [AICard]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        // How many cards share a book: a card with siblings shows them as
+        // sheets, a card on its own shows none.
+        let perBook = Dictionary(grouping: cards, by: \.bookKey)
+            .mapValues(\.count)
+        return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 6) {
                 Label("AI Cards", systemImage: "sparkles")
                     .font(.headline)
@@ -380,7 +386,8 @@ public struct HighlightsView: View {
             ) {
                 ForEach(cards) { card in
                     AICardView(
-                        card: card, book: effectiveBook, model: model,
+                        card: card, sheets: (perBook[card.bookKey] ?? 1) - 1,
+                        book: effectiveBook, model: model,
                         readingSize: CGFloat(max(13, min(28, readingSize))),
                         excerptLines: max(3, min(10, excerptLines)))
                 }
@@ -680,6 +687,26 @@ struct AnnotationTableRow: Identifiable {
     let annotation: Annotation
     let bookTitle: String
     let author: String
+
+    /// How many sheets each card shows: its siblings for the same book. A
+    /// card on its own gets none — a pile under a single card promises what
+    /// is not there.
+    ///
+    /// It lives here rather than on the view because a static member of a
+    /// SwiftUI `View` traps when a test process calls it.
+    static func sheetsByRow(
+        _ rows: [AnnotationTableRow]
+    ) -> [String: Int] {
+        var result: [String: Int] = [:]
+        for siblings in Dictionary(
+            grouping: rows, by: { $0.annotation.asin }).values
+        {
+            let extra = siblings.count - 1
+            guard extra > 0 else { continue }
+            for row in siblings { result[row.id] = extra }
+        }
+        return result
+    }
     var id: String { annotation.id }
     var kind: String {
         annotation.passageText != nil && annotation.personalNote != nil
@@ -699,6 +726,8 @@ struct AnnotationTableRow: Identifiable {
 /// inspector and export paths: its content is AI-generated, not a highlight.
 struct AICardView: View {
     let card: AICard
+    /// The other cards for this book, shown as sheets under this one.
+    var sheets: Int = 0
     let book: Book?
     @ObservedObject var model: AppModel
     let readingSize: CGFloat
@@ -818,12 +847,15 @@ struct AICardView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .cardSurface(identity: "ai-\(card.id)")
+        .cardSurface(identity: "ai-\(card.id)", sheets: sheets)
     }
 }
 
 struct AnnotationCard: View {
     let row: AnnotationTableRow
+    /// The cards behind this one for the same book; a card on its own has
+    /// none, and shows no stack.
+    let sheets: Int
     let selected: Bool
     let showBookMetadata: Bool
     let readingSize: CGFloat
@@ -929,7 +961,8 @@ struct AnnotationCard: View {
         .padding(16).frame(
             maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading
         )
-        .cardSurface(identity: self.row.id, selected: selected)
+        .cardSurface(
+            identity: self.row.id, selected: selected, sheets: sheets)
         // Selection lives on the card's own surface, not on its text: a
         // drag across a passage must select the words, not the card.
         .background(
