@@ -631,6 +631,18 @@ public final class AppModel: ObservableObject {
     /// both count; the Chats tab lists them and marks the weaker ones unfiled.
     /// Capture-fingerprint keys are not counted here because they need the
     /// capture index, which the column must not read per row.
+    /// Whether the library holds books from both readers. A row names its
+    /// source only when the answer matters; when everything came from one
+    /// reader the badge repeats what the window already says.
+    public var hasBothSources: Bool {
+        var seen: Set<BookSource> = []
+        for book in books {
+            seen.insert(book.source)
+            if seen.count > 1 { return true }
+        }
+        return false
+    }
+
     public func conversationCount(for book: Book) -> Int {
         let keys = ConversationFiling.keys(
             for: book, captureFingerprints: [])

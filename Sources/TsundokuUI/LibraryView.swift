@@ -4,7 +4,8 @@ import TsundokuCore
 public struct LibraryView: View {
     @ObservedObject var model: AppModel
     @State private var scope: Scope = .all
-    @State private var sortOrder = [KeyPathComparator(\Book.title)]
+    @State private var sort: BookSort = .title
+    @State private var ascending = true
     @AppStorage("library.inspector") private var showInspector = false
 
     public init(model: AppModel) {
@@ -46,7 +47,7 @@ public struct LibraryView: View {
     }
 
     private var rows: [Book] {
-        var result = model.filteredBooks.filter { book in
+        let result = model.filteredBooks.filter { book in
             switch scope {
             case .all: true
             case .read: book.isRead
@@ -54,8 +55,7 @@ public struct LibraryView: View {
             case .annotated: book.userAnnotationCount > 0
             }
         }
-        result.sort(using: sortOrder)
-        return result
+        return sort.sorted(result, ascending: ascending)
     }
 
     public var body: some View {
@@ -137,31 +137,48 @@ public struct LibraryView: View {
 
     /// The footer's count line. Built here rather than inline because the
     /// whole table body is already at the type checker's limit.
-    private func bookCountLine(_ count: Int) -> String {
-        var parts = ["\(count.formatted()) books"]
+    private func bookCountLine(_ rows: [Book]) -> String {
+        let read = rows.filter(\.isRead).count
+        let annotated = rows.filter { $0.userAnnotationCount > 0 }.count
+        var parts = [
+            "\(rows.count.formatted()) "
+                + (rows.count == 1 ? "book" : "books"),
+        ]
+        if read > 0 {
+            parts.append("\(read.formatted()) read")
+        }
+        if annotated > 0 {
+            parts.append("\(annotated.formatted()) annotated")
+        }
         if model.sourceFilter != .all { parts.append(model.sourceFilter.title) }
         if scope != .all { parts.append(scope.title) }
         return parts.joined(separator: " · ")
     }
 
+    /// The empty shelf, on its own: the type checker gives up on it when it
+    /// sits inside the same expression as the list.
+    private var emptyLibrary: some View {
+        LibraryEmptyState(
+            model: model, annotations: false,
+            hasImportedRecords: !model.books.isEmpty
+        ) {
+            resetFilters()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private var bookList: some View {
         // One filtered, sorted snapshot per evaluation: the empty check, the
-        // table and the footer all read the same rows.
+        // list and the footer all read the same rows.
         let rows = self.rows
         return Group {
             if rows.isEmpty {
-                LibraryEmptyState(
-                    model: model, annotations: false,
-                    hasImportedRecords: !model.books.isEmpty
-                ) {
-                    resetFilters()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
+                emptyLibrary
             } else {
-                BookTable(
-                    model: model, rows: rows, sortOrder: $sortOrder,
-                    countLine: bookCountLine(rows.count),
+                BookList(
+                    model: model, rows: rows,
+                    countLine: bookCountLine(rows),
+                    showsSource: model.hasBothSources,
                     resetFilters: resetFilters)
             }
         }
@@ -218,6 +235,25 @@ public struct LibraryView: View {
                 }
                 .help("Filter the book list")
             }
+            ToolbarItem {
+                // A list has no column headers to click, so the order says
+                // what it is and the menu is where it changes.
+                Menu {
+                    Picker("Sort By", selection: $sort) {
+                        ForEach(BookSort.allCases) { option in
+                            Text(option.title).tag(option)
+                        }
+                    }
+                    Divider()
+                    Picker("Direction", selection: $ascending) {
+                        Text("Ascending").tag(true)
+                        Text("Descending").tag(false)
+                    }
+                } label: {
+                    Label(sort.title, systemImage: "arrow.up.arrow.down")
+                }
+                .help("Sort the book list")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     showInspector.toggle()
@@ -255,65 +291,32 @@ struct BookDetailView: View {
             if let book = model.selectedBook {
                 List {
                     Section {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(book.title)
-                                .font(.title2)
-                                .textSelection(.enabled)
-                            Text(
-                                book.author.isEmpty
-                                    ? "Unknown author" : book.author
-                            )
-                            .foregroundStyle(.secondary)
-                            HStack(spacing: 12) {
-                                if book.isRead {
-                                    Label(
-                                        "Read",
-                                        systemImage: "checkmark.circle")
-                                }
-                                if book.downloaded {
-                                    Label(
-                                        "Downloaded",
-                                        systemImage: "arrow.down.circle")
-                                }
-                                if book.isFixedLayout {
-                                    Label(
-                                        "Fixed layout",
-                                        systemImage: "rectangle")
-                                }
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 4)
+                        BookHero(
+                            book: book,
+                            annotations: book.userAnnotationCount,
+                            messages: model.conversationCount(for: book))
                     }
 
                     Section("Details") {
+                        LabeledContent("Last Read") {
+                            Text(TsundokuFormat.date(book.lastView))
+                                .foregroundStyle(.secondary)
+                        }
+                        if let progress = book.progress {
+                            // A bar says "how far in" at a glance; a
+                            // percentage makes the reader do the arithmetic.
+                            ProgressView(value: max(0, min(1, progress))) {
+                                Text("Progress").font(.callout)
+                            }
+                            .progressViewStyle(.linear)
+                        }
                         LabeledContent(
                             book.source == .appleBooks ? "Asset ID" : "ASIN"
                         ) {
                             Text(book.asin)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
-                        }
-                        LabeledContent("Source") {
-                            Text(book.source.displayName)
-                        }
-                        LabeledContent("Last Read") {
-                            Text(TsundokuFormat.date(book.lastView))
-                        }
-                        if let progress = book.progress {
-                            LabeledContent("Progress") {
-                                Text(
-                                    progress.formatted(
-                                        .percent.precision(
-                                            .fractionLength(0))))
-                            }
-                        }
-                        LabeledContent("Annotations") {
-                            Text("\(book.userAnnotationCount)")
-                        }
-                        LabeledContent("Messages") {
-                            Text(
-                                "\(model.conversationCount(for: book))")
                         }
                     }
 
@@ -377,111 +380,3 @@ struct BookDetailView: View {
 
 }
 
-extension Book {
-    fileprivate var lastReadSort: Date { lastView ?? .distantPast }
-}
-
-/// The books table on its own. The containing view's body is already at the
-/// type checker's limit, and a table with six columns plus a footer is where
-/// it gives up.
-private struct BookTable: View {
-    @ObservedObject var model: AppModel
-    let rows: [Book]
-    @Binding var sortOrder: [KeyPathComparator<Book>]
-    let countLine: String
-    let resetFilters: () -> Void
-
-    var body: some View {
-        Table(
-            rows, selection: $model.selectedBookID,
-            sortOrder: $sortOrder
-        ) {
-            TableColumn("Title", value: \.title) { book in
-                HStack(spacing: 6) {
-                    // Read state was filterable but invisible; the title
-                    // carries it, so a filter result explains itself.
-                    Image(
-                        systemName: book.isRead
-                            ? "checkmark.circle.fill" : "circle"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(
-                        book.isRead ? AnyShapeStyle(.tint)
-                            : AnyShapeStyle(.tertiary))
-                    .accessibilityLabel(book.isRead ? "Read" : "Unread")
-                    Text(book.title)
-                }
-            }
-            .width(min: 160, ideal: 250)
-
-            TableColumn("Author", value: \.author) { book in
-                Text(book.author.isEmpty ? "Unknown author" : book.author)
-                    .foregroundStyle(
-                        book.author.isEmpty ? .secondary : .primary)
-            }
-            .width(min: 80, ideal: 140)
-
-            TableColumn(
-                "Annotations", value: \.userAnnotationCount
-            ) { book in
-                Text("\(book.userAnnotationCount)")
-                    .monospacedDigit()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(min: 66, ideal: 84)
-
-            TableColumn("Source", value: \.source.rawValue) { book in
-                Text(book.source.displayName)
-            }
-            .width(80)
-
-            TableColumn("Messages") { book in
-                let count = model.conversationCount(for: book)
-                Text(count == 0 ? "—" : "\(count)")
-                    .monospacedDigit()
-                    .foregroundStyle(count == 0 ? .secondary : .primary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(66)
-
-            TableColumn("Last Read", value: \.lastReadSort) { book in
-                Text(TsundokuFormat.date(book.lastView))
-                    .monospacedDigit()
-            }
-            .width(82)
-        }
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
-        .scrollContentBackground(.hidden)
-        .contextMenu(forSelectionType: String.self) { ids in
-            Button("Open Annotations") {
-                model.bookWorkspaceSection = .annotations
-                model.bookWorkspaceID = ids.first
-            }
-            .disabled(ids.count != 1)
-            Button("Open Chats") {
-                model.bookWorkspaceSection = .chats
-                model.bookWorkspaceID = ids.first
-            }
-            .disabled(ids.count != 1)
-        } primaryAction: { ids in
-            model.bookWorkspaceSection = .annotations
-            model.bookWorkspaceID = ids.first
-        }
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Text(countLine)
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                IconButton("Open Annotations", systemImage: "book.pages") {
-                    model.bookWorkspaceSection = .annotations
-                    model.bookWorkspaceID = model.selectedBookID
-                }
-                .disabled(model.selectedBookID == nil)
-                IconButton(
-                    "Reset Filters",
-                    systemImage: "line.3.horizontal.decrease.circle"
-                ) { resetFilters() }
-            }.padding(10)
-        }
-    }
-}
