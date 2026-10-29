@@ -92,7 +92,7 @@ public struct HighlightsView: View {
         let ai = aiCards
         let ids = snapshot.map(\.id)
         let current = snapshot.first { selection.contains($0.id) }
-        VStack(spacing: 0) {
+        VStack(spacing: Space.p0) {
             if !model.annotations.isEmpty || !model.aiCards.isEmpty
                 || !model.annotationSearch.isEmpty
                 || model.annotationSourceFilter != .all
@@ -114,7 +114,7 @@ public struct HighlightsView: View {
                 }
             } else if presentation == "list" && !snapshot.isEmpty {
                 if !ai.isEmpty {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.p8) {
                         Label(
                             ai.count == 1
                                 ? "1 AI card is shown in Cards"
@@ -126,15 +126,16 @@ public struct HighlightsView: View {
                             .controlSize(.small)
                         Spacer()
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, Space.p12)
+                    .padding(.vertical, Space.p6)
                 }
                 annotationTable(snapshot)
             } else {
                 cardPage(snapshot, ai: ai)
             }
         }
-        .frame(minWidth: 320, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
+        .frame(minWidth: Size.detailMinWidth, maxWidth: .infinity,
+                       maxHeight: .infinity, alignment: .top)
         .background {
             InspectorPanel(
                 isPresented: $showInspector, title: "Annotation Inspector"
@@ -198,7 +199,7 @@ public struct HighlightsView: View {
     }
 
     private func scopeBar(count: Int) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Space.p8) {
             if book == nil, let bookID {
                 HStack {
                     Label(
@@ -218,9 +219,9 @@ public struct HighlightsView: View {
             LazyVGrid(
                 columns: [
                     GridItem(
-                        .adaptive(minimum: 135, maximum: 210),
+                        .adaptive(minimum: Size.chipMinWidth, maximum: Size.chipMaxWidth),
                         alignment: .leading)
-                ], alignment: .leading, spacing: 8
+                ], alignment: .leading, spacing: Space.p8
             ) {
                 if book == nil {
                     labeledPicker(
@@ -278,7 +279,7 @@ public struct HighlightsView: View {
             }
             .font(.caption).foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
+        .padding(.horizontal, Space.p16).padding(.vertical, Space.p10)
     }
 
     private func cardPage(
@@ -287,7 +288,7 @@ public struct HighlightsView: View {
         let sheets = AnnotationTableRow.sheetsByRow(rows)
         return ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: Space.p18) {
                     if !ai.isEmpty {
                         aiCardSection(ai)
                     }
@@ -296,9 +297,9 @@ public struct HighlightsView: View {
                         LazyVGrid(
                             columns: [
                                 GridItem(
-                                    .adaptive(minimum: 280, maximum: 440),
-                                    spacing: 14)
-                            ], spacing: 14
+                                    .adaptive(minimum: Size.cardMinWidth, maximum: Size.cardMaxWidth),
+                                    spacing: Space.p14)
+                            ], spacing: Space.p14
                         ) {
                             ForEach(rows) { row in
                                 AnnotationCard(
@@ -324,7 +325,7 @@ public struct HighlightsView: View {
                         }
                     }
                 }
-                .padding(16)
+                .padding(Space.p16)
                 .onGeometryChange(for: CGFloat.self) {
                     $0.size.width
                 } action: {
@@ -370,8 +371,8 @@ public struct HighlightsView: View {
         // sheets, a card on its own shows none.
         let perBook = Dictionary(grouping: cards, by: \.bookKey)
             .mapValues(\.count)
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 6) {
+        return VStack(alignment: .leading, spacing: Space.p12) {
+            HStack(spacing: Space.p6) {
                 Label("AI Cards", systemImage: "sparkles")
                     .font(.headline)
                 Text("\(cards.count)")
@@ -381,8 +382,8 @@ public struct HighlightsView: View {
             }
             LazyVGrid(
                 columns: [
-                    GridItem(.adaptive(minimum: 280, maximum: 440), spacing: 14)
-                ], spacing: 14
+                    GridItem(.adaptive(minimum: Size.cardMinWidth, maximum: Size.cardMaxWidth), spacing: Space.p14)
+                ], spacing: Space.p14
             ) {
                 ForEach(cards) { card in
                     AICardView(
@@ -398,7 +399,7 @@ public struct HighlightsView: View {
     private func annotationTable(_ rows: [AnnotationTableRow]) -> some View {
         Table(rows, selection: $selection, sortOrder: $tableSort) {
             TableColumn("Passage / Note") { row in
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: Space.p3) {
                     Text(row.preview).lineLimit(2)
                     if row.annotation.passageText != nil,
                         let note = row.annotation.personalNote
@@ -407,7 +408,7 @@ public struct HighlightsView: View {
                             .secondary
                         ).lineLimit(1)
                     }
-                }.padding(.vertical, 3)
+                }.padding(.vertical, Space.p3)
                     .contextMenu { itemActions(row, snapshot: rows) }
             }.width(min: 200, ideal: 360)
             TableColumn("Book", value: \.bookTitle).width(min: 110, ideal: 180)
@@ -499,7 +500,7 @@ public struct HighlightsView: View {
         _ title: String, selection: Binding<Value>,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: Space.p2) {
             Text(title)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -545,9 +546,9 @@ public struct HighlightsView: View {
     @ViewBuilder
     private var emptyState: some View {
         if let hint = provenanceHint {
-            VStack(spacing: 14) {
+            VStack(spacing: Space.p14) {
                 Image(systemName: "highlighter")
-                    .font(.system(size: 36, weight: .light))
+                    .font(Type.hero).fontWeight(.light)
                     .foregroundStyle(.tertiary)
                 Text("No Highlights of Your Own").font(.headline)
                 Text(
@@ -567,8 +568,8 @@ public struct HighlightsView: View {
                     Button("Reset Filters", action: resetFilters)
                 }
             }
-            .padding(24)
-            .frame(maxWidth: 480)
+            .padding(Space.p24)
+            .frame(maxWidth: Size.noteMeasure)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             LibraryEmptyState(
@@ -776,8 +777,8 @@ struct AICardView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.p10) {
+            HStack(spacing: Space.p6) {
                 Label("AI card", systemImage: "sparkles")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -801,7 +802,7 @@ struct AICardView: View {
                 .lineLimit(excerptLines)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 6) {
+            HStack(spacing: Space.p6) {
                 if !card.bookTitle.isEmpty {
                     Text(card.bookTitle).lineLimit(1)
                 }
@@ -845,7 +846,7 @@ struct AICardView: View {
             .font(.caption2)
             .foregroundStyle(.tertiary)
         }
-        .padding(14)
+        .padding(Space.p14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardSurface(identity: "ai-\(card.id)", sheets: sheets)
     }
@@ -865,7 +866,7 @@ struct AnnotationCard: View {
     @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.p12) {
             Button(action: select) {
                 HStack(alignment: .firstTextBaseline) {
                     Image(systemName: row.annotation.kind.symbolName)
@@ -905,16 +906,16 @@ struct AnnotationCard: View {
                 }
             }
             if let note = row.annotation.personalNote {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: Space.p4) {
                     Text(note).font(.system(size: readingSize)).lineLimit(
                         expanded ? nil : excerptLines
                     ).fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
-                .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                .padding(Space.p10).frame(maxWidth: .infinity, alignment: .leading)
                 .background(
-                    .quaternary.opacity(0.35),
-                    in: RoundedRectangle(cornerRadius: 6)
+                    .quaternary.opacity(Opacity.o35),
+                    in: RoundedRectangle(cornerRadius: Radius.r6)
                 )
                 .help("Your note")
                 .accessibilityElement(children: .contain)
@@ -929,7 +930,7 @@ struct AnnotationCard: View {
                 .font(.callout).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: Space.p3) {
                 if showBookMetadata {
                     Text(row.bookTitle).font(.callout.weight(.medium))
                         .lineLimit(2)
@@ -958,7 +959,7 @@ struct AnnotationCard: View {
                 }.font(.caption).foregroundStyle(.secondary)
             }
         }
-        .padding(16).frame(
+        .padding(Space.p16).frame(
             maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading
         )
         .cardSurface(
@@ -967,7 +968,7 @@ struct AnnotationCard: View {
         // drag across a passage must select the words, not the card.
         .background(
             Color.clear
-                .contentShape(RoundedRectangle(cornerRadius: 12))
+                .contentShape(RoundedRectangle(cornerRadius: Radius.r12))
                 .onTapGesture(perform: select)
                 .onTapGesture(count: 2, perform: inspect)
         )
@@ -1016,7 +1017,7 @@ struct AnnotationInspector: View {
                     switch capturedPage {
                     case .found(let page, let pdf):
                         LabeledContent("Captured page") {
-                            HStack(spacing: 8) {
+                            HStack(spacing: Space.p8) {
                                 Text("Page \(page)")
                                     .monospacedDigit()
                                 if let pdf {

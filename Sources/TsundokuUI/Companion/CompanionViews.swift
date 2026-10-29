@@ -40,20 +40,20 @@ public struct CompanionTriggerView: View {
 
     private var isDark: Bool { colorScheme == .dark }
     private var fill: Color {
-        isDark ? .black.opacity(0.32) : .white.opacity(0.32)
+        isDark ? .black.opacity(Opacity.o30) : .white.opacity(Opacity.o30)
     }
     private var tint: Color {
-        isDark ? .black.opacity(0.55) : .white.opacity(0.18)
+        isDark ? .black.opacity(Opacity.o55) : .white.opacity(Opacity.o20)
     }
     private var icon: Color { isDark ? .white : .black }
     private var rim: Color {
-        isDark ? .white.opacity(0.14) : .black.opacity(0.08)
+        isDark ? .white.opacity(Opacity.o14) : .black.opacity(Opacity.o10)
     }
 
     public var body: some View {
         Button(action: action) {
             Image(systemName: "eyeglasses")
-                .font(.system(size: 22, weight: .medium))
+                .font(Type.large).fontWeight(.medium)
                 .foregroundStyle(icon)
                 .frame(
                     width: CompanionMetrics.triggerSize,
@@ -63,7 +63,7 @@ public struct CompanionTriggerView: View {
                 .background(fill, in: Circle())
                 .modifier(GlassCircle(tint: tint))
                 .overlay(
-                    Circle().strokeBorder(rim, lineWidth: 0.8)
+                    Circle().strokeBorder(rim, lineWidth: Metrics.badgeLine)
                 )
                 .clipShape(Circle())
         }
@@ -220,10 +220,10 @@ public struct CompanionPanelView: View {
             shape.strokeBorder(
                 model.theme.map {
                     $0.isDark
-                        ? Color.white.opacity(0.12)
-                        : Color.black.opacity(0.12)
-                } ?? Color(nsColor: .separatorColor).opacity(0.6),
-                lineWidth: 0.5)
+                        ? Color.white.opacity(Opacity.o10)
+                        : Color.black.opacity(Opacity.o10)
+                } ?? Color(nsColor: .separatorColor).opacity(Opacity.o60),
+                lineWidth: Metrics.badgeLine)
         )
         .clipShape(shape)
     }
@@ -299,22 +299,22 @@ public struct CompanionSettingsSection: View {
             // is, and how tall a bottom one is. The other placement keeps its
             // own dimension from the reader's window.
             LabeledContent("Side panel width") {
-                HStack(spacing: 8) {
+                HStack(spacing: Space.p8) {
                     Slider(
                         value: sideWidth,
                         in: Self.sideWidthRange, step: 20)
-                        .frame(width: 180)
+                        .frame(width: Size.sliderWidth)
                     Text("\(Int(store.settings.panelSideWidth)) pt")
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
             }
             LabeledContent("Bottom panel height") {
-                HStack(spacing: 8) {
+                HStack(spacing: Space.p8) {
                     Slider(
                         value: bottomHeight,
                         in: Self.bottomHeightRange, step: 20)
-                        .frame(width: 180)
+                        .frame(width: Size.sliderWidth)
                     Text("\(Int(store.settings.panelBottomHeight)) pt")
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
@@ -333,11 +333,11 @@ public struct CompanionSettingsSection: View {
                     + "PingFang and Hiragino each ship in Simplified and "
                     + "Traditional cuts.")
             LabeledContent("Chinese tracking") {
-                HStack(spacing: 8) {
+                HStack(spacing: Space.p8) {
                     Slider(
                         value: $store.settings.chineseTracking,
                         in: 0...0.6, step: 0.05)
-                        .frame(width: 180)
+                        .frame(width: Size.sliderWidth)
                     Text(
                         String(format: "%.2f pt", store.settings.chineseTracking)
                     )
@@ -434,12 +434,12 @@ public struct HotKeyRecorderButton: View {
     }
 
     public var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.p8) {
             Text(store.settings.hotKey.displayName)
                 .font(.system(.body, design: .rounded))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                .padding(.horizontal, Space.p8)
+                .padding(.vertical, Space.p3)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: Radius.r6))
             IconButton(
                 recording ? "Press a shortcut…" : "Record",
                 systemImage: recording ? "keyboard" : "pencil"

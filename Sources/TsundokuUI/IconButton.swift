@@ -21,7 +21,7 @@ struct IconButton: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.body)
-                .frame(minWidth: 28, minHeight: 28)
+                .frame(minWidth: Size.controlSquare, minHeight: Size.controlSquare)
         }
         .buttonStyle(.borderless)
         .help(tooltip ?? title)

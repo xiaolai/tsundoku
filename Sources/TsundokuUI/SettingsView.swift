@@ -109,7 +109,7 @@ public struct SettingsView: View {
                                     profileID: model.settings.httpProfileID)
                             }
                         HStack {
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading, spacing: Space.p2) {
                                 Text(providerState.keyStatus.isEmpty && providerState.hasUnsavedKey ? "Unsaved key" : providerState.keyStatus)
                                 Text("Stored in the Keychain, one key per service; environment variables are not read.")
                             }
@@ -207,7 +207,7 @@ public struct SettingsView: View {
                             .lineLimit(2)
                             .textSelection(.enabled)
                     }
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.p8) {
                             Text("Connection")
                             Spacer(minLength: 0)
                             if model.settings.provider == .codexCLI {
@@ -286,7 +286,7 @@ public struct SettingsView: View {
                             + "first cleanup. Saved notes are kept.")
                     .disabled(model.retentionBusy)
                     if model.settings.chatRetentionDays > 0 {
-                        HStack(spacing: 8) {
+                        HStack(spacing: Space.p8) {
                             Button("Review Old Chats…") {
                                 model.reviewChatRetention()
                             }
@@ -303,7 +303,7 @@ public struct SettingsView: View {
                             + "with the chat.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.p8) {
                         Button("Delete All Saved Notes…") {
                             model.confirmDeleteAllSavedAINotes()
                         }
@@ -344,7 +344,7 @@ public struct SettingsView: View {
                     // the chosen model actually holds. When the catalogue
                     // knows, the pane says so and offers the number.
                     if let capacity = modelCharacterCapacity {
-                        HStack(spacing: 8) {
+                        HStack(spacing: Space.p8) {
                             Text(
                                 "This model holds about "
                                     + "\(capacity.formatted()) characters; "
@@ -372,7 +372,7 @@ public struct SettingsView: View {
             if pane == .general {
                 Section("General") {
                     LabeledContent("Export Folder") {
-                        HStack(spacing: 8) {
+                        HStack(spacing: Space.p8) {
                             Text(model.exportFolder.path)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
@@ -413,7 +413,7 @@ public struct SettingsView: View {
                     }
                     ForEach(BookSource.allCases, id: \.self) { source in
                         LabeledContent(source.displayName) {
-                            VStack(alignment: .trailing, spacing: 4) {
+                            VStack(alignment: .trailing, spacing: Space.p4) {
                                 Text(
                                     model.sourceHealth[source]
                                         ?? "Not checked this session")
@@ -464,7 +464,7 @@ public struct SettingsView: View {
                         Text(updateChecker.statusText)
                             .foregroundStyle(.secondary)
                     }
-                    HStack(spacing: 8) {
+                    HStack(spacing: Space.p8) {
                         Button(
                             updateChecker.isChecking ? "Checking…" : "Check Now"
                         ) { updateChecker.check() }

@@ -79,7 +79,7 @@ struct SavedAINotesView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: Space.p0) {
             HStack {
                 Label("Saved AI Notes", systemImage: "sparkles").font(.title2)
                 Spacer()
@@ -102,7 +102,10 @@ struct SavedAINotesView: View {
                 .textFieldStyle(.roundedBorder).padding(.horizontal)
             content
         }
-        .frame(minWidth: 520, idealWidth: 680, minHeight: 420, idealHeight: 600)
+        .frame(minWidth: Size.notesMinWidth,
+                       idealWidth: Size.notesIdealWidth,
+                       minHeight: Size.notesMinHeight,
+                       idealHeight: Size.notesIdealHeight)
         .onAppear { model.refreshAINotes() }
         .alert(
             "Delete Saved Note?",
@@ -159,7 +162,7 @@ struct SavedAINotesView: View {
     }
 
     private func row(_ note: SavedAINote) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Space.p10) {
             HStack(alignment: .firstTextBaseline) {
                 Text(
                     note.bookTitle.isEmpty
@@ -182,7 +185,7 @@ struct SavedAINotesView: View {
                         ? "Delete this note and its card"
                         : "Delete this note")
             }
-            HStack(spacing: 6) {
+            HStack(spacing: Space.p6) {
                 if note.isCard {
                     Label("Card", systemImage: "rectangle.stack")
                         .font(.caption2)
@@ -203,7 +206,7 @@ struct SavedAINotesView: View {
                 NSPasteboard.general.setString(
                     note.answer, forType: .string)
             }.controlSize(.small)
-        }.padding(.vertical, 10)
+        }.padding(.vertical, Space.p10)
     }
 
     private func deletionSentence(for note: SavedAINote?) -> String {

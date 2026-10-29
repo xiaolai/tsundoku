@@ -156,9 +156,10 @@ struct BookChatsView: View {
     var body: some View {
         HSplitView {
             sidebar
-                .frame(minWidth: 220, idealWidth: 260, maxWidth: 340)
+                .frame(minWidth: Size.sidebarMinWidth,
+                        idealWidth: Size.sidebarIdealWidth, maxWidth: Size.sidebarMaxWidth)
             detail
-                .frame(minWidth: 320, maxWidth: .infinity)
+                .frame(minWidth: Size.detailMinWidth, maxWidth: .infinity)
         }
         .searchable(text: $search, prompt: "Search chats")
         .task(id: book.asin) {
@@ -294,7 +295,7 @@ struct BookChatsView: View {
     // MARK: List
 
     private var sidebar: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: Space.p0) {
             HStack {
                 Label("Chats", systemImage: "bubble.left.and.bubble.right")
                     .font(.headline)
@@ -313,7 +314,7 @@ struct BookChatsView: View {
                     .accessibilityLabel("Chat actions")
                 }
             }
-            .padding(10)
+            .padding(Space.p10)
             if !search.isEmpty, !isLoading, summariesError == nil,
                 loadedSearch == search
             {
@@ -326,8 +327,8 @@ struct BookChatsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 6)
+                    .padding(.horizontal, Space.p10)
+                    .padding(.bottom, Space.p6)
             }
             if incompleteCaptures {
                 Label(
@@ -336,8 +337,8 @@ struct BookChatsView: View {
                     systemImage: "exclamationmark.triangle")
                     .font(.caption2)
                     .foregroundStyle(Theme.warning)
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 6)
+                    .padding(.horizontal, Space.p10)
+                    .padding(.bottom, Space.p6)
             }
             if summaries.isEmpty, !isLoading {
                 ContentUnavailableView {
@@ -362,8 +363,8 @@ struct BookChatsView: View {
             } else {
                 List(selection: $selectedID) {
                     ForEach(summaries) { summary in
-                        HStack(alignment: .top, spacing: 6) {
-                            VStack(alignment: .leading, spacing: 3) {
+                        HStack(alignment: .top, spacing: Space.p6) {
+                            VStack(alignment: .leading, spacing: Space.p3) {
                                 Text(summary.displayTitle).lineLimit(2)
                                 Text(
                                     "\(summary.turnCount) "
@@ -409,7 +410,7 @@ struct BookChatsView: View {
                                 }
                             } label: {
                                 Image(systemName: "ellipsis")
-                                    .frame(width: 22, height: 22)
+                                    .frame(width: Size.smallControl, height: Size.smallControl)
                                     .contentShape(Rectangle())
                             }
                             .menuStyle(.borderlessButton)
@@ -420,7 +421,7 @@ struct BookChatsView: View {
                                 "Actions for \(summary.displayTitle)")
                         }
                         .tag(summary.id)
-                        .padding(.vertical, 2)
+                        .padding(.vertical, Space.p2)
                         .contextMenu {
                             Button("Rename…") { renameTarget = summary }
                             Button("Delete…") { reviewDelete(summary) }
@@ -458,9 +459,9 @@ struct BookChatsView: View {
     /// happened, keeps the raw text behind a disclosure, and offers the one
     /// action that can help: read it again.
     private func archiveFailure(_ detail: String) -> some View {
-        VStack(spacing: 12) {
+        VStack(spacing: Space.p12) {
             Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 32, weight: .light))
+                .font(Type.display).fontWeight(.light)
                 .foregroundStyle(.secondary)
             Text("Could Not Read Chats").font(.headline)
             Text(
@@ -472,19 +473,19 @@ struct BookChatsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
-                    .frame(maxWidth: 460, alignment: .leading)
+                    .frame(maxWidth: Size.textMeasure, alignment: .leading)
             }
-            .frame(maxWidth: 460, alignment: .leading)
+            .frame(maxWidth: Size.textMeasure, alignment: .leading)
             Button("Try Again") { retryReading() }
         }
-        .padding(24)
+        .padding(Space.p24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: Space.p18) {
                 HStack(alignment: .firstTextBaseline) {
                     if let first = turns.first {
                         Text(
@@ -573,8 +574,8 @@ struct BookChatsView: View {
                         turnView(turn)
                     }
                 }
-                .padding(16)
-                .frame(maxWidth: 760, alignment: .leading)
+                .padding(Space.p16)
+                .frame(maxWidth: Size.textWide, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .center)
             }
             .task(id: highlightTurnID) {
@@ -590,7 +591,7 @@ struct BookChatsView: View {
     @ViewBuilder private func compactionSection(
         _ compaction: ConversationCompaction, conversationID: Int64
     ) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: Space.p7) {
             Label(
                 "Earlier turns summarized for the model",
                 systemImage: "text.append")
@@ -614,7 +615,7 @@ struct BookChatsView: View {
                     .font(.caption)
                     .textSelection(.enabled)
             }
-            HStack(spacing: 8) {
+            HStack(spacing: Space.p8) {
                 Button("Summarize Again") { compactSelected() }
                     .controlSize(.small)
                     .disabled(!canCompact)
@@ -626,10 +627,10 @@ struct BookChatsView: View {
                 .disabled(compactionBusy)
             }
         }
-        .padding(10)
+        .padding(Space.p10)
         .background(
-            Color.secondary.opacity(0.08),
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            Color.secondary.opacity(Opacity.o10),
+            in: RoundedRectangle(cornerRadius: Radius.r10, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Earlier turns summarized for the model")
     }
@@ -645,29 +646,29 @@ struct BookChatsView: View {
     }
 
     private func dayDivider(_ date: Date) -> some View {
-        HStack(spacing: 8) {
-            Rectangle().fill(.quaternary).frame(height: 1)
+        HStack(spacing: Space.p8) {
+            Rectangle().fill(.quaternary).frame(height: Metrics.hairline)
             Text(TsundokuFormat.annotationDate(date))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize()
-            Rectangle().fill(.quaternary).frame(height: 1)
+            Rectangle().fill(.quaternary).frame(height: Metrics.hairline)
         }
     }
 
     private func turnView(_ turn: ConversationTurn) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Space.p10) {
             HStack {
                 Spacer(minLength: 40)
-                VStack(alignment: .trailing, spacing: 4) {
+                VStack(alignment: .trailing, spacing: Space.p4) {
                     Text(turn.promptLabel)
                         .textSelection(.enabled)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
+                        .padding(.horizontal, Space.p12)
+                        .padding(.vertical, Space.p8)
                         .background(
-                            Color.accentColor.opacity(0.16),
+                            Color.accentColor.opacity(Opacity.o15),
                             in: RoundedRectangle(
-                                cornerRadius: 14, style: .continuous))
+                                cornerRadius: Radius.r14, style: .continuous))
                     if !turn.context.attachments.isEmpty {
                         Text(
                             turn.context.attachments.joined(separator: " · ")
@@ -678,8 +679,8 @@ struct BookChatsView: View {
                     }
                 }
             }
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: Space.p6) {
+                HStack(spacing: Space.p6) {
                     Image(systemName: "sparkles")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -713,8 +714,8 @@ struct BookChatsView: View {
         .padding(highlightTurnID == turn.id ? 8 : 0)
         .background(
             highlightTurnID == turn.id
-                ? Color.accentColor.opacity(0.10) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                ? Color.accentColor.opacity(Opacity.o10) : Color.clear,
+            in: RoundedRectangle(cornerRadius: Radius.r10, style: .continuous))
         .id(turn.id)
     }
 
@@ -1231,7 +1232,7 @@ private struct RenameChatSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.p14) {
             Text("Rename Chat").font(.headline)
             TextField("Chat name", text: $title)
                 .textFieldStyle(.roundedBorder)
@@ -1249,7 +1250,7 @@ private struct RenameChatSheet: View {
                 .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(20)
-        .frame(minWidth: 360)
+        .padding(Space.p20)
+        .frame(minWidth: Size.sheetNarrowWidth)
     }
 }

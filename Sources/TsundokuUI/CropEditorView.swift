@@ -36,7 +36,7 @@ struct CropEditorView: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: Space.p12) {
             HStack {
                 Text("Preview Current Page")
                     .font(.headline)
@@ -78,7 +78,7 @@ struct CropEditorView: View {
                             path.addRect(viewRect)
                         }
                         .fill(
-                            Color.black.opacity(0.42),
+                            Color.black.opacity(Opacity.o40),
                             style: FillStyle(eoFill: true))
                         Rectangle()
                             .fill(Color.clear)
@@ -90,7 +90,7 @@ struct CropEditorView: View {
                                 moveGesture(
                                     scale: scale, imageOrigin: imageOrigin))
                         Rectangle()
-                            .stroke(Color.accentColor, lineWidth: 2)
+                            .stroke(Color.accentColor, lineWidth: Metrics.badgeLine)
                             .frame(
                                 width: viewRect.width, height: viewRect.height)
                             .offset(x: viewRect.minX, y: viewRect.minY)
@@ -103,9 +103,9 @@ struct CropEditorView: View {
                 }
                 .onTapGesture {}
             }
-            .frame(minHeight: 240)
+            .frame(minHeight: Size.cropMinHeight)
             .background(Color(nsColor: .windowBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipShape(RoundedRectangle(cornerRadius: Radius.r8))
 
             controls
             DisclosureGroup("Crop Numbers") {
@@ -124,8 +124,8 @@ struct CropEditorView: View {
             }
             .font(.caption)
         }
-        .padding(16)
-        .frame(minWidth: 680, minHeight: 520)
+        .padding(Space.p16)
+        .frame(minWidth: Size.cropSheetWidth, minHeight: Size.cropSheetHeight)
         .focusable()
         .onKeyPress(.leftArrow) { nudge(dx: -1, dy: 0); return .handled }
         .onKeyPress(.rightArrow) { nudge(dx: 1, dy: 0); return .handled }
@@ -139,14 +139,14 @@ struct CropEditorView: View {
     }
 
     private var controls: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: Space.p10) {
             geometryControls
             zoomControls
         }
     }
 
     private var geometryControls: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: Space.p16) {
             // The capture writes A4 pages, so the crop always keeps the
             // A4 ratio; there is no free-form mode to switch to.
             Label("Fits an A4 page", systemImage: "lock")
@@ -195,23 +195,23 @@ struct CropEditorView: View {
     }
 
     private var zoomControls: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Space.p12) {
             if let output = outputThumbnail {
                 Image(decorative: output, scale: 1)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 46, height: 62)
-                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                    .frame(width: Size.cropPreviewWidth, height: Size.cropPreviewHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: Radius.r3))
                     .help("Output preview")
             }
             Spacer()
             Text("Zoom")
                 .font(.caption)
             Slider(value: $zoom, in: 1...3)
-                .frame(width: 120)
+                .frame(width: Size.sliderWidthSmall)
             Text(String(format: "%.1f×", zoom))
                 .font(.caption.monospacedDigit())
-                .frame(width: 36, alignment: .trailing)
+                .frame(width: Size.valueColumn, alignment: .trailing)
         }
     }
 
@@ -228,8 +228,8 @@ struct CropEditorView: View {
             let (handle, point) = points[index]
             Circle()
                 .fill(Color.accentColor)
-                .frame(width: 14, height: 14)
-                .overlay(Circle().stroke(.white, lineWidth: 2))
+                .frame(width: Size.handleSize, height: Size.handleSize)
+                .overlay(Circle().stroke(.white, lineWidth: Metrics.badgeLine))
                 .position(point)
                 .highPriorityGesture(
                     resizeGesture(
@@ -369,7 +369,7 @@ struct CropEditorView: View {
     private func numericField(
         _ label: String, value: CGFloat, set: @escaping (CGFloat) -> Void
     ) -> some View {
-        HStack(spacing: 3) {
+        HStack(spacing: Space.p3) {
             Text(label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -379,7 +379,7 @@ struct CropEditorView: View {
                     get: { Double(value) },
                     set: { set(CGFloat($0)) }),
                 format: .number.precision(.fractionLength(0)))
-                .frame(width: 48)
+                .frame(width: Size.actionWidth)
                 .textFieldStyle(.roundedBorder)
         }
     }

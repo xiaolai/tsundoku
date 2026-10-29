@@ -35,7 +35,7 @@ struct LibraryEmptyState: View {
             if let detail = model.archiveError {
                 archiveUnavailable(detail)
             } else if model.isHydrating && !hasImportedRecords {
-                VStack(spacing: 14) {
+                VStack(spacing: Space.p14) {
                     ProgressView().controlSize(.large)
                     Text("Opening Your Library…").font(.headline)
                     Text(
@@ -44,7 +44,7 @@ struct LibraryEmptyState: View {
                     )
                     .foregroundStyle(.secondary)
                 }
-                .padding(24)
+                .padding(Space.p24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if isFirstRun {
                 SetupChecklist(model: model)
@@ -56,12 +56,12 @@ struct LibraryEmptyState: View {
     }
 
     private var standardState: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: Space.p14) {
             if model.isImporting && !hasImportedRecords {
                 ProgressView().controlSize(.large)
             } else {
                 Image(systemName: failure?.accessDenied == true ? "lock" : annotations ? "highlighter" : "book.closed")
-                    .font(.system(size: 36, weight: .light))
+                    .font(Type.hero).fontWeight(.light)
                     .foregroundStyle(.tertiary)
             }
             Text(title).font(.headline)
@@ -88,8 +88,8 @@ struct LibraryEmptyState: View {
                     .disabled(model.archive == nil)
             }
         }
-        .padding(24)
-        .frame(maxWidth: 480)
+        .padding(Space.p24)
+        .frame(maxWidth: Size.noteMeasure)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -97,9 +97,9 @@ struct LibraryEmptyState: View {
     /// an Import button that silently did nothing. It says so instead, names
     /// the file, and offers the two actions that can help.
     private func archiveUnavailable(_ detail: String) -> some View {
-        VStack(spacing: 14) {
+        VStack(spacing: Space.p14) {
             Image(systemName: "externaldrive.badge.questionmark")
-                .font(.system(size: 36, weight: .light))
+                .font(Type.hero).fontWeight(.light)
                 .foregroundStyle(.tertiary)
             Text("Library Archive Unavailable").font(.headline)
             Text(
@@ -114,16 +114,16 @@ struct LibraryEmptyState: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
-                    .frame(maxWidth: 420, alignment: .leading)
+                    .frame(maxWidth: Size.importMeasure, alignment: .leading)
             }
-            .frame(maxWidth: 420, alignment: .leading)
+            .frame(maxWidth: Size.importMeasure, alignment: .leading)
             HStack {
                 Button("Try Again") { model.reopenArchive() }
                 Button("Show in Finder") { model.revealArchiveFile() }
             }
         }
-        .padding(24)
-        .frame(maxWidth: 480)
+        .padding(Space.p24)
+        .frame(maxWidth: Size.noteMeasure)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -135,7 +135,7 @@ struct SetupChecklist: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: Space.p16) {
             Text("Set Up Tsundoku").font(.title3.bold())
             Text(
                 "Tsundoku reads the Kindle and Apple Books libraries on this "
@@ -181,8 +181,8 @@ struct SetupChecklist: View {
                 Button("Review Access…") { openSettings(.access) }
             }
         }
-        .padding(28)
-        .frame(maxWidth: 520, alignment: .leading)
+        .padding(Space.p28)
+        .frame(maxWidth: Size.importWide, alignment: .leading)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -197,7 +197,7 @@ struct SetupChecklist: View {
         title: String, detail: String, done: Bool?,
         @ViewBuilder action: () -> some View
     ) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: Space.p10) {
             Image(
                 systemName: done == true
                     ? "checkmark.circle.fill"
@@ -206,7 +206,7 @@ struct SetupChecklist: View {
             .foregroundStyle(done == true ? Color.green : Color.secondary)
             .font(.body)
             .accessibilityLabel(done == true ? "Done" : "Not done yet")
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Space.p4) {
                 Text(title).font(.callout.weight(.semibold))
                 Text(detail)
                     .font(.caption)
@@ -254,7 +254,7 @@ private struct ObservedPermissionBanner: View {
 
     var body: some View {
         if !problems.isEmpty, !dismissed {
-            HStack(spacing: 10) {
+            HStack(spacing: Space.p10) {
                 Image(systemName: "lock.trianglebadge.exclamationmark")
                     .foregroundStyle(Theme.warning)
                 Text("Access is incomplete: \(problems.joined(separator: "; ")).")
@@ -274,8 +274,8 @@ private struct ObservedPermissionBanner: View {
                 .help("Hide until the app is reopened")
                 .accessibilityLabel("Hide access warning")
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            .padding(.horizontal, Space.p14)
+            .padding(.vertical, Space.p8)
             .background(Theme.warningBackground)
         }
     }
@@ -286,17 +286,17 @@ struct LibraryImportReportView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: Space.p16) {
             Text("Library Import").font(.title2.bold())
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: Space.p16) {
                     if model.isImporting {
                         ProgressView("Reading local libraries…")
                     } else if model.importFailures.isEmpty {
                         Label(model.status, systemImage: "checkmark.circle")
                     }
                     ForEach(model.importFailures) { failure in
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: Space.p6) {
                             Text(failure.source.displayName).font(.headline)
                             Text(failure.summary)
                             DisclosureGroup("Technical Details") {
@@ -320,7 +320,7 @@ struct LibraryImportReportView: View {
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
-        .padding(24).frame(width: 540, height: 430)
+        .padding(Space.p24).frame(width: Size.sheetWidth, height: Size.sheetHeight)
     }
 }
 
@@ -332,10 +332,10 @@ struct BannerView: View {
 
     var body: some View {
         if let banner = model.banner {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .top, spacing: Space.p10) {
                 Image(systemName: symbol(for: banner.severity))
                     .foregroundStyle(tint(for: banner.severity))
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: Space.p4) {
                     Text(banner.text)
                         .fixedSize(horizontal: false, vertical: true)
                     if let detail = banner.detail {
@@ -362,14 +362,14 @@ struct BannerView: View {
                 .accessibilityLabel("Dismiss message")
                 .help("Dismiss")
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, Space.p14)
+            .padding(.vertical, Space.p10)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Radius.r10))
             .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(tint(for: banner.severity).opacity(0.35)))
-            .padding(.horizontal, 12)
-            .padding(.top, 8)
+                RoundedRectangle(cornerRadius: Radius.r10)
+                    .strokeBorder(tint(for: banner.severity).opacity(Opacity.o35)))
+            .padding(.horizontal, Space.p12)
+            .padding(.top, Space.p8)
             .transition(.move(edge: .top).combined(with: .opacity))
             .sheet(isPresented: $showLog) {
                 BannerLogView(model: model)
@@ -399,7 +399,7 @@ private struct BannerLogView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.p12) {
             HStack {
                 Text("Earlier Messages").font(.title3.bold())
                 Spacer()
@@ -409,7 +409,7 @@ private struct BannerLogView: View {
                 Text("Nothing yet.").foregroundStyle(.secondary)
             } else {
                 List(model.errorLog) { entry in
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: Space.p4) {
                         Text(
                             entry.createdAt.formatted(
                                 date: .abbreviated, time: .standard)
@@ -424,12 +424,12 @@ private struct BannerLogView: View {
                                 .textSelection(.enabled)
                         }
                     }
-                    .padding(.vertical, 2)
+                    .padding(.vertical, Space.p2)
                 }
                 .listStyle(.inset)
             }
         }
-        .padding(20)
-        .frame(minWidth: 460, minHeight: 320)
+        .padding(Space.p20)
+        .frame(minWidth: Size.sheetMinWidth, minHeight: Size.sheetMinHeight)
     }
 }

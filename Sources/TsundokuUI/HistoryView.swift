@@ -94,7 +94,7 @@ public struct HistoryView: View {
                             model.section = .library
                         } label: {
                             HStack(alignment: .firstTextBaseline) {
-                                VStack(alignment: .leading, spacing: 2) {
+                                VStack(alignment: .leading, spacing: Space.p2) {
                                     Text(book.title)
                                     if !book.author.isEmpty {
                                         Text(book.author)
@@ -138,7 +138,7 @@ public struct HistoryView: View {
                 )
                 .font(.caption).foregroundStyle(.secondary)
                 if let title = trackedTitle() {
-                    HStack(spacing: 6) {
+                    HStack(spacing: Space.p6) {
                         Label(
                             "Tracking \(title)",
                             systemImage: "record.circle.fill")
@@ -205,7 +205,7 @@ struct SessionListRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: Space.p2) {
                 Text(
                     session.bookTitle.isEmpty
                         ? session.asin : session.bookTitle
@@ -227,7 +227,7 @@ struct SessionListRow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, Space.p2)
     }
 
 }
@@ -241,9 +241,9 @@ struct SessionDetailView: View {
     @State private var observations: [PageObservation] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.p14) {
             HStack {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: Space.p4) {
                     Text(
                         session.bookTitle.isEmpty
                             ? session.asin : session.bookTitle
@@ -269,7 +269,7 @@ struct SessionDetailView: View {
                     .foregroundStyle(.secondary)
             } else {
                 List(observations) { observation in
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: Space.p4) {
                         Text(
                             observation.observedAt.formatted(
                                 date: .omitted, time: .shortened)
@@ -280,7 +280,7 @@ struct SessionDetailView: View {
                             .lineLimit(4)
                             .textSelection(.enabled)
                     }
-                    .padding(.vertical, 2)
+                    .padding(.vertical, Space.p2)
                 }
                 .listStyle(.inset)
             }
@@ -294,8 +294,11 @@ struct SessionDetailView: View {
                 Spacer()
             }
         }
-        .padding(20)
-        .frame(minWidth: 480, idealWidth: 560, minHeight: 360, idealHeight: 520)
+        .padding(Space.p20)
+        .frame(minWidth: Size.historyMinWidth,
+                       idealWidth: Size.historyIdealWidth,
+                       minHeight: Size.historyMinHeight,
+                       idealHeight: Size.historyIdealHeight)
         .task {
             observations = model.sessionObservations(session)
         }

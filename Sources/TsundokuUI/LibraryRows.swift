@@ -65,7 +65,7 @@ struct BookCoverTile: View {
     private var artwork: NSImage? { image ?? loaded }
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+        RoundedRectangle(cornerRadius: Radius.tile, style: .continuous)
             .fill(
                 LinearGradient(
                     colors: [cloth, clothShade],
@@ -74,23 +74,23 @@ struct BookCoverTile: View {
                 // Where the boards meet the spine.
                 Rectangle()
                     .fill(.white.opacity(scheme == .dark ? 0.10 : 0.16))
-                    .frame(width: 1.5)
-                    .padding(.leading, 3.5)
+                    .frame(width: Size.groveWidth)
+                    .padding(.leading, Space.p4)
             }
             .overlay(alignment: .bottomLeading) {
                 if artwork == nil {
                     Text(initials)
                         .font(.system(size: height * 0.21, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.88))
-                        .padding(.leading, 8)
+                        .foregroundStyle(.white.opacity(Opacity.o90))
+                        .padding(.leading, Space.p8)
                         .padding(.bottom, height * 0.12)
                 }
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-                    .strokeBorder(.black.opacity(0.25), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: Radius.tile, style: .continuous)
+                    .strokeBorder(.black.opacity(Opacity.o25), lineWidth: Metrics.badgeLine)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 2.5, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: Radius.tile, style: .continuous))
             .overlay {
                 if let artwork {
                     Image(nsImage: artwork)
@@ -101,7 +101,7 @@ struct BookCoverTile: View {
                         // bounds rather than the tile's.
                         .frame(width: width, height: height)
                         .clipShape(
-                            RoundedRectangle(cornerRadius: 2.5,
+                            RoundedRectangle(cornerRadius: Radius.tile,
                                 style: .continuous))
                 }
             }
@@ -146,16 +146,16 @@ struct BookRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Space.p12) {
             BookCoverTile(book: book)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: Space.p2) {
                 Text(book.title)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(Type.headline)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                HStack(spacing: 6) {
+                HStack(spacing: Space.p6) {
                     Text(subtitle)
-                        .font(.system(size: 11.5))
+                        .font(Type.detail)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     if showsSource {
@@ -168,7 +168,7 @@ struct BookRow: View {
                 // Only the positive state is drawn: an unread book needs no
                 // mark, and a column of hollow circles is noise.
                 Image(systemName: "checkmark")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(Type.small)
                     .foregroundStyle(.secondary)
                     .help("Read")
                     .accessibilityLabel("Read")
@@ -177,7 +177,7 @@ struct BookRow: View {
                 annotations: annotationCount, messages: messageCount,
                 lastRead: book.lastView)
         }
-        .padding(.vertical, 5)
+        .padding(.vertical, Space.p5)
         .contentShape(Rectangle())
         .help(
             book.title + (book.author.isEmpty ? "" : " — \(book.author)"))
@@ -197,15 +197,15 @@ private struct BookMetrics: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: Space.p0) {
             count(annotations, tooltip: "annotations", width: 26)
             count(messages, tooltip: "chats", width: 26)
-                .padding(.trailing, 12)
+                .padding(.trailing, Space.p12)
             Text(date)
-                .frame(width: 64, alignment: .trailing)
+                .frame(width: Metrics.dateColumn, alignment: .trailing)
                 .foregroundStyle(lastRead == nil ? .quaternary : .tertiary)
         }
-        .font(.system(size: 10.5))
+        .font(Type.caption)
         .monospacedDigit()
     }
 
@@ -232,14 +232,14 @@ struct SourceBadge: View {
 
     var body: some View {
         Text(label)
-            .font(.system(size: 8, weight: .semibold))
+            .font(Type.micro)
             .tracking(0.4)
             .foregroundStyle(.tertiary)
-            .padding(.horizontal, 4)
-            .padding(.vertical, 1)
+            .padding(.horizontal, Space.p4)
+            .padding(.vertical, Space.p1)
             .overlay {
-                RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-                    .strokeBorder(.quaternary, lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: Radius.tile, style: .continuous)
+                    .strokeBorder(.quaternary, lineWidth: Metrics.badgeLine)
             }
             .accessibilityLabel(source.displayName)
     }
@@ -370,7 +370,7 @@ struct BookList: View {
                     systemImage: "line.3.horizontal.decrease.circle"
                 ) { resetFilters() }
             }
-            .padding(10)
+            .padding(Space.p10)
         }
     }
 }
@@ -387,54 +387,54 @@ struct BookHero: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: Space.p14) {
             BookCoverTile(
                 book: book, width: 64, height: 88)
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: Space.p5) {
                 Text(book.title)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(Type.title)
                     .textSelection(.enabled)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(author)
-                    .font(.system(size: 12))
+                    .font(Type.callout)
                     .foregroundStyle(.secondary)
                 // State is a sentence, not a row of controls: one accent for
                 // the reader's own progress, the rest as quiet facts.
-                HStack(spacing: 6) {
+                HStack(spacing: Space.p6) {
                     SourceBadge(source: book.source)
                     if book.isRead {
-                        HStack(spacing: 3) {
+                        HStack(spacing: Space.p3) {
                             Image(systemName: "checkmark")
-                                .font(.system(size: 8, weight: .bold))
+                                .font(Type.micro).fontWeight(.bold)
                             Text("Read")
                         }
                         .foregroundStyle(.tint)
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(Type.caption).fontWeight(.medium)
                     }
                     if book.downloaded {
                         Text("Downloaded")
-                            .font(.system(size: 10.5))
+                            .font(Type.caption)
                             .foregroundStyle(.tertiary)
                     }
                     if book.isFixedLayout {
                         Text("Fixed layout")
-                            .font(.system(size: 10.5))
+                            .font(Type.caption)
                             .foregroundStyle(.tertiary)
                     }
                 }
-                HStack(spacing: 14) {
+                HStack(spacing: Space.p14) {
                     Text(
                         "\(annotations) "
                             + (annotations == 1 ? "annotation" : "annotations"))
                     Text("\(messages) " + (messages == 1 ? "chat" : "chats"))
                 }
-                .font(.system(size: 10.5))
+                .font(Type.caption)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, Space.p6)
     }
 }

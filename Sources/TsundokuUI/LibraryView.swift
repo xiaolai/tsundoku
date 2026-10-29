@@ -63,7 +63,7 @@ public struct LibraryView: View {
             if let id = model.bookWorkspaceID,
                 let book = model.books.first(where: { $0.asin == id })
             {
-                VStack(spacing: 0) {
+                VStack(spacing: Space.p0) {
                     HStack {
                         Button {
                             model.bookWorkspaceID = nil
@@ -99,7 +99,7 @@ public struct LibraryView: View {
                         .fixedSize()
                         .help("More for this book")
                         .accessibilityLabel("More for this book")
-                    }.padding(.horizontal, 16).padding(.vertical, 8)
+                    }.padding(.horizontal, Space.p16).padding(.vertical, Space.p8)
                     switch model.bookWorkspaceSection {
                     case .annotations:
                         HighlightsView(model: model, book: book).id(book.asin)
@@ -113,7 +113,7 @@ public struct LibraryView: View {
                 bookList
             }
         }
-        .safeAreaInset(edge: .top, spacing: 0) {
+        .safeAreaInset(edge: .top, spacing: Space.p0) {
             PermissionBanner(model: model)
         }
         .onReceive(
@@ -319,14 +319,14 @@ struct BookDetailView: View {
                             book.source == .appleBooks ? "Asset ID" : "ASIN"
                         ) {
                             Text(book.asin)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(Type.digits(11))
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
                         }
                     }
 
                     Section("Actions") {
-                        HStack(spacing: 8) {
+                        HStack(spacing: Space.p8) {
                             Button("Read Annotations") {
                                 model.bookWorkspaceSection = .annotations
                                 model.bookWorkspaceID = book.asin

@@ -24,12 +24,12 @@ public struct RootView: View {
             }
             // Wide enough for the sidebar plus the books table's minimum
             // columns; at 760 the table had to hide its own content.
-            .frame(minWidth: 880, minHeight: 560)
+            .frame(minWidth: Size.windowMinWidth, minHeight: Size.windowMinHeight)
             // Feedback belongs over the content the action changed, not only
             // in a sidebar column that can be collapsed.
             .overlay(alignment: .top) {
                 BannerView(model: model)
-                    .animation(.easeOut(duration: 0.15), value: model.banner?.id)
+                    .animation(.easeOut(duration: Motion.quick), value: model.banner?.id)
             }
         }
         .sheet(isPresented: $model.showImportReport) {
@@ -53,7 +53,7 @@ public struct RootView: View {
                     model.status,
                     systemImage: "externaldrive.badge.exclamationmark"
                 )
-                .font(.callout).textSelection(.enabled).padding(10)
+                .font(.callout).textSelection(.enabled).padding(Space.p10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.regularMaterial)
             } else if let failure = model.importError,
@@ -71,7 +71,7 @@ public struct RootView: View {
                         model.importLibrary()
                     }.disabled(model.isImporting)
                 }
-                .font(.callout).padding(10)
+                .font(.callout).padding(Space.p10)
                 .background(.regularMaterial)
                 .help(failure)
             }
@@ -148,7 +148,7 @@ struct SidebarView: View {
                     .tag(AppModel.Section.history)
             }
             Group {
-                HStack(spacing: 4) {
+                HStack(spacing: Space.p4) {
                     Label("Exports", systemImage: "doc.richtext")
                     // A capture that stopped early is invisible in a count.
                     if model.captures.contains(where: {
@@ -175,8 +175,8 @@ struct SidebarView: View {
     @ViewBuilder
     private var footer: some View {
         if model.isImporting || model.notice != nil {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: Space.p0) {
+                HStack(alignment: .top, spacing: Space.p8) {
                     if model.isImporting {
                         ProgressView().controlSize(.small)
                     }
@@ -186,8 +186,8 @@ struct SidebarView: View {
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.horizontal, Space.p12)
+                .padding(.vertical, Space.p8)
             }
         }
     }

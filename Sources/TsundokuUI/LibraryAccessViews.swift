@@ -28,7 +28,7 @@ struct AccessSettingsView: View {
                 if navigation.intent != nil || permissions.librarySetupPending {
                     Section {
                         HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 4) {
+                            VStack(alignment: .leading, spacing: Space.p4) {
                                 Text(taskTitle).font(.headline)
                                 if model.isImporting { ProgressView("Importing library…").controlSize(.small) }
                             }
@@ -80,8 +80,8 @@ struct AccessSettingsView: View {
                         Button("Show Applications") { NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications")) }
                     } else if blocked || (!permissions.libraryReady && permissions.librarySetupPending) {
                         DisclosureGroup("App Not Listed?") {
-                            HStack(spacing: 12) {
-                                Image(nsImage: NSWorkspace.shared.icon(forFile: appURL.path)).resizable().frame(width: 36, height: 36)
+                            HStack(spacing: Space.p12) {
+                                Image(nsImage: NSWorkspace.shared.icon(forFile: appURL.path)).resizable().frame(width: Size.appIcon, height: Size.appIcon)
                                 Text("Drag Tsundoku into the Full Disk Access list.").font(.caption)
                             }
                             .draggable(appURL)
@@ -111,7 +111,7 @@ struct AccessSettingsView: View {
                         }
                     }
                     if permissions.libraryStatus == .blocked && !needsInstallation {
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: Space.p2) {
                             Button("Quit and Reopen Tsundoku") { permissions.requestRelaunch() }
                                 .disabled(permissions.relaunchPending || model.isImporting || model.capturePhase == .running)
                             Text(
@@ -141,7 +141,7 @@ struct AccessSettingsView: View {
                         }
                     }
                     if permissions.readerAccessRequested, let focus = permissions.relaunchFocus(for: navigation.intent) {
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: Space.p2) {
                             Button("Quit and Reopen Tsundoku") {
                                 permissions.requestRelaunch(focus: focus, intent: navigation.intent)
                             }.disabled(permissions.relaunchPending || model.isImporting || model.capturePhase == .running)
@@ -221,7 +221,7 @@ struct AccessSettingsView: View {
     }
     private func permissionRow(_ title: String, detail: String, granted: Bool, status: String,
         request: @escaping () -> Void, manage: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: Space.p5) {
             HStack {
                 Text(title)
                 Spacer()

@@ -111,6 +111,10 @@ public actor BookCoverStore {
         return image
     }
 
+    /// How many callers are waiting for a permit. Internal so a test can
+    /// stage a queue without relying on sleeps.
+    var waitingCount: Int { waiting.count }
+
     /// Source-qualified, because an ASIN and a Books asset id can coincide and
     /// must not share artwork.
     static func cacheKey(for book: Book) -> String {

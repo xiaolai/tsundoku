@@ -3215,20 +3215,20 @@ public struct AIPanelView: View {
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: Space.p0) {
             header
                 .padding(.horizontal, compact ? 12 : 16)
                 .padding(.top, compact ? 10 : 12)
-                .padding(.bottom, 8)
+                .padding(.bottom, Space.p8)
             separator
             transcript
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             contextBar
                 .padding(.horizontal, compact ? 12 : 16)
-                .padding(.top, 6)
+                .padding(.top, Space.p6)
             composer
                 .padding(.horizontal, compact ? 12 : 16)
-                .padding(.top, 6)
+                .padding(.top, Space.p6)
                 .padding(.bottom, compact ? 8 : 10)
             statusLine
                 .padding(.horizontal, compact ? 12 : 16)
@@ -3312,8 +3312,8 @@ public struct AIPanelView: View {
     /// Everything else — reader, page, characters, who answered — is one line
     /// of provenance under it, so five controls no longer squeeze the title.
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(alignment: .firstTextBaseline, spacing: Space.p8) {
+            VStack(alignment: .leading, spacing: Space.p2) {
                 Text(model.headerTitle)
                 .font(compact ? .subheadline : .headline)
                 .lineLimit(1)
@@ -3373,7 +3373,7 @@ public struct AIPanelView: View {
                     }
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(Type.footnote)
                         .frame(
                             width: CompanionMetrics.closeSize,
                             height: CompanionMetrics.closeSize
@@ -3444,7 +3444,7 @@ public struct AIPanelView: View {
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
+                LazyVStack(alignment: .leading, spacing: Space.p18) {
                     if model.turns.isEmpty, model.pendingQuestion == nil,
                         model.phase != .failed
                     {
@@ -3471,7 +3471,7 @@ public struct AIPanelView: View {
                     }
                 }
                 .padding(.horizontal, compact ? 12 : 16)
-                .padding(.vertical, 12)
+                .padding(.vertical, Space.p12)
             }
             .onChange(of: model.turns.count) { _, _ in
                 scrollToLatest(proxy)
@@ -3484,7 +3484,7 @@ public struct AIPanelView: View {
 
     private func scrollToLatest(_ proxy: ScrollViewProxy) {
         guard let last = model.turns.last else { return }
-        withAnimation(.easeOut(duration: 0.15)) {
+        withAnimation(.easeOut(duration: Motion.quick)) {
             proxy.scrollTo(last.id, anchor: .bottom)
         }
     }
@@ -3505,7 +3505,7 @@ public struct AIPanelView: View {
         case .ready, .idle:
             // Breathing room between blocks: a wall of paragraphs at 8 pt reads as
         // one block; 12 lets a heading, a paragraph and a list read as three.
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.p12) {
                 Text(
                     model.pageText.isEmpty
                         ? "Reload the page to begin." : "Ask about this page"
@@ -3542,7 +3542,7 @@ public struct AIPanelView: View {
     }
 
     private var loadingRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.p8) {
             ProgressView().controlSize(.small)
             Text("Asking \(model.provider)…")
                 .foregroundStyle(.secondary)
@@ -3555,11 +3555,11 @@ public struct AIPanelView: View {
     private var failureView: some View {
         // Breathing room between blocks: a wall of paragraphs at 8 pt reads as
         // one block; 12 lets a heading, a paragraph and a list read as three.
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.p12) {
             Text(model.error ?? "Something went wrong.")
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-            HStack(spacing: 8) {
+            HStack(spacing: Space.p8) {
                 IconButton("Try Again", systemImage: "arrow.clockwise") {
                     model.retry()
                 }
@@ -3576,7 +3576,7 @@ public struct AIPanelView: View {
 
     @ViewBuilder private var compactionDivider: some View {
         if let compaction = model.compaction {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: Space.p7) {
                 Label(
                     "Earlier turns summarized for the model",
                     systemImage: "text.append")
@@ -3603,9 +3603,9 @@ public struct AIPanelView: View {
                     Text(compaction.summary)
                         .font(.caption)
                         .textSelection(.enabled)
-                        .frame(maxHeight: 220, alignment: .topLeading)
+                        .frame(maxHeight: Size.excerptMaxHeight, alignment: .topLeading)
                 }
-                HStack(spacing: 8) {
+                HStack(spacing: Space.p8) {
                     Button("Summarize Again") { model.compactConversation() }
                         .controlSize(.small)
                         .disabled(!model.canCompact)
@@ -3617,10 +3617,10 @@ public struct AIPanelView: View {
                     Spacer()
                 }
             }
-            .padding(10)
+            .padding(Space.p10)
             .background(
-                Color.secondary.opacity(0.08),
-                in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                Color.secondary.opacity(Opacity.o10),
+                in: RoundedRectangle(cornerRadius: Radius.r10, style: .continuous))
             .accessibilityElement(children: .contain)
             .accessibilityLabel(
                 "Earlier turns summarized for the model")
@@ -3628,11 +3628,11 @@ public struct AIPanelView: View {
     }
 
     private func turnView(_ turn: AITurn) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Space.p10) {
             // The bubble brings its own leading spacer, so this is the whole
             // row: a second one here made a finished question narrower than
             // the same question while it was still pending.
-            VStack(alignment: .trailing, spacing: 4) {
+            VStack(alignment: .trailing, spacing: Space.p4) {
                 QuestionBubble(
                     text: turn.promptLabel, compact: compact)
                 if !turn.context.attachments.isEmpty {
@@ -3644,8 +3644,8 @@ public struct AIPanelView: View {
                     .lineLimit(1)
                 }
             }
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: Space.p6) {
+                HStack(spacing: Space.p6) {
                     Image(systemName: "sparkles")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -3699,8 +3699,8 @@ public struct AIPanelView: View {
                 MarkdownText(text: turn.answer, style: model.answerStyle)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, Space.p10)
+                    .padding(.vertical, Space.p8)
             }
         }
         .id(turn.id)
@@ -3709,9 +3709,9 @@ public struct AIPanelView: View {
     // MARK: Context
 
     private var contextBar: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Space.p6) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
+                HStack(spacing: Space.p6) {
                     // The title is already the header; repeating it here
                     // pushed the chapter chip out of a 400 pt panel.
                     if let reader = model.readerKind {
@@ -3759,9 +3759,9 @@ public struct AIPanelView: View {
             .lineLimit(1)
             .truncationMode(.tail)
             .frame(maxWidth: maxWidth, alignment: .leading)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(.quaternary.opacity(0.4), in: Capsule())
+            .padding(.horizontal, Space.p8)
+            .padding(.vertical, Space.p4)
+            .background(.quaternary.opacity(Opacity.o40), in: Capsule())
             .help(help ?? text)
     }
 
@@ -3781,7 +3781,7 @@ public struct AIPanelView: View {
         .help(model.transmissionLabel)
         .accessibilityLabel(model.transmissionLabel)
         .popover(isPresented: $showContextInfo, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: Space.p8) {
                 Text(model.transmissionLabel)
                     .font(.caption.weight(.semibold))
                 Text(model.transmissionDetail)
@@ -3802,15 +3802,15 @@ public struct AIPanelView: View {
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
-            .frame(width: 280, alignment: .leading)
-            .padding(12)
+            .frame(width: Size.popoverWidth, alignment: .leading)
+            .padding(Space.p12)
         }
     }
 
     // MARK: Composer
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.p4) {
             ZStack(alignment: .topLeading) {
                 ActivatingTextView(
                     text: $model.question,
@@ -3830,13 +3830,13 @@ public struct AIPanelView: View {
                             : "Ask about this page…")
                         .font(.body)
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 6)
+                        .padding(.horizontal, Space.p6)
+                        .padding(.vertical, Space.p6)
                         .allowsHitTesting(false)
                 }
             }
             .frame(height: composerHeight)
-            HStack(alignment: .center, spacing: 8) {
+            HStack(alignment: .center, spacing: Space.p8) {
                 scopeMenu
                 Text("⌘↩ Send · ↩ New line")
                     .font(.caption2)
@@ -3847,8 +3847,8 @@ public struct AIPanelView: View {
                         model.stopAnswer()
                     } label: {
                         Image(systemName: "stop.fill")
-                            .font(.system(size: 12, weight: .semibold))
-                            .frame(width: 28, height: 28)
+                            .font(Type.callout).fontWeight(.semibold)
+                            .frame(width: Size.controlSquare, height: Size.controlSquare)
                     }
                     .buttonStyle(.borderedProminent)
                     .buttonBorderShape(.circle)
@@ -3860,14 +3860,14 @@ public struct AIPanelView: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Space.p12)
+        .padding(.vertical, Space.p10)
         .background(
-            Color.primary.opacity(0.055),
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            Color.primary.opacity(Opacity.o5),
+            in: RoundedRectangle(cornerRadius: Radius.r18, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(dividerColor, lineWidth: 0.5))
+            RoundedRectangle(cornerRadius: Radius.r18, style: .continuous)
+                .strokeBorder(dividerColor, lineWidth: Metrics.badgeLine))
     }
 
     /// The composer's scope control: what the answer covers. Its collapsed
@@ -3917,20 +3917,20 @@ public struct AIPanelView: View {
                         + "Capture more pages to include them.")
             }
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: Space.p4) {
                 Image(systemName: model.scope.symbolName)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(Type.caption).fontWeight(.medium)
                 Text(model.scope.shortName)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Type.footnote).fontWeight(.medium)
                 Image(systemName: "chevron.up")
-                    .font(.system(size: 7, weight: .semibold))
+                    .font(Type.micro)
             }
             .foregroundStyle(
                 model.scope == .currentPage
                     ? Color.secondary : Color.accentColor)
-            .padding(.horizontal, 8)
-            .frame(height: 28)
-            .background(Color.primary.opacity(0.06), in: Capsule())
+            .padding(.horizontal, Space.p8)
+            .frame(height: Size.controlHeight)
+            .background(Color.primary.opacity(Opacity.o5), in: Capsule())
             .contentShape(Capsule())
         }
         .menuStyle(.borderlessButton)
@@ -3942,13 +3942,13 @@ public struct AIPanelView: View {
 
     /// One capsule: Send on the left, the quick-action menu on the chevron.
     private var sendControl: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: Space.p0) {
             Button {
                 model.send()
             } label: {
                 Image(systemName: "arrow.up")
-                    .font(.system(size: 12, weight: .bold))
-                    .frame(width: 30, height: 28)
+                    .font(Type.callout).fontWeight(.bold)
+                    .frame(width: Size.compactButtonWidth, height: Size.controlHeight)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -3963,8 +3963,8 @@ public struct AIPanelView: View {
                         ? "Type a question first" : "Wait for the current answer")
             .accessibilityLabel("Send")
             Rectangle()
-                .fill(Color.white.opacity(0.25))
-                .frame(width: 0.5, height: 14)
+                .fill(Color.white.opacity(Opacity.o25))
+                .frame(width: Size.ruleWidth, height: Size.ruleHeight)
             quickActionsMenu
         }
         .foregroundStyle(.white)
@@ -3987,7 +3987,7 @@ public struct AIPanelView: View {
     }
 
     private var statusLine: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: Space.p3) {
             if let note = model.sendNote {
                 Text(note)
                     .font(.caption2)
@@ -4020,7 +4020,7 @@ public struct AIPanelView: View {
                     .controlSize(.small)
             }
             if model.transcriptRefreshing {
-                HStack(spacing: 6) {
+                HStack(spacing: Space.p6) {
                     ProgressView().controlSize(.small)
                     Text("Refreshing the transcript…")
                         .font(.caption2)
@@ -4028,7 +4028,7 @@ public struct AIPanelView: View {
                 }
             }
             if model.compactionRemoving {
-                HStack(spacing: 6) {
+                HStack(spacing: Space.p6) {
                     ProgressView().controlSize(.small)
                     Text("Removing the conversation summary…")
                         .font(.caption2)
@@ -4036,7 +4036,7 @@ public struct AIPanelView: View {
                 }
             }
             if model.compactionRefreshing {
-                HStack(spacing: 6) {
+                HStack(spacing: Space.p6) {
                     ProgressView().controlSize(.small)
                     Text("Refreshing the conversation…")
                         .font(.caption2)
@@ -4056,7 +4056,7 @@ public struct AIPanelView: View {
                 .controlSize(.small)
             }
             if case .running = model.compactionState {
-                HStack(spacing: 6) {
+                HStack(spacing: Space.p6) {
                     ProgressView().controlSize(.small)
                     Text("Summarizing earlier turns…")
                         .font(.caption2)
@@ -4070,7 +4070,7 @@ public struct AIPanelView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let warning = model.contextWarning {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: Space.p6) {
                     Text(warning)
                         .font(.caption2)
                         .foregroundStyle(Theme.warning)
@@ -4086,7 +4086,7 @@ public struct AIPanelView: View {
                     .foregroundStyle(Theme.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(spacing: 6) {
+            HStack(spacing: Space.p6) {
                 Image(systemName: "info.circle")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -4110,7 +4110,7 @@ public struct AIPanelView: View {
     private var separator: some View {
         Rectangle()
             .fill(dividerColor)
-            .frame(height: 0.5)
+            .frame(height: Size.ruleWidth)
     }
 
     /// The same hairline the panel's border uses, so a themed panel keeps one
@@ -4118,8 +4118,8 @@ public struct AIPanelView: View {
     private var dividerColor: Color {
         model.theme.map {
             $0.isDark
-                ? Color.white.opacity(0.14) : Color.black.opacity(0.12)
-        } ?? Color(nsColor: .separatorColor).opacity(0.6)
+                ? Color.white.opacity(Opacity.o14) : Color.black.opacity(Opacity.o10)
+        } ?? Color(nsColor: .separatorColor).opacity(Opacity.o60)
     }
 }
 
@@ -4147,8 +4147,8 @@ private struct QuickActionsMenu: View {
             }
         } label: {
             Image(systemName: "chevron.down")
-                .font(.system(size: 8, weight: .bold))
-                .frame(width: 22, height: 28)
+                .font(Type.micro).fontWeight(.bold)
+                .frame(width: Size.iconButtonWidth, height: Size.controlHeight)
                 .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
@@ -4168,7 +4168,7 @@ private struct QuickActionsRow: View {
     let perform: (AIAction) -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Space.p8) {
             ForEach(actions.prefix(4), id: \.self) { action in
                 Button {
                     perform(action)
@@ -4180,7 +4180,7 @@ private struct QuickActionsRow: View {
                 .disabled(!canRun)
             }
         }
-        .padding(.top, 2)
+        .padding(.top, Space.p2)
     }
 }
 
@@ -4498,7 +4498,7 @@ struct MarkdownText: View {
     var body: some View {
         // Breathing room between blocks: a wall of paragraphs at 8 pt reads as
         // one block; 12 lets a heading, a paragraph and a list read as three.
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.p12) {
             ForEach(
                 Array(MarkdownBlocks.parse(text).enumerated()), id: \.offset
             ) { _, block in
@@ -4518,20 +4518,20 @@ struct MarkdownText: View {
                     .rounded(),
                 bold: true)
                 .lineSpacing(lineSpacing)
-                .padding(.top, 4)
+                .padding(.top, Space.p4)
         case .paragraph(let text):
             inline(text, size: size).lineSpacing(lineSpacing)
         case .list(let items):
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Space.p4) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: Space.p6) {
                         Text(
                             item.number.map { "\($0)." } ?? "•"
                         )
                         .font(font())
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
-                        .frame(minWidth: 14, alignment: .trailing)
+                        .frame(minWidth: Size.gutterMinWidth, alignment: .trailing)
                         inline(item.text, size: size)
                             .lineSpacing(lineSpacing)
                     }
@@ -4539,10 +4539,10 @@ struct MarkdownText: View {
                 }
             }
         case .quote(let text):
-            HStack(alignment: .top, spacing: 8) {
+            HStack(alignment: .top, spacing: Space.p8) {
                 Rectangle()
                     .fill(.quaternary)
-                    .frame(width: 2)
+                    .frame(width: Size.indicatorWidth)
                 inline(text, size: size)
                     .foregroundStyle(.secondary)
                     .lineSpacing(lineSpacing)
@@ -4551,12 +4551,12 @@ struct MarkdownText: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(text)
                     .font(.system(size: max(11, size - 1), design: .monospaced))
-                    .padding(8)
+                    .padding(Space.p8)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(
-                .quaternary.opacity(0.4),
-                in: RoundedRectangle(cornerRadius: 6))
+                .quaternary.opacity(Opacity.o40),
+                in: RoundedRectangle(cornerRadius: Radius.r6))
         case .table(let header, let rows):
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
                 GridRow {
@@ -4574,12 +4574,12 @@ struct MarkdownText: View {
                     }
                 }
             }
-            .padding(6)
+            .padding(Space.p6)
             .background(
-                .quaternary.opacity(0.3),
-                in: RoundedRectangle(cornerRadius: 6))
+                .quaternary.opacity(Opacity.o30),
+                in: RoundedRectangle(cornerRadius: Radius.r6))
         case .rule:
-            Divider().padding(.vertical, 2)
+            Divider().padding(.vertical, Space.p2)
         }
     }
 
@@ -4643,9 +4643,9 @@ struct QuickPageCaptureView: View {
     @State private var saveError: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Space.p12) {
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: Space.p2) {
                     Text("Captured Page")
                         .font(.headline)
                     Text(
@@ -4661,8 +4661,8 @@ struct QuickPageCaptureView: View {
             Image(decorative: capture.image, scale: 1)
                 .resizable()
                 .scaledToFit()
-                .frame(maxHeight: 520)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .frame(maxHeight: Size.previewMaxHeight)
+                .clipShape(RoundedRectangle(cornerRadius: Radius.r8))
             if capture.textSource == .ocr {
                 Text("Read with OCR — check the text before relying on it.")
                     .font(.caption)
@@ -4675,14 +4675,14 @@ struct QuickPageCaptureView: View {
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 180)
+                .frame(maxHeight: Size.textPreviewMaxHeight)
             }
             if let saveError {
                 Text(saveError)
                     .font(.caption)
                     .foregroundStyle(Theme.warning)
             }
-            HStack(spacing: 8) {
+            HStack(spacing: Space.p8) {
                 Button("Copy Image") { copyImage() }
                 Button("Save Image…") { saveImage() }
                 if !capture.text.isEmpty {
@@ -4703,8 +4703,8 @@ struct QuickPageCaptureView: View {
             }
             .controlSize(.small)
         }
-        .padding(16)
-        .frame(minWidth: 520, minHeight: 480)
+        .padding(Space.p16)
+        .frame(minWidth: Size.quickPageWidth, minHeight: Size.quickPageHeight)
     }
 
     private var pngData: Data? {
@@ -4749,11 +4749,11 @@ struct QuestionBubble: View {
             Text(text)
                 .font(compact ? .callout : .body)
                 .textSelection(.enabled)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.horizontal, Space.p12)
+                .padding(.vertical, Space.p8)
                 .background(
-                    Color.accentColor.opacity(0.16),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    Color.accentColor.opacity(Opacity.o15),
+                    in: RoundedRectangle(cornerRadius: Radius.r14, style: .continuous))
                 .accessibilityLabel("Asked: \(text)")
         }
     }

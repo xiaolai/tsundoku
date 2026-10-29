@@ -55,7 +55,7 @@ private struct CardSurface: ViewModifier {
     /// is how a "dark" card came out white.
     private var paper: Color {
         scheme == .dark
-            ? Color(red: 0.145, green: 0.145, blue: 0.157)
+            ? Surface.paperDark
             : Color(nsColor: .textBackgroundColor)
     }
 
@@ -73,7 +73,7 @@ private struct CardSurface: ViewModifier {
             .overlay {
                 shape.strokeBorder(
                     Color.primary.opacity(scheme == .dark ? 0.18 : 0.13),
-                    lineWidth: 0.75)
+                    lineWidth: Metrics.borderLine)
             }
             .padding(.horizontal, inset)
             .offset(y: drop)
@@ -99,7 +99,7 @@ private struct CardSurface: ViewModifier {
             }
             .overlay {
                 shape.strokeBorder(
-                    selected ? rule : rule.opacity(0.75),
+                    selected ? rule : rule.opacity(Opacity.o75),
                     lineWidth: selected ? 1.6 : 1)
             }
             // A card sits on the page, not in it: a soft contact shadow and a

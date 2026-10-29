@@ -236,26 +236,30 @@ struct CoverPressureTests {
     func cancelledRowStops() async throws {
         let directory = try directory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let state = FetchState()
+        let gate = Gate()
         let store = BookCoverStore(
             cacheDirectory: directory, booksPaths: .standard(),
             parallelism: 1,
             fetch: { _ in
-                state.bump()
-                try? await Task.sleep(for: .milliseconds(300))
+                await gate.arriveAndWait()
                 return .absent
             })
-        // Occupy the only permit, then cancel a queued row.
+        // Occupies the only permit until the gate opens.
         let first = Task { await store.thumbnail(for: book("B0BLOCK")) }
-        try await Task.sleep(for: .milliseconds(40))
+        await gate.waitForArrival()
+        // Queue a second row without a sleep: wait until the store says it
+        // is waiting.
         let second = Task { await store.thumbnail(for: book("B0QUEUED")) }
-        try await Task.sleep(for: .milliseconds(40))
+        while await store.waitingCount == 0 {
+            await Task.yield()
+        }
         second.cancel()
+        await gate.open()
         _ = await first.value
         _ = await second.value
-        // The cancelled row must not have reached the fetch: two fetches
-        // would mean it downloaded anyway.
-        #expect(state.value == 1, "a cancelled row fetched anyway")
+        #expect(
+            await gate.arrivals == 1,
+            "a cancelled row fetched anyway")
     }
 
     @Test("a 200 that is not an image is retried, not remembered")
@@ -276,6 +280,34 @@ struct CoverPressureTests {
         #expect(
             await store.thumbnail(for: book("B0HTML")) != nil,
             "an error page is not an absence")
+    }
+}
+
+/// One fetch can start, report that it started, and wait to be released.
+/// Staging a queue with sleeps makes the test fail under load, which teaches
+/// nothing about the code.
+private actor Gate {
+    private var arrived = false
+    private var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var release: CheckedContinuation<Void, Never>?
+    private(set) var arrivals = 0
+
+    func arriveAndWait() async {
+        arrivals += 1
+        arrived = true
+        for waiter in arrivalWaiters { waiter.resume() }
+        arrivalWaiters = []
+        await withCheckedContinuation { release = $0 }
+    }
+
+    func waitForArrival() async {
+        if arrived { return }
+        await withCheckedContinuation { arrivalWaiters.append($0) }
+    }
+
+    func open() {
+        release?.resume()
+        release = nil
     }
 }
 
