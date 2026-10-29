@@ -10,8 +10,6 @@ public struct HighlightsView: View {
     @AppStorage("browser.inspector") private var showInspector = false
     @AppStorage("browser.excerptLines") private var excerptLines = 6
     @AppStorage("browser.readingSize") private var readingSize = 14
-    @AppStorage("browser.randomBorders") private var randomBorders = false
-    @AppStorage("browser.borderSeed") private var borderSeed = 0
     @State private var kind: AnnotationKindScope = .all
     @State private var contentOnly = false
     @State private var sort: AnnotationSort = .newest
@@ -244,12 +242,6 @@ public struct HighlightsView: View {
                     }
                 }
                 Menu {
-                    Toggle("Random Border Colors", isOn: $randomBorders)
-                    if randomBorders {
-                        Button("Shuffle Border Colors") {
-                            borderSeed = Int.random(in: 1...Int.max)
-                        }
-                    }
                     Toggle("With Passage or Note Text", isOn: $contentOnly)
                     Picker("Reading Text Size", selection: $readingSize) {
                         Text("Standard").tag(14)
@@ -311,8 +303,6 @@ public struct HighlightsView: View {
                                 AnnotationCard(
                                     row: row,
                                     selected: selection.contains(row.id),
-                                    randomBorders: randomBorders,
-                                    borderSeed: borderSeed,
                                     showBookMetadata: bookID == nil,
                                     readingSize: CGFloat(
                                         max(13, min(28, readingSize))),
@@ -339,6 +329,9 @@ public struct HighlightsView: View {
                     gridMetrics.width = $0
                 }
             }
+            // Cards are white paper; they need a page that is not white, or
+            // their stacking and their edges disappear.
+            .background(Color(nsColor: .underPageBackgroundColor))
             .focusable()
             .onMoveCommand { direction in
                 guard !rows.isEmpty else { return }
@@ -825,21 +818,13 @@ struct AICardView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            .quaternary.opacity(0.28),
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(
-                    Color.accentColor.opacity(0.25), lineWidth: 0.8))
+        .cardSurface(identity: "ai-\(card.id)")
     }
 }
 
 struct AnnotationCard: View {
     let row: AnnotationTableRow
     let selected: Bool
-    let randomBorders: Bool
-    let borderSeed: Int
     let showBookMetadata: Bool
     @Environment(\.colorScheme) private var colorScheme
     let readingSize: CGFloat
@@ -847,21 +832,6 @@ struct AnnotationCard: View {
     let select: () -> Void
     let inspect: () -> Void
     @State private var expanded = false
-
-    private var borderColor: Color {
-        guard randomBorders else { return Color(nsColor: .separatorColor) }
-        let palette: [Color] = [
-            .blue, .teal, .mint, .indigo, .purple, .pink, .orange,
-        ]
-        // A seeded assignment looks random but never flickers during view updates.
-        let hash = row.id.utf8.reduce(
-            UInt64(truncatingIfNeeded: borderSeed) ^ 14_695_981_039_346_656_037
-        ) {
-            ($0 ^ UInt64($1)) &* 1_099_511_628_211
-        }
-        return palette[Int(hash % UInt64(palette.count))].opacity(
-            colorScheme == .dark ? 0.85 : 0.65)
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -960,19 +930,7 @@ struct AnnotationCard: View {
         .padding(16).frame(
             maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading
         )
-        .background(
-            Color(nsColor: .controlBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 12)
-        )
-        .shadow(
-            color: .black.opacity(colorScheme == .dark ? 0.22 : 0.07),
-            radius: 5, x: 0, y: 2
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12).strokeBorder(
-                selected ? Color.accentColor : borderColor,
-                lineWidth: selected ? 2 : (randomBorders ? 1 : 0.5))
-        )
+        .cardSurface(identity: self.row.id, selected: selected)
         // Selection lives on the card's own surface, not on its text: a
         // drag across a passage must select the words, not the card.
         .background(
