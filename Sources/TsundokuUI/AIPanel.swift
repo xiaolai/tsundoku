@@ -1699,15 +1699,17 @@ public final class AIPanelModel: ObservableObject {
                 compactedForSend ? nil
                 : (attemptedAutoCompaction ? self.promptProjection()
                     : projectionAtCompose)
-            // Compaction can take a while, and a chapter turn during it is
-            // not a conversation change: the passage resolved above belongs
-            // to the page this request started on. Checking the page again
-            // is what keeps a chapter-1 passage from being sent with
-            // chapter-2 metadata.
-            guard self.bookKey == bookAtSend,
-                self.pageText == pageAtSend,
-                self.localResultGeneration == resultGeneration
-            else {
+            // Only a send that actually waited on compaction needs the page
+            // checked again: that await is the one window where a chapter
+            // turn can slip in, and a chapter-1 passage must not be sent
+            // with chapter-2 metadata. Re-checking unconditionally would add
+            // a second abort point to every send, which is how a send that
+            // raced the follow loop began to fail under load.
+            if attemptedAutoCompaction,
+                self.bookKey != bookAtSend
+                    || self.pageText != pageAtSend
+                    || self.localResultGeneration != resultGeneration
+            {
                 self.sendNote =
                     "The reader moved while the passage was prepared; send "
                     + "again for the current page."

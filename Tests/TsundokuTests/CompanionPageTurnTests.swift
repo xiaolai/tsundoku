@@ -1326,6 +1326,12 @@ struct CompanionPageTurnTests {
         #expect(!chapter.pageText.contains("Other chapter body text."))
         #expect(panelModel.sendNote?.contains("sent instead") != true)
         await awaitPersistence(panelModel)
+        // Let the follow of the first send settle before sending again: a
+        // page update that lands mid-send moves the page generation, and the
+        // send correctly aborts with "the reader moved". Under load that
+        // window is wide enough to fail, which is what happened in the 1.5.7
+        // release build.
+        await panelModel.awaitPageLoad()
 
         await sendWhenReady(
             panelModel, scope: .wholeBook, question: "Summarize the book")

@@ -13,6 +13,13 @@ private actor AnswerCounter {
     }
 }
 
+/// A liveness bound for a local write, not a performance assertion: a poll
+/// returns the moment its condition holds, and the bound only decides how
+/// long a real failure is allowed to look like slowness. Three seconds was
+/// enough on an idle machine and not enough with three suites competing for
+/// one CPU.
+private let writeDeadline = Duration.seconds(15)
+
 @MainActor
 @Suite("Chat history and compaction panel", .serialized, .timeLimit(.minutes(1)))
 struct AIPanelHistoryTests {
@@ -99,7 +106,7 @@ struct AIPanelHistoryTests {
     private func waitForCompaction(
         _ panel: AIPanelModel
     ) async -> ConversationCompaction? {
-        let deadline = ContinuousClock.now + .seconds(3)
+        let deadline = ContinuousClock.now + writeDeadline
         while panel.compaction == nil, ContinuousClock.now < deadline {
             do {
                 try await Task.sleep(for: .milliseconds(20))
@@ -179,7 +186,7 @@ struct AIPanelHistoryTests {
         defer { panel.cancel() }
 
         panel.compactConversation()
-        let deadline = ContinuousClock.now + .seconds(3)
+        let deadline = ContinuousClock.now + writeDeadline
         while !isFailed(panel.compactionState),
             ContinuousClock.now < deadline
         {
@@ -214,7 +221,7 @@ struct AIPanelHistoryTests {
         #expect(panel.canCompact)
 
         panel.compactConversation()
-        let deadline = ContinuousClock.now + .seconds(3)
+        let deadline = ContinuousClock.now + writeDeadline
         while !isFailed(panel.compactionState),
             ContinuousClock.now < deadline
         {
@@ -251,7 +258,7 @@ struct AIPanelHistoryTests {
         panel.question = "next question"
         panel.run()
         let result = await waitForCompaction(panel)
-        let deadline = ContinuousClock.now + .seconds(3)
+        let deadline = ContinuousClock.now + writeDeadline
         while ContinuousClock.now < deadline {
             if await counter.value >= 1 { break }
             try await Task.sleep(for: .milliseconds(20))
@@ -286,7 +293,7 @@ struct AIPanelHistoryTests {
         defer { panel.cancel() }
         panel.question = "next question"
         panel.run()
-        let deadline = ContinuousClock.now + .seconds(3)
+        let deadline = ContinuousClock.now + writeDeadline
         while !isFailed(panel.compactionState),
             ContinuousClock.now < deadline
         {
@@ -314,7 +321,7 @@ struct AIPanelHistoryTests {
         panel.failNextPersistenceForTesting = true
         panel.question = "save me"
         panel.run()
-        let deadline = ContinuousClock.now + .seconds(3)
+        let deadline = ContinuousClock.now + writeDeadline
         while !panel.canRetrySave, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -322,7 +329,7 @@ struct AIPanelHistoryTests {
         #expect(panel.saveError != nil)
 
         panel.retrySave()
-        let retryDeadline = ContinuousClock.now + .seconds(3)
+        let retryDeadline = ContinuousClock.now + writeDeadline
         while (panel.canRetrySave || panel.persisting),
             ContinuousClock.now < retryDeadline
         {
@@ -336,7 +343,7 @@ struct AIPanelHistoryTests {
         panel.failNextPersistenceForTesting = true
         panel.question = "new chat drops this"
         panel.run()
-        let secondDeadline = ContinuousClock.now + .seconds(3)
+        let secondDeadline = ContinuousClock.now + writeDeadline
         while !panel.canRetrySave, ContinuousClock.now < secondDeadline {
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -361,7 +368,7 @@ struct AIPanelHistoryTests {
         panel.loadPage()
         await panel.awaitPageLoad()
         panel.compactConversation()
-        let deadline = ContinuousClock.now + .seconds(2)
+        let deadline = ContinuousClock.now + writeDeadline
         while panel.compactionState != .running,
             ContinuousClock.now < deadline
         {
@@ -420,7 +427,7 @@ struct AIPanelHistoryTests {
         defer { panel.cancel() }
         #expect(panel.conversationID == conversation.id)
         model.markConversationsDeleted([conversation.id])
-        let deadline = ContinuousClock.now + .seconds(2)
+        let deadline = ContinuousClock.now + writeDeadline
         while panel.conversationID != nil, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -468,7 +475,7 @@ struct AIPanelHistoryTests {
         panel.failNextPersistenceForTesting = true
         panel.question = "keep me"
         panel.run()
-        let deadline = ContinuousClock.now + .seconds(3)
+        let deadline = ContinuousClock.now + writeDeadline
         while !panel.canRetrySave, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -476,7 +483,7 @@ struct AIPanelHistoryTests {
 
         try archive.deleteConversations(ids: [conversation.id])
         model.markConversationsDeleted([conversation.id])
-        let resetDeadline = ContinuousClock.now + .seconds(2)
+        let resetDeadline = ContinuousClock.now + writeDeadline
         while panel.conversationID != nil,
             ContinuousClock.now < resetDeadline
         {
@@ -487,7 +494,7 @@ struct AIPanelHistoryTests {
         #expect(panel.saveError?.contains("deleted") == true)
 
         panel.retrySave()
-        let retryDeadline = ContinuousClock.now + .seconds(3)
+        let retryDeadline = ContinuousClock.now + writeDeadline
         while (panel.canRetrySave || panel.persisting),
             ContinuousClock.now < retryDeadline
         {
@@ -516,14 +523,14 @@ struct AIPanelHistoryTests {
         panel.failNextPersistenceForTesting = true
         panel.question = "keep me too"
         panel.run()
-        let deadline = ContinuousClock.now + .seconds(3)
+        let deadline = ContinuousClock.now + writeDeadline
         while !panel.canRetrySave, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
         #expect(panel.canRetrySave)
 
         panel.reviewCurrentChatDeletion()
-        let reviewDeadline = ContinuousClock.now + .seconds(3)
+        let reviewDeadline = ContinuousClock.now + writeDeadline
         while panel.deletionImpact == nil,
             ContinuousClock.now < reviewDeadline
         {
@@ -531,7 +538,7 @@ struct AIPanelHistoryTests {
         }
         #expect(panel.deletionImpact != nil)
         panel.deleteCurrentChat()
-        let deleteDeadline = ContinuousClock.now + .seconds(3)
+        let deleteDeadline = ContinuousClock.now + writeDeadline
         while panel.conversationID != nil,
             ContinuousClock.now < deleteDeadline
         {
@@ -541,7 +548,7 @@ struct AIPanelHistoryTests {
         #expect(panel.canRetrySave)
 
         panel.retrySave()
-        let retryDeadline = ContinuousClock.now + .seconds(3)
+        let retryDeadline = ContinuousClock.now + writeDeadline
         while (panel.canRetrySave || panel.persisting),
             ContinuousClock.now < retryDeadline
         {
@@ -569,7 +576,7 @@ struct AIPanelHistoryTests {
         panel.failNextPersistenceForTesting = true
         panel.question = "raced answer"
         panel.run()
-        let deadline = ContinuousClock.now + .seconds(3)
+        let deadline = ContinuousClock.now + writeDeadline
         while !panel.canRetrySave, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -579,7 +586,7 @@ struct AIPanelHistoryTests {
         // into the deleted row must not fail forever.
         try archive.deleteConversations(ids: [conversation.id])
         panel.retrySave()
-        let retargetDeadline = ContinuousClock.now + .seconds(3)
+        let retargetDeadline = ContinuousClock.now + writeDeadline
         while ContinuousClock.now < retargetDeadline {
             if panel.canRetrySave,
                 panel.saveError?.contains("deleted") == true
@@ -593,7 +600,7 @@ struct AIPanelHistoryTests {
         #expect(panel.conversationID == nil)
 
         panel.retrySave()
-        let retryDeadline = ContinuousClock.now + .seconds(3)
+        let retryDeadline = ContinuousClock.now + writeDeadline
         while (panel.canRetrySave || panel.persisting),
             ContinuousClock.now < retryDeadline
         {
@@ -634,7 +641,7 @@ struct AIPanelHistoryTests {
 
         panel.question = "unsaved question"
         panel.run()
-        let deadline = ContinuousClock.now + .seconds(3)
+        let deadline = ContinuousClock.now + writeDeadline
         while panel.turns.isEmpty, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -667,7 +674,7 @@ struct AIPanelHistoryTests {
             [.integer(conversation.id)])
         model.settings.chatRetentionDays = 30
         model.reviewChatRetention()
-        let reviewDeadline = ContinuousClock.now + .seconds(3)
+        let reviewDeadline = ContinuousClock.now + writeDeadline
         while model.retentionImpact == nil,
             ContinuousClock.now < reviewDeadline
         {
@@ -676,7 +683,7 @@ struct AIPanelHistoryTests {
         #expect(model.retentionImpact?.conversations == 1)
 
         model.performChatRetention()
-        let deleteDeadline = ContinuousClock.now + .seconds(3)
+        let deleteDeadline = ContinuousClock.now + writeDeadline
         while !model.deletedConversationIDs.contains(conversation.id),
             ContinuousClock.now < deleteDeadline
         {
