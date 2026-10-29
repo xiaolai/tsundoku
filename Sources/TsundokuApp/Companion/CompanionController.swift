@@ -13,6 +13,11 @@ final class CompanionController {
     private let appModelFactory: () -> AppModel
 
     private var panelModel: AIPanelModel?
+    /// The typography this panel last resolved, per reader. A model is built
+    /// fresh on every open, and the reader's type only arrives after an
+    /// asynchronous sample; seeding the remembered style is what stops the
+    /// first frame being drawn at the fallback size and then jumping.
+    @MainActor private var styleMemory = StyleMemory()
     private var panelIdentity: ReaderIdentity?
     private var reader: ReaderSnapshot?
     private var pendingConversation:
@@ -544,6 +549,9 @@ final class CompanionController {
             context: ReaderContextLocator.context(for: reader.kind))
         panelModel = model
         panelIdentity = identity
+        let remembered = styleMemory.seed(for: reader.kind)
+        model.textStyle = remembered.style
+        model.theme = remembered.theme
         model.loadPage()
         // Reopening the panel is the moment a reader's font or theme change
         // becomes visible; the cache must not answer for the old appearance.
@@ -623,6 +631,7 @@ final class CompanionController {
             let theme = settings.matchReaderTheme
                 ? sampled?.theme.map(CompanionTheme.init)
                 : nil
+            self.styleMemory.remember(style, theme: theme, for: reader.kind)
             self.panelModel?.textStyle = style
             self.panelModel?.theme = theme
             guard let sampled else { return }
